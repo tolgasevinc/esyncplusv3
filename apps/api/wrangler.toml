@@ -1,3 +1,8 @@
 name = "project-v3-api"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "esync-db"
+database_id = "084b0070-ef9c-40f2-a34e-2a78356adb94"
