@@ -7,3 +7,9 @@ binding = "DB"
 database_name = "esync-db"
 database_id = "084b0070-ef9c-40f2-a34e-2a78356adb94"
 migrations_dir = "migrations"
+
+# R2 Storage - döküman, resim, video
+# Önce bucket oluşturun: npx wrangler r2 bucket create esync-storage
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "esync-storage"
