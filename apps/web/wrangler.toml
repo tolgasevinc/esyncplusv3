@@ -1,2 +1,5 @@
 name = "project-v3-web"
-pages_build_output_dir = "./dist"
+compatibility_date = "2024-11-01"
+
+# Cloudflare Pages için: pnpm deploy komutu dist/ klasörünü deploy eder
+# wrangler pages deploy dist

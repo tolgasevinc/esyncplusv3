@@ -1,8 +1,8 @@
-# Project V3 - Full-stack Monorepo
+# Project V3
 
-Hono (Backend) ve Vite + React (Frontend) ile Cloudflare üzerinde çalışan monorepo projesi.
+Cloudflare üzerinde çalışan Hono (API) + Vite (React) full-stack monorepo projesi.
 
-## Proje Yapısı
+## Yapı
 
 ```
 project-v3/
@@ -10,51 +10,46 @@ project-v3/
 │   ├── api/          # Hono - Cloudflare Workers
 │   └── web/          # Vite + React + Tailwind + Shadcn - Cloudflare Pages
 ├── package.json
-└── pnpm-workspace.yaml
+├── pnpm-workspace.yaml
+└── README.md
 ```
 
 ## Kurulum
 
 ```bash
+# pnpm ile (önerilen - pnpm-workspace.yaml kullanır)
 pnpm install
+
+# veya npm ile (workspaces destekler)
+npm install
 ```
+
+> **Not:** pnpm kullanıyorsanız `pnpm run dev`, `pnpm run dev:api` gibi komutları kullanabilirsiniz.
 
 ## Geliştirme
 
-Tüm uygulamaları aynı anda çalıştır:
 ```bash
-pnpm dev
-```
+# Her iki uygulamayı aynı anda çalıştır
+npm run dev
 
-Sadece API (http://localhost:8787):
-```bash
-pnpm dev:api
-```
+# Sadece API (http://localhost:8787)
+npm run dev:api
 
-Sadece Web (http://localhost:5173):
-```bash
-pnpm dev:web
-```
-
-## Build
-
-```bash
-pnpm build
+# Sadece Web (http://localhost:5173)
+npm run dev:web
 ```
 
 ## Deploy
 
-Cloudflare hesabınızla deploy etmek için:
-
 ```bash
-# API (Workers)
-cd apps/api && pnpm deploy
+# API - Cloudflare Workers
+npm run deploy:api
 
-# Web (Pages)
-cd apps/web && pnpm deploy
+# Web - Cloudflare Pages
+npm run deploy:web
 ```
 
-## API Endpoints
+## Teknolojiler
 
-- `GET /` - Hello World metni
-- `GET /api/hello` - JSON response
+- **API**: Hono, Cloudflare Workers, Wrangler
+- **Web**: Vite, React, TypeScript, Tailwind CSS, Shadcn UI
