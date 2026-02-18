@@ -730,6 +730,68 @@ app.get('/storage/serve', async (c) => {
   }
 });
 
+// ========== APP SETTINGS ==========
+app.get('/api/app-settings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const category = c.req.query('category');
+    if (!category) return c.json({ error: 'category gerekli' }, 400);
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND status = 1`
+    ).bind(category).all();
+
+    const settings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    return c.json(settings);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/app-settings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ category: string; settings: Record<string, string> }>();
+    const { category, settings } = body;
+    if (!category?.trim() || !settings || typeof settings !== 'object') {
+      return c.json({ error: 'category ve settings gerekli' }, 400);
+    }
+
+    for (const [key, value] of Object.entries(settings)) {
+      if (!key?.trim()) continue;
+      const val = value ?? '';
+      const existing = await c.env.DB.prepare(
+        `SELECT id FROM app_settings WHERE category = ? AND key = ? AND is_deleted = 0`
+      ).bind(category.trim(), key.trim()).first();
+
+      if (existing) {
+        await c.env.DB.prepare(
+          `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = ? AND key = ?`
+        ).bind(val, category.trim(), key.trim()).run();
+      } else {
+        await c.env.DB.prepare(
+          `INSERT INTO app_settings (category, key, value) VALUES (?, ?, ?)`
+        ).bind(category.trim(), key.trim(), val).run();
+      }
+    }
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND status = 1`
+    ).bind(category.trim()).all();
+
+    const out: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) out[r.key] = r.value ?? '';
+    }
+    return c.json(out);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 // Görsel URL proxy (CORS bypass - linkten indir için)
 app.get('/storage/proxy-image', async (c) => {
   try {

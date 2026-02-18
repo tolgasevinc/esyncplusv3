@@ -49,7 +49,22 @@ npm run deploy:api
 npm run deploy:web
 ```
 
+## R2 Storage Kurulumu
+
+Döküman, resim ve video depolama için R2 bucket oluşturun:
+
+```bash
+cd apps/api
+npx wrangler r2 bucket create esync-storage
+```
+
+Migration'ı çalıştırın (storage_folders tablosu):
+
+```bash
+npx wrangler d1 migrations apply esync-db --remote
+```
+
 ## Teknolojiler
 
-- **API**: Hono, Cloudflare Workers, Wrangler
+- **API**: Hono, Cloudflare Workers, D1, R2, Wrangler
 - **Web**: Vite, React, TypeScript, Tailwind CSS, Shadcn UI
