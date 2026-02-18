@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && wrangler pages deploy dist"
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=${CLOUDFLARE_PAGES_PROJECT_NAME:-esyncplusv3}"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",

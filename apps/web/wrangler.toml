@@ -2,6 +2,5 @@ name = "esyncplusv3"
 compatibility_date = "2024-11-01"
 pages_build_output_dir = "dist"
 
-# 10001 auth hatası için: account_id ekleyin (Cloudflare Dashboard > Workers & Pages > Overview'dan alın)
-# veya: export CLOUDFLARE_ACCOUNT_ID="your-account-id"
-account_id = "4924299dfe42e0a7a52dd72f0a8e4c4f"
+# Proje adı Cloudflare'da değiştiyse: CLOUDFLARE_PAGES_PROJECT_NAME=yeni-ad npm run deploy:web
+# Veya bu name değerini yeni proje adıyla güncelleyin.

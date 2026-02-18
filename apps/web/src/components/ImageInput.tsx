@@ -66,7 +66,6 @@ async function processToSquare(
 ): Promise<Blob> {
   const w = img.naturalWidth
   const h = img.naturalHeight
-  const size = Math.max(w, h, targetSize)
 
   const canvas = document.createElement('canvas')
   canvas.width = targetSize
@@ -194,8 +193,6 @@ export function ImageInput({
     setUploading(true)
     setError(null)
     try {
-      const res = await fetch(linkPreview)
-      const blob = await res.blob()
       const img = new Image()
       img.src = linkPreview
       await new Promise<void>((r) => { img.onload = () => r() })

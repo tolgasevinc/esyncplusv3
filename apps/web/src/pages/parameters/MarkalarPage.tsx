@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Tag, Search, Plus, X, Pencil, Trash2 } from 'lucide-react'
+import { Search, Plus, X, Pencil, Trash2 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
