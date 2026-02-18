@@ -28,21 +28,11 @@ app.get('/tables', async (c) => {
   }
 });
 
-app.get('/', async (c) => {
-  try {
-    if (!c.env.DB) {
-      return c.json(
-        { error: 'Veritabanı bağlantısı (Binding) bulunamadı!' },
-        500,
-      );
-    }
-
-    const { results } = await c.env.DB.prepare('SELECT * FROM users').all();
-    return c.json(results);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Bilinmeyen hata';
-    return c.json({ error: message }, 500);
-  }
-});
+app.get('/', (c) =>
+  c.json({
+    message: 'Project V3 API',
+    endpoints: ['/health', '/tables'],
+  }),
+);
 
 export default app;
