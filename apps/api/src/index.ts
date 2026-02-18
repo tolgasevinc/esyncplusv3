@@ -1,7 +1,14 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 
-const app = new Hono()
+<{ Bindings: { DB: D1Database } }>()
 
-app.get('/', (c) => c.json({ message: 'Hello from Hono API!' }))
+// Tüm isteklere izin ver
+app.use('/*', cors())
+
+app.get('/', async (c) => {
+const { results } = await c.env.DB.prepare("SELECT * FROM users").all();
+return c.json(results);
+})
 
 export default app
