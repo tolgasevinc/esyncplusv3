@@ -1073,6 +1073,8 @@ app.post('/api/transfer/execute', async (c) => {
 
       let inserted = 0;
       let updated = 0;
+      const isAppSettings = targetTable === 'app_settings';
+
       for (let rowIndex = 0; rowIndex < selected.length; rowIndex++) {
         const row = selected[rowIndex];
         let values = allEntries.map(([s, t]) => {
@@ -1088,6 +1090,32 @@ app.post('/api/transfer/execute', async (c) => {
           if (def != null && (v == null || (typeof v === 'string' && !v.trim()))) return def(rowIndex);
           return v;
         });
+
+        if (isAppSettings) {
+          const catIdx = allTargetCols.findIndex((c) => String(c).toLowerCase() === 'category');
+          const keyIdx = allTargetCols.findIndex((c) => String(c).toLowerCase() === 'key');
+          const cat = (catIdx >= 0 ? values[catIdx] : null) ?? '';
+          const k = (keyIdx >= 0 ? values[keyIdx] : null) ?? '';
+          if (!String(cat).trim() || !String(k).trim()) continue;
+          const existing = await c.env.DB.prepare(
+            `SELECT id FROM app_settings WHERE category = ? AND "key" = ? AND is_deleted = 0`
+          ).bind(String(cat).trim(), String(k).trim()).first();
+          const valIdx = allTargetCols.findIndex((c) => String(c).toLowerCase() === 'value');
+          const val = valIdx >= 0 ? values[valIdx] : '';
+          if (existing) {
+            await c.env.DB.prepare(
+              `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE id = ?`
+            ).bind(val ?? '', (existing as { id: number }).id).run();
+            updated++;
+          } else {
+            await c.env.DB.prepare(
+              `INSERT INTO app_settings (category, "key", value) VALUES (?, ?, ?)`
+            ).bind(String(cat).trim(), String(k).trim(), val ?? '').run();
+            inserted++;
+          }
+          continue;
+        }
+
         if (hasId) {
           const idIdx = allTargetCols.findIndex((c) => String(c).toLowerCase() === 'id');
           const idVal = values[idIdx];
