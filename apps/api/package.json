@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "mysql2": "^3.17.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
