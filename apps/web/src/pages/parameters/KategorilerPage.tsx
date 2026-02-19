@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search, Plus, X, Pencil, Trash2 } from 'lucide-react'
+import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -13,9 +14,11 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
+import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 interface ProductCategory {
   id: number
@@ -28,6 +31,7 @@ interface ProductCategory {
   image?: string
   icon?: string
   sort_order: number
+  status?: number
   created_at?: string
 }
 
@@ -47,6 +51,7 @@ const emptyForm = {
   group_id: '' as number | '',
   category_id: '' as number | '',
   sort_order: 0,
+  status: 1,
 }
 
 export function KategorilerPage() {
@@ -62,13 +67,14 @@ export function KategorilerPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const pageSize = 10
+  const [pageSize, setPageSize] = useState<PageSizeValue>(10)
   const hasFilter = search.length > 0
+  const limit = pageSize === 'fit' ? 9999 : pageSize
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(pageSize) })
+      const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
       const res = await fetch(`${API_URL}/api/product-categories?${params}`)
       const json = await res.json()
@@ -83,7 +89,7 @@ export function KategorilerPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, search])
+  }, [page, search, limit])
 
   useEffect(() => {
     fetchData()
@@ -91,7 +97,7 @@ export function KategorilerPage() {
 
   useEffect(() => {
     if (modalOpen) {
-      fetch(`${API_URL}/api/product-groups?limit=100`)
+      fetch(`${API_URL}/api/product-categories?group_id=0&limit=100`)
         .then((r) => r.json())
         .then((r) => setGroups(r.data || []))
         .catch(() => setGroups([]))
@@ -116,6 +122,7 @@ export function KategorilerPage() {
       group_id: item.group_id ?? '',
       category_id: item.category_id ?? '',
       sort_order: item.sort_order ?? 0,
+      status: item.status ?? 1,
     })
     setModalOpen(true)
   }
@@ -124,6 +131,11 @@ export function KategorilerPage() {
     setModalOpen(false)
     setEditingId(null)
     setForm(emptyForm)
+  }
+
+  function handleCopy() {
+    setEditingId(null)
+    setForm((f) => ({ ...f, name: f.name + ' (kopya)' }))
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -139,6 +151,7 @@ export function KategorilerPage() {
         code: form.code || form.name.slice(0, 2).toUpperCase(),
         group_id: form.group_id || undefined,
         category_id: form.category_id || undefined,
+        status: form.status,
       }
       const res = await fetch(url, {
         method,
@@ -159,7 +172,7 @@ export function KategorilerPage() {
     }
   }
 
-  async function handleDelete(id: number) {
+  async function handleDelete(id: number, onSuccess?: () => void) {
     if (!confirm('Bu kategoriyi silmek istediğinize emin misiniz?')) return
     try {
       const res = await fetch(`${API_URL}/api/product-categories/${id}`, { method: 'DELETE' })
@@ -167,6 +180,7 @@ export function KategorilerPage() {
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
       toastSuccess('Kategori silindi', 'Kategori başarıyla silindi.')
+      onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
     }
@@ -194,25 +208,35 @@ export function KategorilerPage() {
               className="pl-8 w-48 h-9"
             />
           </div>
-          <Button variant="outline" size="icon" title="Yeni kategori" onClick={openNew}>
-            <Plus className="h-4 w-4" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="icon" onClick={openNew}>
+                <Plus className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Yeni kategori</TooltipContent>
+          </Tooltip>
           {hasFilter && (
-            <Button variant="ghost" size="icon" onClick={() => { setSearch(''); setPage(1) }} title="Filtreleri sıfırla">
-              <X className="h-4 w-4" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={() => { setSearch(''); setPage(1) }}>
+                  <X className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Filtreleri sıfırla</TooltipContent>
+            </Tooltip>
           )}
         </div>
       }
       footerContent={
-        <div className="flex items-center gap-4">
-          <span>Toplam: {total} kayıt{hasFilter && ' (filtrelenmiş)'}</span>
-          <span className="text-muted-foreground">Sayfa {page} / {Math.max(1, Math.ceil(total / pageSize))}</span>
-          <div className="flex gap-1">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Önceki</Button>
-            <Button variant="outline" size="sm" disabled={page >= Math.ceil(total / pageSize)} onClick={() => setPage((p) => p + 1)}>Sonraki</Button>
-          </div>
-        </div>
+        <TablePaginationFooter
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(s) => { setPageSize(s); setPage(1) }}
+          hasFilter={hasFilter}
+        />
       }
     >
       <Card>
@@ -224,24 +248,23 @@ export function KategorilerPage() {
                   <th className="text-left p-3 font-medium">Kategori Adı</th>
                   <th className="text-left p-3 font-medium">Kod</th>
                   <th className="text-left p-3 font-medium">Grup</th>
-                  <th className="text-right p-3 font-medium w-28">İşlem</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz kategori kaydı yok.'}</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz kategori kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
-                    <tr key={item.id} className="border-b hover:bg-muted/30">
+                    <tr
+                      key={item.id}
+                      className="border-b hover:bg-muted/30 cursor-pointer"
+                      onClick={() => openEdit(item)}
+                    >
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{item.code}</td>
                       <td className="p-3">{item.group_id ? '#' + item.group_id : '—'}</td>
-                      <td className="p-3 text-right">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(item)} title="Düzenle"><Pencil className="h-4 w-4" /></Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(item.id)} title="Sil"><Trash2 className="h-4 w-4" /></Button>
-                      </td>
                     </tr>
                   ))
                 )}
@@ -252,7 +275,7 @@ export function KategorilerPage() {
       </Card>
 
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editingId ? 'Kategori Düzenle' : 'Yeni Kategori'}</DialogTitle>
             <DialogDescription>Kategori bilgilerini girin.</DialogDescription>
@@ -289,13 +312,59 @@ export function KategorilerPage() {
               <Label htmlFor="description">Açıklama</Label>
               <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="sort_order">Sıra</Label>
-              <Input id="sort_order" type="number" value={form.sort_order} onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))} />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={closeModal} disabled={saving}>İptal</Button>
-              <Button type="submit" disabled={saving || !form.name.trim()}>{saving ? 'Kaydediliyor...' : editingId ? 'Güncelle' : 'Kaydet'}</Button>
+            <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="sort_order" className="text-sm">Sıra</Label>
+                  <Input
+                    id="sort_order"
+                    type="number"
+                    value={form.sort_order}
+                    onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))}
+                    className="w-16 h-9"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="modal-status"
+                    checked={!!form.status}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="modal-status" className="text-sm cursor-pointer">Aktif</Label>
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                {editingId && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-block">
+                        <Button type="button" variant="outline" size="icon" onClick={() => handleDelete(editingId, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Sil</TooltipContent>
+                  </Tooltip>
+                )}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-block">
+                      <Button type="button" variant="outline" size="icon" onClick={handleCopy} disabled={saving}>
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>Kopyala</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button type="submit" variant="outline" size="icon" disabled={saving || !form.name.trim()}>
+                      <Save className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Kaydet</TooltipContent>
+                </Tooltip>
+              </div>
             </DialogFooter>
           </form>
         </DialogContent>

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 interface TableInfo {
   name: string

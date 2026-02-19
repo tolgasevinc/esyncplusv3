@@ -11,8 +11,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 /** Görsel path/URL'den görüntüleme URL'i oluştur */
 export function getImageDisplayUrl(pathOrUrl: string): string {
@@ -38,24 +39,29 @@ interface ImageInputProps {
   placeholder?: string
 }
 
-/** Kenar rengini al (köşe piksellerinin ortalaması), tainted canvas'ta varsayılan döner */
+/** Kenar rengini al (köşe piksellerinin ortalaması). Şeffaf köşelerde beyaz döner. */
 function getEdgeColor(ctx: CanvasRenderingContext2D, w: number, h: number): string {
   try {
-    const pixels = [
+    const corners = [
       ctx.getImageData(0, 0, 1, 1).data,
       ctx.getImageData(w - 1, 0, 1, 1).data,
       ctx.getImageData(0, h - 1, 1, 1).data,
       ctx.getImageData(w - 1, h - 1, 1, 1).data,
     ]
-    let r = 0, g = 0, b = 0
-    for (const p of pixels) {
+    let r = 0, g = 0, b = 0, aSum = 0
+    for (const p of corners) {
       r += p[0]
       g += p[1]
       b += p[2]
+      aSum += p[3]
     }
+    const avgA = aSum / 4
+    if (avgA < 30) return '#ffffff'
+    const luminance = (r + g + b) / 3 / 255
+    if (luminance < 0.1) return '#ffffff'
     return `rgb(${Math.round(r / 4)},${Math.round(g / 4)},${Math.round(b / 4)})`
   } catch {
-    return '#f0f0f0'
+    return '#ffffff'
   }
 }
 
@@ -209,40 +215,73 @@ export function ImageInput({
     }
   }
 
+  const logoBoxSize = Math.max(targetSize, 40)
+
   return (
     <div className="space-y-2">
-      <div className="flex gap-2">
-        <Input
-          value={value}
-          readOnly
-          placeholder={placeholder}
-          className="flex-1 bg-muted/50"
-        />
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          title="Yükle"
-          onClick={() => fileRef.current?.click()}
-          disabled={uploading}
-        >
-          <Upload className="h-4 w-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          title="Linkten indir"
-          onClick={() => {
-            setLinkModalOpen(true)
-            setLinkUrl('')
-            setLinkPreview(null)
-            setError(null)
+      <div className="flex items-center gap-2">
+        <div
+          className="shrink-0 rounded border bg-white flex items-center justify-center text-muted-foreground text-xs"
+          style={{
+            width: logoBoxSize,
+            height: logoBoxSize,
+            ...(value
+              ? {
+                  backgroundImage: `url(${getImageDisplayUrl(value)})`,
+                  backgroundSize: 'contain',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'center',
+                }
+              : {}),
           }}
-          disabled={uploading}
+          role="img"
+          aria-label={value ? 'Önizleme' : 'Logo'}
         >
-          <LinkIcon className="h-4 w-4" />
-        </Button>
+          {!value && `${targetSize}×${targetSize}`}
+        </div>
+        <div className="flex-1 flex min-w-0 rounded-md border bg-background overflow-hidden">
+          <Input
+            value={value}
+            readOnly
+            placeholder={placeholder}
+            className="flex-1 min-w-0 bg-muted/50 border-0 rounded-l-md rounded-r-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => fileRef.current?.click()}
+                disabled={uploading}
+                className="rounded-none border-0 border-l h-9 shrink-0 px-3"
+              >
+                <Upload className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Yükle</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => {
+                  setLinkModalOpen(true)
+                  setLinkUrl('')
+                  setLinkPreview(null)
+                  setError(null)
+                }}
+                disabled={uploading}
+                className="rounded-r-md rounded-l-none border-0 border-l h-9 shrink-0 px-3"
+              >
+                <LinkIcon className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Linkten indir</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
       <input
         ref={fileRef}
@@ -251,17 +290,6 @@ export function ImageInput({
         className="hidden"
         onChange={handleFileSelect}
       />
-      {value && (
-        <div className="flex items-center gap-2">
-          <img
-            src={getImageDisplayUrl(value)}
-            alt="Önizleme"
-            className="h-12 w-12 object-contain rounded border"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-          />
-          <span className="text-xs text-muted-foreground">{targetSize}x{targetSize} px</span>
-        </div>
-      )}
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       <Dialog open={linkModalOpen} onOpenChange={setLinkModalOpen}>
@@ -291,7 +319,17 @@ export function ImageInput({
               <div className="space-y-2">
                 <Label>Önizleme</Label>
                 <div className="flex items-center gap-4 p-4 border rounded-lg">
-                  <img src={linkPreview} alt="Önizleme" className="h-12 w-12 object-contain rounded border" />
+                  <div
+                className="h-12 w-12 shrink-0 rounded border bg-white"
+                style={{
+                  backgroundImage: `url(${linkPreview})`,
+                  backgroundSize: 'contain',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'center',
+                }}
+                role="img"
+                aria-label="Önizleme"
+              />
                   <p className="text-sm text-muted-foreground">Görsel hazır. Kaydetmek için onaylayın.</p>
                 </div>
               </div>

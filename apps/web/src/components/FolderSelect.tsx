@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Label } from '@/components/ui/label'
 import { Database } from 'lucide-react'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 interface StorageFolder {
   id: number

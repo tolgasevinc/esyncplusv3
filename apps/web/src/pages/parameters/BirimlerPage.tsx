@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search, Plus, X, Pencil, Trash2 } from 'lucide-react'
+import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -13,9 +14,11 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
+import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 interface ProductUnit {
   id: number
@@ -23,10 +26,11 @@ interface ProductUnit {
   code: string
   description?: string
   sort_order: number
+  status?: number
   created_at?: string
 }
 
-const emptyForm = { name: '', code: '', description: '', sort_order: 0 }
+const emptyForm = { name: '', code: '', description: '', sort_order: 0, status: 1 }
 
 export function BirimlerPage() {
   const [search, setSearch] = useState('')
@@ -40,13 +44,14 @@ export function BirimlerPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const pageSize = 10
+  const [pageSize, setPageSize] = useState<PageSizeValue>(10)
   const hasFilter = search.length > 0
+  const limit = pageSize === 'fit' ? 9999 : pageSize
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(pageSize) })
+      const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
       const res = await fetch(`${API_URL}/api/product-units?${params}`)
       const json = await res.json()
@@ -61,7 +66,7 @@ export function BirimlerPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, search])
+  }, [page, search, limit])
 
   useEffect(() => {
     fetchData()
@@ -80,6 +85,7 @@ export function BirimlerPage() {
       code: item.code,
       description: item.description || '',
       sort_order: item.sort_order ?? 0,
+      status: item.status ?? 1,
     })
     setModalOpen(true)
   }
@@ -88,6 +94,11 @@ export function BirimlerPage() {
     setModalOpen(false)
     setEditingId(null)
     setForm(emptyForm)
+  }
+
+  function handleCopy() {
+    setEditingId(null)
+    setForm((f) => ({ ...f, name: f.name + ' (kopya)' }))
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -101,7 +112,7 @@ export function BirimlerPage() {
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase() }),
+        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), status: form.status }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
@@ -117,7 +128,7 @@ export function BirimlerPage() {
     }
   }
 
-  async function handleDelete(id: number) {
+  async function handleDelete(id: number, onSuccess?: () => void) {
     if (!confirm('Bu birimi silmek istediğinize emin misiniz?')) return
     try {
       const res = await fetch(`${API_URL}/api/product-units/${id}`, { method: 'DELETE' })
@@ -125,6 +136,7 @@ export function BirimlerPage() {
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
       toastSuccess('Birim silindi', 'Birim başarıyla silindi.')
+      onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
     }
@@ -152,25 +164,35 @@ export function BirimlerPage() {
               className="pl-8 w-48 h-9"
             />
           </div>
-          <Button variant="outline" size="icon" title="Yeni birim" onClick={openNew}>
-            <Plus className="h-4 w-4" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="icon" onClick={openNew}>
+                <Plus className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Yeni birim</TooltipContent>
+          </Tooltip>
           {hasFilter && (
-            <Button variant="ghost" size="icon" onClick={() => { setSearch(''); setPage(1) }} title="Filtreleri sıfırla">
-              <X className="h-4 w-4" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={() => { setSearch(''); setPage(1) }}>
+                  <X className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Filtreleri sıfırla</TooltipContent>
+            </Tooltip>
           )}
         </div>
       }
       footerContent={
-        <div className="flex items-center gap-4">
-          <span>Toplam: {total} kayıt{hasFilter && ' (filtrelenmiş)'}</span>
-          <span className="text-muted-foreground">Sayfa {page} / {Math.max(1, Math.ceil(total / pageSize))}</span>
-          <div className="flex gap-1">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Önceki</Button>
-            <Button variant="outline" size="sm" disabled={page >= Math.ceil(total / pageSize)} onClick={() => setPage((p) => p + 1)}>Sonraki</Button>
-          </div>
-        </div>
+        <TablePaginationFooter
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(s) => { setPageSize(s); setPage(1) }}
+          hasFilter={hasFilter}
+        />
       }
     >
       <Card>
@@ -182,24 +204,23 @@ export function BirimlerPage() {
                   <th className="text-left p-3 font-medium">Birim Adı</th>
                   <th className="text-left p-3 font-medium">Kod</th>
                   <th className="text-left p-3 font-medium">Açıklama</th>
-                  <th className="text-right p-3 font-medium w-28">İşlem</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz birim kaydı yok.'}</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz birim kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
-                    <tr key={item.id} className="border-b hover:bg-muted/30">
+                    <tr
+                      key={item.id}
+                      className="border-b hover:bg-muted/30 cursor-pointer"
+                      onClick={() => openEdit(item)}
+                    >
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{item.code}</td>
                       <td className="p-3">{item.description || '—'}</td>
-                      <td className="p-3 text-right">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(item)} title="Düzenle"><Pencil className="h-4 w-4" /></Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(item.id)} title="Sil"><Trash2 className="h-4 w-4" /></Button>
-                      </td>
                     </tr>
                   ))
                 )}
@@ -210,32 +231,80 @@ export function BirimlerPage() {
       </Card>
 
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editingId ? 'Birim Düzenle' : 'Yeni Birim'}</DialogTitle>
             <DialogDescription>Birim bilgilerini girin.</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
-            <div className="space-y-2">
-              <Label htmlFor="name">Birim Adı *</Label>
-              <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Adet" required />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="code">Kod</Label>
-              <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: AD" />
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-9 space-y-2">
+                <Label htmlFor="name">Birim Adı *</Label>
+                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Adet" required />
+              </div>
+              <div className="col-span-3 space-y-2">
+                <Label htmlFor="code">Kod</Label>
+                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: AD" />
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="description">Açıklama</Label>
               <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="sort_order">Sıra</Label>
-              <Input id="sort_order" type="number" value={form.sort_order} onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))} />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={closeModal} disabled={saving}>İptal</Button>
-              <Button type="submit" disabled={saving || !form.name.trim()}>{saving ? 'Kaydediliyor...' : editingId ? 'Güncelle' : 'Kaydet'}</Button>
+            <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="sort_order" className="text-sm">Sıra</Label>
+                  <Input
+                    id="sort_order"
+                    type="number"
+                    value={form.sort_order}
+                    onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))}
+                    className="w-16 h-9"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="modal-status"
+                    checked={!!form.status}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="modal-status" className="text-sm cursor-pointer">Aktif</Label>
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                {editingId && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-block">
+                        <Button type="button" variant="outline" size="icon" onClick={() => handleDelete(editingId, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Sil</TooltipContent>
+                  </Tooltip>
+                )}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-block">
+                      <Button type="button" variant="outline" size="icon" onClick={handleCopy} disabled={saving}>
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>Kopyala</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button type="submit" variant="outline" size="icon" disabled={saving || !form.name.trim()}>
+                      <Save className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Kaydet</TooltipContent>
+                </Tooltip>
+              </div>
             </DialogFooter>
           </form>
         </DialogContent>

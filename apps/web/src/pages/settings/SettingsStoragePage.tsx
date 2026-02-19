@@ -17,7 +17,7 @@ import { Label } from '@/components/ui/label'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { FolderPickerCard } from '@/components/FolderPickerCard'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 interface StorageFolder {
   id: number

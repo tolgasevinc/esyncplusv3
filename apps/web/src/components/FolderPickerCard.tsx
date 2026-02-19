@@ -12,9 +12,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReactNode } from 'react'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+import { API_URL } from '@/lib/api'
 
 interface FolderPickerCardProps {
   title: string
@@ -120,14 +121,18 @@ export function FolderPickerCard({
             placeholder="Klasör seçilmedi"
             className="flex-1 bg-muted/50"
           />
-          <Button
-            variant="outline"
-            size="icon"
-            title="Klasör seç"
-            onClick={() => setOpen(true)}
-          >
-            <FolderOpen className="h-4 w-4" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => setOpen(true)}
+              >
+                <FolderOpen className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Klasör seç</TooltipContent>
+          </Tooltip>
         </div>
       </CardContent>
 
@@ -180,15 +185,19 @@ export function FolderPickerCard({
                     placeholder="Klasör adı"
                     onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
                   />
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={handleCreateFolder}
-                    disabled={!newFolderName.trim() || creating}
-                    title="Yeni klasör oluştur"
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={handleCreateFolder}
+                        disabled={!newFolderName.trim() || creating}
+                      >
+                        <Plus className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Yeni klasör oluştur</TooltipContent>
+                  </Tooltip>
                 </div>
               </div>
             </div>

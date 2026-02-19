@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReactNode } from 'react'
 
 interface PageLayoutProps {
@@ -48,9 +49,14 @@ export function PageLayout({
         <div className="flex items-center gap-2 shrink-0">
           {headerActions}
           {showRefresh && onRefresh && (
-            <Button variant="ghost" size="icon" onClick={onRefresh} title="Yenile">
-              <RefreshCw className="h-5 w-5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={onRefresh}>
+                  <RefreshCw className="h-5 w-5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Yenile</TooltipContent>
+            </Tooltip>
           )}
         </div>
       </header>
@@ -64,7 +70,7 @@ export function PageLayout({
       <footer className="shrink-0 border-t bg-background px-4 py-2 flex items-center justify-between gap-4">
         {footerContent ? (
           <>
-            <div className="text-xs text-muted-foreground">{footerContent}</div>
+            <div className="flex-1 min-w-0">{footerContent}</div>
             <div className="text-xs text-muted-foreground shrink-0">
               © {new Date().getFullYear()} eSync+
             </div>

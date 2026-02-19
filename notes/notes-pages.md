@@ -3,12 +3,14 @@
 - Sayfalarda sabit header alanı olacak, solda gerekiyors geri butonu (ikon ve çerçeveli) sağında sayfa başlığı
   ve altında açıklaması olacak, sağ başta refresh butonu sadece ikon.
 - altta sabit bir footer alanı olacak.
+- tooltip butonlarda ve başka yerlerde hemen görünsün ve standarttan 1 birim büyük olsun
 
 **Kart/Liste Sayfaları**
 
 - Headerda sağa yaslı olarak yeni ve refresh butonları sadece ikon olarak bulunur. solunda arama kutusu olur, gerekli sayfalarda toggle buton veya dropdown olarak filtre seçenekleri de olur.
 - arama veya filtreleme işlemi yapıldığında refresh yanında reset butonu görünür x ikonu ile
 - tablo ve liste içeren sayfaların footer alanında solda sayfalama ve kayıt sayıları (toplam ve göstterilen) olur.
+- satırlarda işlem butonu olmayacak, satırlara tıkladığımızda edit modal açılsın, modal footer da ikon olarak sil, kopyala, kaydet butonları olacak ve sağa yaslı olacak, modallarda aktif/pasif switch footer da sola yaslı olmalı
 
 **Görsel İşlemleri**
 
@@ -17,3 +19,9 @@
 - product görselleri 1000x1000 olacak, kare olacak, kare değilse yukarıda açıklandığı gibi boyut değişimi yapılacak.
 - müşteri logosu görselleri 50x50 olacak
 - sidebar ikon görselleri 50x50 olacak
+
+**Modal Tassarım Kuralları**
+
+- Header ve Footer alanı olacak
+- Footer da sola yaslı sıra kontrolü ve hemen yanında aktif/pasif switch kontrolü
+- Footer da sağa yaslı kaydet, kopyala, sil butonları, sadece ikon olarak. butonlar gri çerçeveli olacak.

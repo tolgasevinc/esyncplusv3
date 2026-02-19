@@ -10,12 +10,14 @@ import {
   ShoppingCart,
   Store,
   Moon,
+  Sun,
   Bell,
   Settings,
   SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react'
+import { useTheme } from '@/contexts/ThemeContext'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import {
@@ -24,6 +26,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 const SIDEBAR_SEPARATOR = 'border-orange-500 border-t-2'
@@ -49,6 +52,7 @@ const menuGroups = [
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
   const location = useLocation()
+  const { toggle, isDark } = useTheme()
 
   return (
     <aside
@@ -58,7 +62,7 @@ export function Sidebar() {
       )}
     >
       {/* Header - Sticky */}
-      <header className={cn('sticky top-0 z-10 flex items-center gap-2 p-4 bg-card shrink-0', SIDEBAR_SEPARATOR)}>
+      <header className={cn('sticky top-0 z-10 flex items-center gap-2 p-4 bg-card shrink-0 border-b-2 border-orange-500', SIDEBAR_SEPARATOR)}>
         <Link to="/" className="flex items-center gap-2 min-w-0">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground shrink-0">
             <Package className="w-5 h-5" />
@@ -106,9 +110,9 @@ export function Sidebar() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent side="right" align="end" className="w-48">
-              <DropdownMenuItem>
-                <Moon className="w-4 h-4 mr-2" />
-                Dark Mode
+              <DropdownMenuItem onClick={toggle}>
+                {isDark ? <Sun className="w-4 h-4 mr-2" /> : <Moon className="w-4 h-4 mr-2" />}
+                {isDark ? 'Açık Mod' : 'Koyu Mod'}
               </DropdownMenuItem>
               <DropdownMenuItem>
                 <Bell className="w-4 h-4 mr-2" />
@@ -134,9 +138,14 @@ export function Sidebar() {
           </DropdownMenu>
         ) : (
           <div className="flex items-center justify-between gap-1">
-            <Button variant="ghost" size="icon">
-              <Moon className="w-4 h-4" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={toggle}>
+                  {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{isDark ? 'Açık moda geç' : 'Koyu moda geç'}</TooltipContent>
+            </Tooltip>
             <Button variant="ghost" size="icon">
               <Bell className="w-4 h-4" />
             </Button>
