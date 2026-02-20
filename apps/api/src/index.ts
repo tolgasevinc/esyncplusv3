@@ -559,15 +559,23 @@ app.get('/api/product-categories', async (c) => {
       params.push(`%${search}%`, `%${search}%`);
     }
     if (groupId !== undefined && groupId !== '') {
-      where += ' AND group_id = ?';
-      params.push(parseInt(groupId));
+      const gid = parseInt(groupId);
+      if (gid === 0) {
+        where += ' AND (group_id IS NULL OR group_id = 0)';
+      } else {
+        where += ' AND group_id = ?';
+        params.push(gid);
+      }
     }
     if (categoryId !== undefined && categoryId !== '') {
-      if (categoryId === 'null' || categoryId === '') {
+      const cid = parseInt(categoryId);
+      if (categoryId === 'null' || categoryId === '' || Number.isNaN(cid)) {
         where += ' AND category_id IS NULL';
+      } else if (cid === 0) {
+        where += ' AND (category_id IS NULL OR category_id = 0)';
       } else {
         where += ' AND category_id = ?';
-        params.push(parseInt(categoryId));
+        params.push(cid);
       }
     }
     const countRes = await c.env.DB.prepare(
@@ -594,8 +602,8 @@ app.post('/api/product-categories', async (c) => {
     if (!name) return c.json({ error: 'Kategori adı gerekli' }, 400);
     const code = (body.code || name.slice(0, 2).toUpperCase()).trim();
     const slug = body.slug?.trim() || name.toLowerCase().replace(/\s+/g, '-');
-    const group_id = body.group_id ?? null;
-    const category_id = body.category_id ?? null;
+    const group_id = (body.group_id === null || body.group_id === undefined) ? null : Number(body.group_id);
+    const category_id = (body.category_id === null || body.category_id === undefined) ? null : Number(body.category_id);
     const description = body.description?.trim() || null;
     const image = body.image?.trim() || null;
     const icon = body.icon?.trim() || null;
@@ -630,8 +638,14 @@ app.put('/api/product-categories/:id', async (c) => {
     if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
     if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code.trim()); }
     if (body.slug !== undefined) { updates.push('slug = ?'); values.push(body.slug?.trim() || null); }
-    if (body.group_id !== undefined) { updates.push('group_id = ?'); values.push(body.group_id); }
-    if (body.category_id !== undefined) { updates.push('category_id = ?'); values.push(body.category_id); }
+    if (body.group_id !== undefined) {
+      updates.push('group_id = ?');
+      values.push((body.group_id === null || body.group_id === undefined) ? null : Number(body.group_id));
+    }
+    if (body.category_id !== undefined) {
+      updates.push('category_id = ?');
+      values.push((body.category_id === null || body.category_id === undefined) ? null : Number(body.category_id));
+    }
     if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
     if (body.image !== undefined) { updates.push('image = ?'); values.push(body.image?.trim() || null); }
     if (body.icon !== undefined) { updates.push('icon = ?'); values.push(body.icon?.trim() || null); }
@@ -929,6 +943,18 @@ app.get('/api/d1/debug', async (c) => {
   }
 });
 
+/** product_categories tablosunu boşalt, id'leri 1'den başlat */
+app.post('/api/d1/reset-product-categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    await c.env.DB.prepare('DELETE FROM product_categories').run();
+    await c.env.DB.prepare("DELETE FROM sqlite_sequence WHERE name='product_categories'").run();
+    return c.json({ ok: true, message: 'product_categories tablosu sıfırlandı. Yeni kayıtlar id=1\'den başlayacak.' });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 /** D1 yazma testi - product_unit'a test satırı ekleyip hemen okuyor */
 app.get('/api/d1/test-write', async (c) => {
   try {
@@ -1008,22 +1034,10 @@ app.post('/api/transfer/execute', async (c) => {
       const entries = Object.entries(columnMapping).filter(([, t]) => t);
       if (entries.length === 0) return c.json({ error: 'Sütun eşleştirmesi gerekli' }, 400);
 
-      // product_categories için FK: D1'de olmayan group_id/category_id -> null (D1 PRAGMA foreign_keys desteklemez)
-      const validGroupIds = targetTable === 'product_categories' ? await getValidFkIds(c.env.DB, 'product_groups', 'id') : null;
-      const validCategoryIds = targetTable === 'product_categories' ? await getValidFkIds(c.env.DB, 'product_categories', 'id') : null;
-
       const transformValue = (row: Record<string, unknown>, s: string, t: string, rowIndex: number): unknown => {
         const val = row[s];
         const v = transformBoolColumn(val, t);
         const col = t.toLowerCase();
-        if (col === 'group_id' && validGroupIds !== null) {
-          const n = v == null ? null : Number(v);
-          return n != null && !Number.isNaN(n) && validGroupIds.has(n) ? n : null;
-        }
-        if (col === 'category_id' && validCategoryIds !== null) {
-          const n = v == null ? null : Number(v);
-          return n != null && !Number.isNaN(n) && validCategoryIds.has(n) ? n : null;
-        }
         // NOT NULL sütunlar: code, name boşsa varsayılan ver
         if (col === 'code') {
           const str = String(v ?? '').trim();
