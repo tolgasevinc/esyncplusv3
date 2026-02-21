@@ -147,6 +147,13 @@ Cloudflare Pages'te farklı proje adı kullanıyorsanız:
 CLOUDFLARE_PAGES_PROJECT_NAME=yeni-proje-adi npm run deploy:web
 ```
 
+### 4.4 Özel Domain
+
+Cloudflare Pages → Proje → **Custom domains** üzerinden özel domain eklenebilir.
+
+- **Canlı adres:** https://www.e-syncplus.com
+- Deploy sonrası terminal `.pages.dev` URL gösterebilir; özel domain ayrıca yapılandırılmıştır.
+
 ---
 
 ## 5. Sıralı Deploy (Önerilen)
@@ -165,10 +172,10 @@ npm run deploy:web
 
 ## 6. Yerel Geliştirme vs Deploy
 
-| Ortam | API URL | D1 |
-|-------|---------|-----|
-| Yerel (`npm run dev`) | `http://localhost:8787` | Yerel SQLite (Cloudflare Dashboard'da görünmez) |
-| Deploy | `https://project-v3-api.xxx.workers.dev` | Cloudflare D1 (remote) |
+| Ortam | Web URL | API URL | D1 |
+|-------|---------|---------|-----|
+| Yerel (`npm run dev`) | `http://localhost:5173` | `http://localhost:8787` | Yerel SQLite (Cloudflare Dashboard'da görünmez) |
+| Deploy | https://www.e-syncplus.com | `https://project-v3-api.xxx.workers.dev` | Cloudflare D1 (remote) |
 
 Veri aktarımı yaparken `.env` içindeki `VITE_API_URL` değerine dikkat edin; localhost kullanırsanız yerel D1'e yazılır.
 

@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS common_tax_offices (
   name TEXT NOT NULL,
   code TEXT NOT NULL,
   city TEXT,
+  description TEXT,
   sort_order INTEGER DEFAULT 0,
   status INTEGER DEFAULT 1,
   is_deleted INTEGER DEFAULT 0,

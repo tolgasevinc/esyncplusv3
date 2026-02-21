@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Package, Users, Tag, Ruler, FolderTree, Layers, UserCircle } from 'lucide-react'
+import { Package, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, UserCircle } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -8,10 +8,12 @@ const productTables = [
   { id: 'birimler', title: 'Birimler', icon: Ruler, path: '/parametreler/birimler' },
   { id: 'gruplar', title: 'Gruplar', icon: FolderTree, path: '/parametreler/gruplar' },
   { id: 'kategoriler', title: 'Kategoriler', icon: Layers, path: '/parametreler/kategoriler' },
+  { id: 'urun-tipleri', title: 'Ürün Tipleri', icon: Type, path: '/parametreler/urun-tipleri' },
+  { id: 'para-birimleri', title: 'Para Birimleri', icon: CircleDollarSign, path: '/parametreler/para-birimleri' },
 ]
 
 const customerTables = [
-  { id: 'musteri-tipleri', title: 'Müşteri Tipleri', icon: UserCircle, path: '/parametreler' },
+  { id: 'musteri-tipleri', title: 'Müşteri Tipleri', icon: UserCircle, path: '/parametreler/musteri-tipleri' },
 ]
 
 export function ParametersPage() {
@@ -33,7 +35,7 @@ export function ParametersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 pt-4">
               {productTables.map((table) => (
                 <Link key={table.id} to={table.path}>
                   <div
@@ -67,7 +69,7 @@ export function ParametersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 pt-4">
               {customerTables.map((table) => (
                 <Link key={table.id} to={table.path}>
                   <div

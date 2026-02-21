@@ -37,6 +37,12 @@ updated_at
 - icon
 - sort_order
 
+**product-types**
+- name
+- code
+- description
+- sort_order
+
 **app_settings**
 
 - category

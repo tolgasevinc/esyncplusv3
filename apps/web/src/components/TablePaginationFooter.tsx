@@ -1,3 +1,4 @@
+import { useEffect, useCallback } from 'react'
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -10,14 +11,27 @@ const PAGE_SIZE_OPTIONS = [
   { value: 100, label: '100' },
 ] as const
 
-export type PageSizeValue = 10 | 25 | 50 | 100 | 'fit'
+export type PageSizeValue = 10 | 25 | 50 | 100 | 'fit' | number
+
+const ROW_HEIGHT_PX = 44
+const TABLE_HEADER_PX = 44
+const CONTENT_PADDING_PX = 32
+
+function calcFitLimit(containerHeight: number): number {
+  const available = containerHeight - CONTENT_PADDING_PX - TABLE_HEADER_PX
+  return Math.max(1, Math.floor(available / ROW_HEIGHT_PX))
+}
 
 interface TablePaginationFooterProps {
   total: number
   page: number
   pageSize: number | 'fit'
+  /** Sayfa başı kayıt (pageSize='fit' iken hesaplanan değer) */
+  fitLimit?: number
   onPageChange: (page: number) => void
   onPageSizeChange: (size: PageSizeValue) => void
+  onFitLimitChange?: (limit: number) => void
+  tableContainerRef?: React.RefObject<HTMLDivElement | null>
   hasFilter?: boolean
 }
 
@@ -40,13 +54,59 @@ export function TablePaginationFooter({
   total,
   page,
   pageSize,
+  fitLimit = 10,
   onPageChange,
   onPageSizeChange,
+  onFitLimitChange,
+  tableContainerRef,
   hasFilter,
 }: TablePaginationFooterProps) {
-  const limit = pageSize === 'fit' ? 9999 : pageSize
-  const totalPages = Math.max(1, Math.ceil(total / limit))
-  const showing = total === 0 ? 0 : Math.min(limit, Math.max(0, total - (page - 1) * limit))
+  const recalcFit = useCallback(() => {
+    if (!tableContainerRef?.current || !onFitLimitChange) return
+    const h = tableContainerRef.current.clientHeight
+    onFitLimitChange(calcFitLimit(h))
+  }, [tableContainerRef, onFitLimitChange])
+
+  useEffect(() => {
+    if (pageSize !== 'fit' || !tableContainerRef || !onFitLimitChange) return
+
+    let cancelled = false
+    let ro: ResizeObserver | null = null
+    let retries = 0
+    const MAX_RETRIES = 10
+
+    const run = () => {
+      if (cancelled) return
+      const el = tableContainerRef?.current
+      if (!el) {
+        if (retries++ < MAX_RETRIES) requestAnimationFrame(run)
+        return
+      }
+      recalcFit()
+      ro = new ResizeObserver(recalcFit)
+      ro.observe(el)
+    }
+
+    requestAnimationFrame(run)
+
+    return () => {
+      cancelled = true
+      ro?.disconnect()
+    }
+  }, [pageSize, tableContainerRef, onFitLimitChange, recalcFit])
+
+  const handlePageSizeClick = (value: PageSizeValue) => {
+    if (value === 'fit' && tableContainerRef?.current && onFitLimitChange) {
+      const h = tableContainerRef.current.clientHeight
+      const fitLimit = calcFitLimit(h)
+      onFitLimitChange(fitLimit)
+    }
+    onPageSizeChange(value)
+  }
+
+  const effectiveLimit = pageSize === 'fit' ? fitLimit : pageSize
+  const totalPages = Math.max(1, Math.ceil(total / effectiveLimit))
+  const showing = total === 0 ? 0 : Math.min(effectiveLimit, Math.max(0, total - (page - 1) * effectiveLimit))
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-4">
@@ -65,7 +125,7 @@ export function TablePaginationFooter({
               variant={pageSize === opt.value ? 'secondary' : 'outline'}
               size="sm"
               className="h-7 px-2 text-xs"
-              onClick={() => onPageSizeChange(opt.value)}
+              onClick={() => handlePageSizeClick(opt.value)}
             >
               {opt.label}
             </Button>

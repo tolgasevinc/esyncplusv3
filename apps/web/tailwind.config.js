@@ -10,6 +10,9 @@ export default {
       colors: {
         card: 'hsl(var(--card))',
         'card-foreground': 'hsl(var(--card-foreground))',
+        'card-header': 'hsl(var(--card-header))',
+        sidebar: 'hsl(var(--sidebar))',
+        'sidebar-foreground': 'hsl(var(--sidebar-foreground))',
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',

@@ -20,26 +20,23 @@ import { toastSuccess, toastError } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
 
-/** product_categories tablosundan group_id=0 olan kayıtlar = Gruplar */
-interface ProductCategoryGroup {
+interface ProductCurrency {
   id: number
-  group_id?: number | null
-  category_id?: number | null
   name: string
   code: string
-  slug?: string
-  description?: string
+  symbol?: string
+  is_default: number
   sort_order: number
   status?: number
   created_at?: string
 }
 
-const emptyForm = { name: '', code: '', description: '', sort_order: 0, status: 1 }
+const emptyForm = { name: '', code: '', symbol: '', is_default: 0, sort_order: 0, status: 1 }
 
-export function GruplarPage() {
+export function ParaBirimleriPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
-  const [data, setData] = useState<ProductCategoryGroup[]>([])
+  const [data, setData] = useState<ProductCurrency[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
@@ -57,9 +54,9 @@ export function GruplarPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(limit), group_id: '0' })
+      const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
-      const res = await fetch(`${API_URL}/api/product-categories?${params}`)
+      const res = await fetch(`${API_URL}/api/product-currencies?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
       setData(json.data || [])
@@ -83,18 +80,19 @@ export function GruplarPage() {
     setForm(emptyForm)
     setModalOpen(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-groups/next-sort-order`)
+      const res = await fetch(`${API_URL}/api/product-currencies/next-sort-order`)
       const json = await res.json()
       if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
     } catch { /* ignore */ }
   }
 
-  const openEdit = (item: ProductCategoryGroup) => {
+  const openEdit = (item: ProductCurrency) => {
     setEditingId(item.id)
     setForm({
       name: item.name,
       code: item.code,
-      description: item.description || '',
+      symbol: item.symbol || '',
+      is_default: item.is_default ?? 0,
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
     })
@@ -118,21 +116,25 @@ export function GruplarPage() {
     setSaving(true)
     setError(null)
     try {
-      const url = editingId ? `${API_URL}/api/product-categories/${editingId}` : `${API_URL}/api/product-categories`
+      const url = editingId ? `${API_URL}/api/product-currencies/${editingId}` : `${API_URL}/api/product-currencies`
       const method = editingId ? 'PUT' : 'POST'
-      const body = editingId
-        ? { ...form, group_id: 0, category_id: 0, status: form.status }
-        : { ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), group_id: 0, category_id: 0, status: form.status }
+      const payload = {
+        ...form,
+        code: form.code || form.name.slice(0, 3).toUpperCase(),
+        symbol: form.symbol || null,
+        status: form.status,
+        is_default: form.is_default ? 1 : 0,
+      }
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       closeModal()
       fetchData()
-      toastSuccess(editingId ? 'Grup güncellendi' : 'Grup eklendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess(editingId ? 'Para birimi güncellendi' : 'Para birimi eklendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -143,13 +145,13 @@ export function GruplarPage() {
   }
 
   async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu grubu silmek istediğinize emin misiniz?')) return
+    if (!confirm('Bu para birimini silmek istediğinize emin misiniz?')) return
     try {
-      const res = await fetch(`${API_URL}/api/product-categories/${id}`, { method: 'DELETE' })
+      const res = await fetch(`${API_URL}/api/product-currencies/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
-      toastSuccess('Grup silindi', 'Grup başarıyla silindi.')
+      toastSuccess('Para birimi silindi', 'Para birimi başarıyla silindi.')
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
@@ -158,8 +160,8 @@ export function GruplarPage() {
 
   return (
     <PageLayout
-      title="Gruplar"
-      description="Ürün gruplarını yönetin (group_id=0 kategoriler)"
+      title="Para Birimleri"
+      description="Para birimlerini yönetin"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -185,7 +187,7 @@ export function GruplarPage() {
                 <Plus className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Yeni grup</TooltipContent>
+            <TooltipContent>Yeni para birimi</TooltipContent>
           </Tooltip>
           {hasFilter && (
             <Tooltip>
@@ -219,16 +221,17 @@ export function GruplarPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium">Grup Adı</th>
+                  <th className="text-left p-3 font-medium">Para Birimi</th>
                   <th className="text-left p-3 font-medium">Kod</th>
-                  <th className="text-left p-3 font-medium">Açıklama</th>
+                  <th className="text-left p-3 font-medium">Sembol</th>
+                  <th className="text-left p-3 font-medium">Varsayılan</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz grup kaydı yok.'}</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz para birimi kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
                     <tr
@@ -238,7 +241,8 @@ export function GruplarPage() {
                     >
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{item.code}</td>
-                      <td className="p-3">{item.description || '—'}</td>
+                      <td className="p-3">{item.symbol || '—'}</td>
+                      <td className="p-3">{item.is_default ? 'Evet' : '—'}</td>
                     </tr>
                   ))
                 )}
@@ -251,24 +255,24 @@ export function GruplarPage() {
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingId ? 'Grup Düzenle' : 'Yeni Grup'}</DialogTitle>
-            <DialogDescription>Grup bilgilerini girin. Gruplar product_categories tablosunda group_id=0 olarak saklanır.</DialogDescription>
+            <DialogTitle>{editingId ? 'Para Birimi Düzenle' : 'Yeni Para Birimi'}</DialogTitle>
+            <DialogDescription>Para birimi bilgilerini girin.</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="grid grid-cols-12 gap-4">
-              <div className="col-span-9 space-y-2">
-                <Label htmlFor="name">Grup Adı *</Label>
-                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Elektronik" required />
+              <div className="col-span-6 space-y-2">
+                <Label htmlFor="name">Para Birimi Adı *</Label>
+                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Türk Lirası" required />
               </div>
               <div className="col-span-3 space-y-2">
                 <Label htmlFor="code">Kod</Label>
-                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: EL" />
+                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: TRY" />
               </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="description">Açıklama</Label>
-              <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
+              <div className="col-span-3 space-y-2">
+                <Label htmlFor="symbol">Sembol</Label>
+                <Input id="symbol" value={form.symbol} onChange={(e) => setForm((f) => ({ ...f, symbol: e.target.value }))} placeholder="Örn: ₺" />
+              </div>
             </div>
             <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
               <div className="flex items-center gap-4">
@@ -281,6 +285,14 @@ export function GruplarPage() {
                     onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))}
                     className="w-16 h-9"
                   />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="modal-default"
+                    checked={!!form.is_default}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, is_default: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="modal-default" className="text-sm cursor-pointer">Varsayılan</Label>
                 </div>
                 <div className="flex items-center gap-2">
                   <Switch

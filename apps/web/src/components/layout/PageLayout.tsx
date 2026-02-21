@@ -14,6 +14,8 @@ interface PageLayoutProps {
   headerActions?: ReactNode
   /** Kart/Liste sayfaları: footer içeriği (sayfalama, kayıt sayıları) */
   footerContent?: ReactNode
+  /** İçerik alanı ref (Sığdır hesaplaması için) */
+  contentRef?: React.RefObject<HTMLDivElement>
   children: ReactNode
 }
 
@@ -25,6 +27,7 @@ export function PageLayout({
   showRefresh = false,
   headerActions,
   footerContent,
+  contentRef,
   children,
 }: PageLayoutProps) {
   return (
@@ -62,7 +65,7 @@ export function PageLayout({
       </header>
 
       {/* Scrollable Content */}
-      <div className="flex-1 overflow-auto p-4">
+      <div ref={contentRef} className="flex-1 overflow-auto p-4">
         {children}
       </div>
 

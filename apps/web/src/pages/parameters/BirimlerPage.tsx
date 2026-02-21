@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -44,9 +44,11 @@ export function BirimlerPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [pageSize, setPageSize] = useState<PageSizeValue>(10)
+  const [pageSize, setPageSize] = useState<PageSizeValue>('fit')
+  const [fitLimit, setFitLimit] = useState(10)
+  const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
-  const limit = pageSize === 'fit' ? 9999 : pageSize
+  const limit = pageSize === 'fit' ? fitLimit : pageSize
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -72,10 +74,15 @@ export function BirimlerPage() {
     fetchData()
   }, [fetchData])
 
-  const openNew = () => {
+  const openNew = async () => {
     setEditingId(null)
     setForm(emptyForm)
     setModalOpen(true)
+    try {
+      const res = await fetch(`${API_URL}/api/product-units/next-sort-order`)
+      const json = await res.json()
+      if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
+    } catch { /* ignore */ }
   }
 
   const openEdit = (item: ProductUnit) => {
@@ -147,6 +154,7 @@ export function BirimlerPage() {
       title="Birimler"
       description="Ürün birimlerini yönetin"
       backTo="/parametreler"
+      contentRef={contentRef}
       showRefresh
       onRefresh={() => {
         setSearch('')
@@ -189,8 +197,11 @@ export function BirimlerPage() {
           total={total}
           page={page}
           pageSize={pageSize}
+          fitLimit={fitLimit}
           onPageChange={setPage}
           onPageSizeChange={(s) => { setPageSize(s); setPage(1) }}
+          onFitLimitChange={setFitLimit}
+          tableContainerRef={contentRef}
           hasFilter={hasFilter}
         />
       }

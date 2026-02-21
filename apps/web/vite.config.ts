@@ -12,4 +12,6 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  // .env dosyasının apps/web'den yüklendiğinden emin ol (monorepo'da cwd root olabilir)
+  envDir: __dirname,
 })

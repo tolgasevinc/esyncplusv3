@@ -20,14 +20,10 @@ import { toastSuccess, toastError } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
 
-/** product_categories tablosundan group_id=0 olan kayıtlar = Gruplar */
-interface ProductCategoryGroup {
+interface ProductType {
   id: number
-  group_id?: number | null
-  category_id?: number | null
   name: string
   code: string
-  slug?: string
   description?: string
   sort_order: number
   status?: number
@@ -36,10 +32,10 @@ interface ProductCategoryGroup {
 
 const emptyForm = { name: '', code: '', description: '', sort_order: 0, status: 1 }
 
-export function GruplarPage() {
+export function UrunTipleriPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
-  const [data, setData] = useState<ProductCategoryGroup[]>([])
+  const [data, setData] = useState<ProductType[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
@@ -57,9 +53,9 @@ export function GruplarPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(limit), group_id: '0' })
+      const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
-      const res = await fetch(`${API_URL}/api/product-categories?${params}`)
+      const res = await fetch(`${API_URL}/api/product-types?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
       setData(json.data || [])
@@ -83,13 +79,13 @@ export function GruplarPage() {
     setForm(emptyForm)
     setModalOpen(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-groups/next-sort-order`)
+      const res = await fetch(`${API_URL}/api/product-types/next-sort-order`)
       const json = await res.json()
       if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
     } catch { /* ignore */ }
   }
 
-  const openEdit = (item: ProductCategoryGroup) => {
+  const openEdit = (item: ProductType) => {
     setEditingId(item.id)
     setForm({
       name: item.name,
@@ -118,21 +114,18 @@ export function GruplarPage() {
     setSaving(true)
     setError(null)
     try {
-      const url = editingId ? `${API_URL}/api/product-categories/${editingId}` : `${API_URL}/api/product-categories`
+      const url = editingId ? `${API_URL}/api/product-types/${editingId}` : `${API_URL}/api/product-types`
       const method = editingId ? 'PUT' : 'POST'
-      const body = editingId
-        ? { ...form, group_id: 0, category_id: 0, status: form.status }
-        : { ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), group_id: 0, category_id: 0, status: form.status }
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), status: form.status }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       closeModal()
       fetchData()
-      toastSuccess(editingId ? 'Grup güncellendi' : 'Grup eklendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess(editingId ? 'Ürün tipi güncellendi' : 'Ürün tipi eklendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -143,13 +136,13 @@ export function GruplarPage() {
   }
 
   async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu grubu silmek istediğinize emin misiniz?')) return
+    if (!confirm('Bu ürün tipini silmek istediğinize emin misiniz?')) return
     try {
-      const res = await fetch(`${API_URL}/api/product-categories/${id}`, { method: 'DELETE' })
+      const res = await fetch(`${API_URL}/api/product-types/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
-      toastSuccess('Grup silindi', 'Grup başarıyla silindi.')
+      toastSuccess('Ürün tipi silindi', 'Ürün tipi başarıyla silindi.')
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
@@ -158,8 +151,8 @@ export function GruplarPage() {
 
   return (
     <PageLayout
-      title="Gruplar"
-      description="Ürün gruplarını yönetin (group_id=0 kategoriler)"
+      title="Ürün Tipleri"
+      description="Ürün tiplerini yönetin"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -185,7 +178,7 @@ export function GruplarPage() {
                 <Plus className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Yeni grup</TooltipContent>
+            <TooltipContent>Yeni ürün tipi</TooltipContent>
           </Tooltip>
           {hasFilter && (
             <Tooltip>
@@ -219,7 +212,7 @@ export function GruplarPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium">Grup Adı</th>
+                  <th className="text-left p-3 font-medium">Ürün Tipi Adı</th>
                   <th className="text-left p-3 font-medium">Kod</th>
                   <th className="text-left p-3 font-medium">Açıklama</th>
                 </tr>
@@ -228,7 +221,7 @@ export function GruplarPage() {
                 {loading ? (
                   <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz grup kaydı yok.'}</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz ürün tipi kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
                     <tr
@@ -251,19 +244,19 @@ export function GruplarPage() {
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingId ? 'Grup Düzenle' : 'Yeni Grup'}</DialogTitle>
-            <DialogDescription>Grup bilgilerini girin. Gruplar product_categories tablosunda group_id=0 olarak saklanır.</DialogDescription>
+            <DialogTitle>{editingId ? 'Ürün Tipi Düzenle' : 'Yeni Ürün Tipi'}</DialogTitle>
+            <DialogDescription>Ürün tipi bilgilerini girin.</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="grid grid-cols-12 gap-4">
               <div className="col-span-9 space-y-2">
-                <Label htmlFor="name">Grup Adı *</Label>
-                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Elektronik" required />
+                <Label htmlFor="name">Ürün Tipi Adı *</Label>
+                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Fiziksel Ürün" required />
               </div>
               <div className="col-span-3 space-y-2">
                 <Label htmlFor="code">Kod</Label>
-                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: EL" />
+                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: FZ" />
               </div>
             </div>
             <div className="space-y-2">

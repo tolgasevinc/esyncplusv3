@@ -9,6 +9,10 @@ import {
   Plus,
   ArrowRight,
   Loader2,
+  Image as ImageIcon,
+  Upload,
+  FolderOpen,
+  Check,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -32,10 +36,12 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { toastSuccess, toastError, toastWarning } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
+import { processImage, type ImageFormat } from '@/lib/image-processor'
 const MYSQL_CATEGORY = 'mysql'
 
 // Bu sütunlar eşleştirme listesinde gösterilmez ve aktarılmaz (D1 tarafında otomatik)
-const EXCLUDED_COLUMNS = ['id', 'created_at', 'updated_at']
+// id dahil edilirse mevcut kayıt güncellenir (upsert)
+const EXCLUDED_COLUMNS = ['created_at', 'updated_at']
 
 interface MysqlConfig {
   host: string
@@ -116,6 +122,28 @@ export function SettingsDataTransferPage() {
   const [cards, setCards] = useState<TransferCard[]>([])
   const [transferModal, setTransferModal] = useState<{ card: TransferCard } | null>(null)
   const [transferring, setTransferring] = useState(false)
+  const [transferProgress, setTransferProgress] = useState<{
+    phase: 'confirm' | 'transferring' | 'done' | 'error'
+    processedCount: number
+    totalCount: number
+    currentBatch: number
+    totalBatches: number
+    inserted: number
+    updated: number
+    error?: string
+  } | null>(null)
+  const [imageFiles, setImageFiles] = useState<File[]>([])
+  const [imageFolder, setImageFolder] = useState('images/')
+  const [imageSize, setImageSize] = useState<'50' | '100' | '500' | '1000' | 'custom'>('100')
+  const [imageSizeCustom, setImageSizeCustom] = useState(200)
+  const [imageFormat, setImageFormat] = useState<'original' | ImageFormat>('original')
+  const [imageUploading, setImageUploading] = useState(false)
+  const [folderModalOpen, setFolderModalOpen] = useState(false)
+  const [folderPrefixes, setFolderPrefixes] = useState<string[]>([])
+  const [folderCurrentPath, setFolderCurrentPath] = useState('')
+  const [folderLoading, setFolderLoading] = useState(false)
+  const [newFolderName, setNewFolderName] = useState('')
+  const [folderCreating, setFolderCreating] = useState(false)
 
   const loadConfig = useCallback(async () => {
     try {
@@ -178,6 +206,62 @@ export function SettingsDataTransferPage() {
       loadAllTables()
     }
   }, [activeTab, loadAllTables])
+
+  const fetchFolderPrefixes = useCallback(async (prefix: string) => {
+    setFolderLoading(true)
+    try {
+      const url = prefix
+        ? `${API_URL}/storage/prefixes?prefix=${encodeURIComponent(prefix)}`
+        : `${API_URL}/storage/prefixes`
+      const res = await fetch(url)
+      const data = await res.json()
+      setFolderPrefixes(Array.isArray(data) ? data : [])
+    } catch {
+      setFolderPrefixes([])
+    } finally {
+      setFolderLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (folderModalOpen) {
+      setFolderCurrentPath('')
+      setNewFolderName('')
+      fetchFolderPrefixes('')
+    }
+  }, [folderModalOpen, fetchFolderPrefixes])
+
+  function handleFolderSelect(path: string) {
+    setImageFolder(path || 'images/')
+    setFolderModalOpen(false)
+  }
+
+  function handleFolderNavigate(path: string) {
+    setFolderCurrentPath(path)
+    fetchFolderPrefixes(path)
+  }
+
+  async function handleCreateFolder() {
+    if (!newFolderName.trim()) return
+    setFolderCreating(true)
+    try {
+      const res = await fetch(`${API_URL}/storage/folder`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: folderCurrentPath, name: newFolderName.trim() }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Oluşturulamadı')
+      setNewFolderName('')
+      await fetchFolderPrefixes(folderCurrentPath)
+      if (json.path) handleFolderSelect(json.path)
+      toastSuccess('Klasör oluşturuldu', json.path)
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Klasör oluşturulamadı')
+    } finally {
+      setFolderCreating(false)
+    }
+  }
 
   async function handleTestConnection() {
     setTesting(true)
@@ -329,7 +413,7 @@ export function SettingsDataTransferPage() {
     if (!table) return
     updateCard(cardId, { loading: true })
     try {
-      const res = await fetch(`${API_URL}/api/mysql/table-data/${encodeURIComponent(table)}?limit=100`)
+      const res = await fetch(`${API_URL}/api/mysql/table-data/${encodeURIComponent(table)}?limit=2000`)
       const json = await res.json()
       if (res.ok && json.rows) {
         const rows = json.rows as Record<string, unknown>[]
@@ -422,40 +506,138 @@ export function SettingsDataTransferPage() {
     )
   }
 
+  async function handleImageUpload() {
+    if (imageFiles.length === 0) {
+      toastWarning('Dosya seçin', 'En az bir görsel dosyası seçin.')
+      return
+    }
+    const folder = imageFolder.trim() || 'images/'
+    const normalizedFolder = folder.replace(/\/+$/, '') + '/'
+    const sizeNum = imageSize === 'custom' ? imageSizeCustom : parseInt(imageSize, 10)
+    const format: ImageFormat | null = imageFormat === 'original' ? null : imageFormat
+
+    setImageUploading(true)
+    let success = 0
+    let failed = 0
+    try {
+      for (const file of imageFiles) {
+        if (!file.type.startsWith('image/')) {
+          failed++
+          continue
+        }
+        try {
+          const blob = await processImage(file, { size: sizeNum ?? undefined, format: format ?? undefined })
+          const ext = format ? (format === 'jpeg' ? 'jpg' : format) : file.name.split('.').pop()?.toLowerCase() || 'png'
+          const safeExt = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext) ? ext : 'png'
+          const filename = `${file.name.replace(/\.[^.]+$/, '')}.${safeExt}`
+
+          const formData = new FormData()
+          formData.append('file', blob, filename)
+          formData.append('folder', normalizedFolder)
+
+          const res = await fetch(`${API_URL}/storage/upload`, {
+            method: 'POST',
+            body: formData,
+          })
+          const json = await res.json()
+          if (res.ok && json.path) success++
+          else failed++
+        } catch {
+          failed++
+        }
+      }
+      if (success > 0) {
+        toastSuccess('Görsel aktarımı', `${success} dosya storage'a yüklendi.${failed > 0 ? ` ${failed} başarısız.` : ''}`)
+        setImageFiles([])
+      }
+      if (failed > 0 && success === 0) {
+        toastError('Yükleme hatası', 'Dosyalar yüklenemedi.')
+      }
+    } catch (err) {
+      toastError('Yükleme hatası', err instanceof Error ? err.message : 'Bilinmeyen hata')
+    } finally {
+      setImageUploading(false)
+    }
+  }
+
+  const BATCH_SIZE = 100
+
   async function executeTransfer() {
     if (!transferModal) return
     const { card } = transferModal
+    const mapping = filterExcludedMapping(card.columnMapping, card.enabledMappingKeys)
+    const selectedRows = Array.from(card.selectedIndices)
+      .sort((a, b) => a - b)
+      .filter((i) => i >= 0 && i < card.rows.length)
+      .map((i) => card.rows[i])
+    const totalCount = selectedRows.length
+    if (totalCount === 0) {
+      toastError('Aktarım', 'Aktarılacak kayıt seçilmedi.')
+      return
+    }
+    const totalBatches = Math.ceil(totalCount / BATCH_SIZE)
     setTransferring(true)
+    setTransferProgress({
+      phase: 'transferring',
+      processedCount: 0,
+      totalCount,
+      currentBatch: 0,
+      totalBatches,
+      inserted: 0,
+      updated: 0,
+    })
+    let totalInserted = 0
+    let totalUpdated = 0
     try {
-      const res = await fetch(`${API_URL}/api/transfer/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sourceTable: card.sourceTable,
-          targetTable: card.targetTable,
-          columnMapping: filterExcludedMapping(card.columnMapping, card.enabledMappingKeys),
-          selectedIndices: Array.from(card.selectedIndices),
-        }),
-      })
-      const text = await res.text()
-      let json: { error?: string; inserted?: number; updated?: number } = {}
-      try {
-        json = text ? JSON.parse(text) : {}
-      } catch {
-        throw new Error(res.ok ? 'Yanıt işlenemedi' : text || `HTTP ${res.status}`)
+      for (let b = 0; b < totalBatches; b++) {
+        const start = b * BATCH_SIZE
+        const batch = selectedRows.slice(start, start + BATCH_SIZE)
+        const res = await fetch(`${API_URL}/api/transfer/execute-batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            targetTable: card.targetTable,
+            columnMapping: mapping,
+            rows: batch,
+          }),
+        })
+        const text = await res.text()
+        let json: { error?: string; inserted?: number; updated?: number; total?: number } = {}
+        try {
+          json = text ? JSON.parse(text) : {}
+        } catch {
+          throw new Error(res.ok ? 'Yanıt işlenemedi' : text || `HTTP ${res.status}`)
+        }
+        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+        totalInserted += json.inserted ?? 0
+        totalUpdated += json.updated ?? 0
+        setTransferProgress({
+          phase: 'transferring',
+          processedCount: start + batch.length,
+          totalCount,
+          currentBatch: b + 1,
+          totalBatches,
+          inserted: totalInserted,
+          updated: totalUpdated,
+        })
       }
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
-      const msg = json.updated
-        ? `${json.inserted} yeni eklendi, ${json.updated} mevcut güncellendi.`
-        : `${json.inserted} kayıt D1'e aktarıldı.`
+      setTransferProgress((p) => p ? { ...p, phase: 'done' } : null)
+      const msg = totalUpdated
+        ? `${totalInserted} yeni eklendi, ${totalUpdated} mevcut güncellendi.`
+        : `${totalInserted} kayıt D1'e aktarıldı.`
       toastSuccess('Aktarım tamamlandı', msg)
-      setTransferModal(null)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Bilinmeyen hata'
+      setTransferProgress((p) => p ? { ...p, phase: 'error', error: msg } : null)
       toastError('Aktarım hatası', msg)
     } finally {
       setTransferring(false)
     }
+  }
+
+  function closeTransferModal() {
+    setTransferModal(null)
+    setTransferProgress(null)
   }
 
   const settingsContent = (
@@ -566,6 +748,7 @@ export function SettingsDataTransferPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="aktarimlar">Aktarımlar</TabsTrigger>
+          <TabsTrigger value="gorsel">Görsel Aktarımı</TabsTrigger>
           <TabsTrigger value="ayarlar">Ayarlar</TabsTrigger>
         </TabsList>
 
@@ -640,9 +823,247 @@ export function SettingsDataTransferPage() {
               onToggleAll={(checked) => toggleAllRows(card.id, checked)}
               onToggleMappingKey={(k) => toggleMappingKey(card.id, k)}
               onToggleAllMappings={(checked) => toggleAllMappings(card.id, checked)}
-              onTransfer={() => setTransferModal({ card })}
+              onTransfer={() => {
+                setTransferProgress(null)
+                setTransferModal({ card })
+              }}
             />
           ))}
+        </TabsContent>
+
+        <TabsContent value="gorsel" className="mt-4 space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <ImageIcon className="h-5 w-5" />
+                Görsel Aktarımı
+              </CardTitle>
+              <CardDescription>
+                Bilgisayarınızdan görsel dosyalarını seçin, storage'da hedef klasörü belirleyin, boyut ve format ayarlarını yapın.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-2">
+                <Label>Dosyalar</Label>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <Input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(e) => setImageFiles(Array.from(e.target.files || []))}
+                    className="flex-1"
+                  />
+                  {imageFiles.length > 0 && (
+                    <Button variant="outline" size="sm" onClick={() => setImageFiles([])}>
+                      Temizle ({imageFiles.length})
+                    </Button>
+                  )}
+                </div>
+                {imageFiles.length > 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    {imageFiles.length} dosya seçildi
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <Label>Hedef Klasör</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={imageFolder}
+                    readOnly
+                    placeholder="Klasör seçin"
+                    className="flex-1 bg-muted/50"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => setFolderModalOpen(true)}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <Dialog open={folderModalOpen} onOpenChange={setFolderModalOpen}>
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Hedef Klasör Seç</DialogTitle>
+                    <DialogDescription>
+                      Klasör seçin veya mevcut konumda yeni klasör oluşturun
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-4 py-4">
+                    {folderCurrentPath ? (
+                      <div className="flex flex-wrap gap-1 text-sm">
+                        <button
+                          type="button"
+                          className="text-primary hover:underline"
+                          onClick={() => handleFolderNavigate('')}
+                        >
+                          Kök
+                        </button>
+                        {folderCurrentPath.split('/').filter(Boolean).map((part, i) => {
+                          const path = folderCurrentPath.split('/').filter(Boolean).slice(0, i + 1).join('/') + '/'
+                          return (
+                            <span key={path}>
+                              <span className="text-muted-foreground mx-1">/</span>
+                              <button
+                                type="button"
+                                className="text-primary hover:underline"
+                                onClick={() => handleFolderNavigate(path.replace(/\/$/, ''))}
+                              >
+                                {part}
+                              </button>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    ) : null}
+                    <div className="flex gap-2">
+                      <Input
+                        value={newFolderName}
+                        onChange={(e) => setNewFolderName(e.target.value)}
+                        placeholder="Yeni klasör adı"
+                        onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
+                        className="flex-1"
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={handleCreateFolder}
+                        disabled={!newFolderName.trim() || folderCreating}
+                      >
+                        {folderCreating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
+                        Yeni Klasör
+                      </Button>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Klasörler</Label>
+                      {folderLoading ? (
+                        <p className="text-sm text-muted-foreground py-4">Yükleniyor...</p>
+                      ) : folderPrefixes.length === 0 ? (
+                        <p className="text-sm text-muted-foreground py-4 border rounded-lg text-center">
+                          {folderCurrentPath ? 'Alt klasör bulunamadı' : 'Klasör bulunamadı'}
+                        </p>
+                      ) : (
+                        <ul className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
+                          {!folderCurrentPath && (
+                            <li className="flex items-center justify-between gap-2 py-2 px-2 rounded hover:bg-accent/50">
+                              <span className="text-sm font-medium">/ (Kök)</span>
+                              <Button variant="outline" size="sm" onClick={() => handleFolderSelect('')}>
+                                <Check className="h-3 w-3 mr-1" />
+                                Seç
+                              </Button>
+                            </li>
+                          )}
+                          {folderPrefixes.map((p) => {
+                            const name = p.replace(/\/$/, '').split('/').pop() || p
+                            const isFolder = p.endsWith('/')
+                            const displayPath = isFolder ? p.slice(0, -1) : p
+                            return (
+                              <li key={p} className="flex items-center justify-between gap-2 py-2 px-2 rounded hover:bg-accent/50">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                  <span className="text-sm truncate">{name}</span>
+                                  {isFolder && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="text-xs"
+                                      onClick={() => handleFolderNavigate(displayPath)}
+                                    >
+                                      Giriş
+                                    </Button>
+                                  )}
+                                </div>
+                                <Button variant="outline" size="sm" onClick={() => handleFolderSelect(p)}>
+                                  <Check className="h-3 w-3 mr-1" />
+                                  Seç
+                                </Button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setFolderModalOpen(false)}>
+                      Kapat
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Boyut</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {(['50', '100', '500', '1000'] as const).map((s) => (
+                      <Button
+                        key={s}
+                        type="button"
+                        variant={imageSize === s ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setImageSize(s)}
+                      >
+                        {s}×{s}
+                      </Button>
+                    ))}
+                    <Button
+                      type="button"
+                      variant={imageSize === 'custom' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setImageSize('custom')}
+                    >
+                      Özel
+                    </Button>
+                  </div>
+                  {imageSize === 'custom' && (
+                    <Input
+                      type="number"
+                      min={1}
+                      max={2000}
+                      value={imageSizeCustom}
+                      onChange={(e) => setImageSizeCustom(parseInt(e.target.value, 10) || 200)}
+                      placeholder="px (kare)"
+                      className="mt-2"
+                    />
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <Label>Format</Label>
+                  <select
+                    value={imageFormat}
+                    onChange={(e) => setImageFormat(e.target.value as typeof imageFormat)}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="original">Orijinal</option>
+                    <option value="png">PNG</option>
+                    <option value="jpeg">JPEG</option>
+                    <option value="webp">WebP</option>
+                  </select>
+                </div>
+              </div>
+
+              <Button
+                onClick={handleImageUpload}
+                disabled={imageFiles.length === 0 || imageUploading}
+              >
+                {imageUploading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Yükleniyor...
+                  </>
+                ) : (
+                  <>
+                    <Upload className="h-4 w-4 mr-2" />
+                    Aktar ({imageFiles.length} dosya)
+                  </>
+                )}
+              </Button>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="ayarlar" className="mt-4">
@@ -650,38 +1071,107 @@ export function SettingsDataTransferPage() {
         </TabsContent>
       </Tabs>
 
-      <Dialog open={!!transferModal} onOpenChange={() => setTransferModal(null)}>
-        <DialogContent className="max-w-md">
+      <Dialog
+        open={!!transferModal}
+        onOpenChange={(open) => {
+          if (!open && transferProgress?.phase !== 'transferring') closeTransferModal()
+        }}
+      >
+        <DialogContent
+          className="max-w-lg"
+          showClose={transferProgress?.phase !== 'transferring'}
+          onPointerDownOutside={(e) => transferProgress?.phase === 'transferring' && e.preventDefault()}
+          onEscapeKeyDown={(e) => transferProgress?.phase === 'transferring' && e.preventDefault()}
+        >
           <DialogHeader>
-            <DialogTitle>Aktarımı Onayla</DialogTitle>
-            <DialogDescription>
-              {transferModal && (
-                <>
-                  <strong>{transferModal.card.sourceTable}</strong> (MySQL) →{' '}
-                  <strong>{transferModal.card.targetTable}</strong> (D1)
-                  <br />
-                  <br />
-                  {transferModal.card.selectedIndices.size} kayıt aktarılacak.
-                  <br />
-                  Sütun eşleştirmesi: {Object.entries(filterExcludedMapping(transferModal.card.columnMapping, transferModal.card.enabledMappingKeys)).length} alan
-                </>
-              )}
+            <DialogTitle>
+              {transferProgress?.phase === 'transferring'
+                ? 'Aktarım Devam Ediyor'
+                : transferProgress?.phase === 'done'
+                  ? 'Aktarım Tamamlandı'
+                  : transferProgress?.phase === 'error'
+                    ? 'Aktarım Hatası'
+                    : 'Aktarımı Onayla'}
+            </DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-3">
+                {transferModal && (
+                  <>
+                    <div className="text-sm">
+                      <strong>{transferModal.card.sourceTable}</strong> (MySQL) →{' '}
+                      <strong>{transferModal.card.targetTable}</strong> (D1)
+                    </div>
+                    {!transferProgress ? (
+                      <>
+                        <p>{transferModal.card.selectedIndices.size} kayıt aktarılacak.</p>
+                        <p>Sütun eşleştirmesi: {Object.entries(filterExcludedMapping(transferModal.card.columnMapping, transferModal.card.enabledMappingKeys)).length} alan</p>
+                      </>
+                    ) : (
+                      <div className="space-y-3 pt-2">
+                        {/* İlerleme çubuğu */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-sm">
+                            <span>
+                              {transferProgress.processedCount} / {transferProgress.totalCount} kayıt
+                            </span>
+                            <span>
+                              Paket {transferProgress.currentBatch} / {transferProgress.totalBatches}
+                            </span>
+                          </div>
+                          <div className="h-2.5 w-full rounded-full bg-muted overflow-hidden">
+                            <div
+                              className="h-full bg-primary transition-all duration-300 ease-out"
+                              style={{
+                                width: `${transferProgress.totalCount ? (transferProgress.processedCount / transferProgress.totalCount) * 100 : 0}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                        {/* Detaylar */}
+                        <div className="grid grid-cols-2 gap-2 text-sm rounded-lg bg-muted/50 p-3">
+                          <div>
+                            <span className="text-muted-foreground">Eklenen:</span>{' '}
+                            <span className="font-medium">{transferProgress.inserted}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Güncellenen:</span>{' '}
+                            <span className="font-medium">{transferProgress.updated}</span>
+                          </div>
+                        </div>
+                        {transferProgress.phase === 'transferring' && (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                            <span>Kayıtlar D1 veritabanına yazılıyor...</span>
+                          </div>
+                        )}
+                        {transferProgress.phase === 'error' && transferProgress.error && (
+                          <p className="text-sm text-destructive font-medium">{transferProgress.error}</p>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setTransferModal(null)}>
-              İptal
-            </Button>
-            <Button onClick={executeTransfer} disabled={transferring}>
-              {transferring ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Aktarılıyor...
-                </>
-              ) : (
-                'Aktar'
-              )}
-            </Button>
+            {!transferProgress ? (
+              <>
+                <Button variant="outline" onClick={closeTransferModal}>
+                  İptal
+                </Button>
+                <Button onClick={executeTransfer} disabled={transferring}>
+                  Aktar
+                </Button>
+              </>
+            ) : transferProgress.phase === 'transferring' ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Lütfen bekleyin...
+              </div>
+            ) : (
+              <Button onClick={closeTransferModal}>Kapat</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -13,8 +14,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PageLayout } from '@/components/layout/PageLayout'
-import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
 
@@ -54,60 +55,80 @@ const emptyForm = {
   status: 1,
 }
 
+/** Gruplar = product_categories where group_id=0 veya null */
 export function KategorilerPage() {
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
-  const [data, setData] = useState<ProductCategory[]>([])
   const [groups, setGroups] = useState<ProductGroup[]>([])
-  const [total, setTotal] = useState(0)
+  const [activeGroupId, setActiveGroupId] = useState<string>('')
+  const [search, setSearch] = useState('')
+  const [data, setData] = useState<ProductCategory[]>([])
   const [loading, setLoading] = useState(true)
+  const [groupsLoading, setGroupsLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
+  const [groupModalOpen, setGroupModalOpen] = useState(false)
+  const [groupForm, setGroupForm] = useState({ name: '', code: '', description: '' })
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [pageSize, setPageSize] = useState<PageSizeValue>(10)
   const hasFilter = search.length > 0
-  const limit = pageSize === 'fit' ? 9999 : pageSize
+
+  const fetchGroups = useCallback(async () => {
+    setGroupsLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/product-categories?group_id=0&limit=100`)
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Gruplar yüklenemedi')
+      const list = json.data || []
+      setGroups(list)
+      setActiveGroupId((prev) => (list.length > 0 && !prev ? String(list[0].id) : prev))
+    } catch {
+      setGroups([])
+    } finally {
+      setGroupsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchGroups()
+  }, [])
 
   const fetchData = useCallback(async () => {
+    if (!activeGroupId) return
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: String(limit) })
+      const params = new URLSearchParams({ limit: '9999', group_id: activeGroupId })
       if (search) params.set('search', search)
       const res = await fetch(`${API_URL}/api/product-categories?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
       setData(json.data || [])
-      setTotal(json.total ?? 0)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Yüklenemedi')
       setData([])
-      setTotal(0)
     } finally {
       setLoading(false)
     }
-  }, [page, search, limit])
+  }, [search, activeGroupId])
 
   useEffect(() => {
     fetchData()
   }, [fetchData])
 
-  useEffect(() => {
-    if (modalOpen) {
-      fetch(`${API_URL}/api/product-categories?group_id=0&limit=100`)
-        .then((r) => r.json())
-        .then((r) => setGroups(r.data || []))
-        .catch(() => setGroups([]))
-    }
-  }, [modalOpen])
-
-  const openNew = () => {
+  const openNew = async (parentCategoryId?: number) => {
     setEditingId(null)
-    setForm(emptyForm)
+    setForm({
+      ...emptyForm,
+      group_id: activeGroupId ? Number(activeGroupId) : ('' as number | ''),
+      category_id: parentCategoryId !== undefined ? parentCategoryId : (0 as number | ''),
+    })
     setModalOpen(true)
+    try {
+      const res = await fetch(`${API_URL}/api/product-categories/next-sort-order`)
+      const json = await res.json()
+      if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
+    } catch { /* ignore */ }
   }
 
   const openEdit = (item: ProductCategory) => {
@@ -149,8 +170,8 @@ export function KategorilerPage() {
       const body = {
         ...form,
         code: form.code || form.name.slice(0, 2).toUpperCase(),
-        group_id: form.group_id || undefined,
-        category_id: form.category_id || undefined,
+        group_id: (form.group_id === '' || form.group_id === undefined || form.group_id === null) ? undefined : Number(form.group_id),
+        category_id: (form.category_id === '' || form.category_id === undefined || form.category_id === null) ? 0 : Number(form.category_id),
         status: form.status,
       }
       const res = await fetch(url, {
@@ -186,6 +207,37 @@ export function KategorilerPage() {
     }
   }
 
+  async function handleSaveGroup(e: React.FormEvent) {
+    e.preventDefault()
+    if (!groupForm.name.trim()) return
+    setSaving(true)
+    try {
+      const res = await fetch(`${API_URL}/api/product-categories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: groupForm.name.trim(),
+          code: groupForm.code || groupForm.name.slice(0, 2).toUpperCase(),
+          description: groupForm.description || null,
+          group_id: 0,
+          category_id: 0,
+          sort_order: 0,
+          status: 1,
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Grup eklenemedi')
+      setGroupModalOpen(false)
+      setGroupForm({ name: '', code: '', description: '' })
+      fetchGroups()
+      toastSuccess('Grup eklendi', 'Yeni grup başarıyla oluşturuldu.')
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Grup eklenemedi')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <PageLayout
       title="Kategoriler"
@@ -194,85 +246,161 @@ export function KategorilerPage() {
       showRefresh
       onRefresh={() => {
         setSearch('')
-        setPage(1)
+        fetchGroups()
         fetchData()
       }}
       headerActions={
         <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Ara..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-8 w-48 h-9"
-            />
-          </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button variant="outline" size="icon" onClick={openNew}>
-                <Plus className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Yeni kategori</TooltipContent>
-          </Tooltip>
-          {hasFilter && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" onClick={() => { setSearch(''); setPage(1) }}>
-                  <X className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Filtreleri sıfırla</TooltipContent>
-            </Tooltip>
+          {groups.length > 0 && (
+            <>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Ara..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-8 w-48 h-9"
+                />
+              </div>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="icon" onClick={() => setGroupModalOpen(true)}>
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Yeni grup</TooltipContent>
+              </Tooltip>
+              {hasFilter && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" onClick={() => setSearch('')}>
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Filtreleri sıfırla</TooltipContent>
+                </Tooltip>
+              )}
+            </>
           )}
         </div>
       }
-      footerContent={
-        <TablePaginationFooter
-          total={total}
-          page={page}
-          pageSize={pageSize}
-          onPageChange={setPage}
-          onPageSizeChange={(s) => { setPageSize(s); setPage(1) }}
-          hasFilter={hasFilter}
-        />
-      }
+      footerContent={undefined}
     >
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium">Kategori Adı</th>
-                  <th className="text-left p-3 font-medium">Kod</th>
-                  <th className="text-left p-3 font-medium">Grup</th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
-                ) : data.length === 0 ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz kategori kaydı yok.'}</td></tr>
-                ) : (
-                  data.map((item) => (
-                    <tr
-                      key={item.id}
-                      className="border-b hover:bg-muted/30 cursor-pointer"
-                      onClick={() => openEdit(item)}
-                    >
-                      <td className="p-3">{item.name}</td>
-                      <td className="p-3">{item.code}</td>
-                      <td className="p-3">{item.group_id ? '#' + item.group_id : '—'}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+      {groupsLoading ? (
+        <Card>
+          <CardContent className="p-8 text-center text-muted-foreground">Gruplar yükleniyor...</CardContent>
+        </Card>
+      ) : groups.length === 0 ? (
+        <Card>
+          <CardContent className="p-8 text-center text-muted-foreground">
+            Henüz grup yok. Önce <Link to="/parametreler/gruplar" className="text-primary underline">Gruplar</Link> sayfasından grup ekleyin.
+          </CardContent>
+        </Card>
+      ) : (
+        <Tabs value={activeGroupId} onValueChange={setActiveGroupId} className="w-full">
+          <div className="flex items-center mb-4">
+            <TabsList className="flex-1">
+              {groups.map((g) => (
+                <TabsTrigger key={g.id} value={String(g.id)}>
+                  {g.name} ({g.code})
+                </TabsTrigger>
+              ))}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => openNew()}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-sm ml-1 px-2 text-muted-foreground hover:bg-background hover:text-foreground hover:shadow-sm transition-all shrink-0"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Yeni kategori (bu gruba)</TooltipContent>
+              </Tooltip>
+            </TabsList>
           </div>
-        </CardContent>
-      </Card>
+          {groups.map((g) => {
+            const mainCategories = data.filter((c) => !c.category_id || c.category_id === 0)
+            return (
+              <TabsContent key={g.id} value={String(g.id)} className="mt-0">
+                {loading ? (
+                  <Card>
+                    <CardContent className="p-8 text-center text-muted-foreground">Yükleniyor...</CardContent>
+                  </Card>
+                ) : error ? (
+                  <Card>
+                    <CardContent className="p-8 text-center text-destructive">{error}</CardContent>
+                  </Card>
+                ) : mainCategories.length === 0 ? (
+                  <Card>
+                    <CardContent className="p-8 text-center text-muted-foreground">
+                      Bu grupta henüz kategori yok.{' '}
+                      <Button variant="link" className="p-0 h-auto" onClick={() => openNew()}>
+                        İlk kategoriyi ekleyin
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {mainCategories.map((mainCat) => {
+                      const subcategories = data.filter((c) => c.category_id === mainCat.id)
+                      return (
+                        <Card key={mainCat.id} className="overflow-hidden">
+                          <div
+                            className="flex items-center justify-between gap-2 p-4 cursor-pointer hover:bg-muted/50 transition-colors border-b"
+                            onClick={() => openEdit(mainCat)}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium truncate">{mainCat.name}</p>
+                              <p className="text-xs text-muted-foreground">{mainCat.code}</p>
+                            </div>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="shrink-0 h-8 w-8"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    openNew(mainCat.id)
+                                  }}
+                                >
+                                  <Plus className="h-4 w-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Yeni alt kategori</TooltipContent>
+                            </Tooltip>
+                          </div>
+                          <CardContent className="p-0">
+                            {subcategories.length === 0 ? (
+                              <div className="p-3 text-sm text-muted-foreground text-center">
+                                Alt kategori yok
+                              </div>
+                            ) : (
+                              <ul className="divide-y">
+                                {subcategories.map((sub) => (
+                                  <li
+                                    key={sub.id}
+                                    className="flex items-center justify-between gap-2 px-4 py-2 cursor-pointer hover:bg-muted/30 transition-colors text-sm"
+                                    onClick={() => openEdit(sub)}
+                                  >
+                                    <span className="truncate">{sub.name}</span>
+                                    <span className="text-xs text-muted-foreground shrink-0">{sub.code}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </CardContent>
+                        </Card>
+                      )
+                    })}
+                  </div>
+                )}
+              </TabsContent>
+            )
+          })}
+        </Tabs>
+      )}
 
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
@@ -301,6 +429,20 @@ export function KategorilerPage() {
                 <option value="">Seçiniz</option>
                 {groups.map((g) => (
                   <option key={g.id} value={g.id}>{g.name} ({g.code})</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="category_id">Üst Kategori</Label>
+              <select
+                id="category_id"
+                value={form.category_id === '' || form.category_id === undefined ? 0 : form.category_id}
+                onChange={(e) => setForm((f) => ({ ...f, category_id: e.target.value ? parseInt(e.target.value) : 0 }))}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value={0}>Ana kategori</option>
+                {data.filter((c) => !c.category_id || c.category_id === 0).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name} ({c.code})</option>
                 ))}
               </select>
             </div>
@@ -365,6 +507,53 @@ export function KategorilerPage() {
                   <TooltipContent>Kaydet</TooltipContent>
                 </Tooltip>
               </div>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={groupModalOpen} onOpenChange={setGroupModalOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Yeni Grup</DialogTitle>
+            <DialogDescription>Grup bilgilerini girin. Gruplar product_categories tablosunda group_id=0 olarak saklanır.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSaveGroup} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="group-name">Grup Adı *</Label>
+              <Input
+                id="group-name"
+                value={groupForm.name}
+                onChange={(e) => setGroupForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="Örn: Elektronik"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="group-code">Kod</Label>
+              <Input
+                id="group-code"
+                value={groupForm.code}
+                onChange={(e) => setGroupForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))}
+                placeholder="Örn: EL"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="group-desc">Açıklama</Label>
+              <Input
+                id="group-desc"
+                value={groupForm.description}
+                onChange={(e) => setGroupForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="Kısa açıklama"
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setGroupModalOpen(false)}>
+                İptal
+              </Button>
+              <Button type="submit" disabled={saving || !groupForm.name.trim()}>
+                {saving ? 'Kaydediliyor...' : 'Kaydet'}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>

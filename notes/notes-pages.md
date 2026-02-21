@@ -11,6 +11,9 @@
 - arama veya filtreleme işlemi yapıldığında refresh yanında reset butonu görünür x ikonu ile
 - tablo ve liste içeren sayfaların footer alanında solda sayfalama ve kayıt sayıları (toplam ve göstterilen) olur.
 - satırlarda işlem butonu olmayacak, satırlara tıkladığımızda edit modal açılsın, modal footer da ikon olarak sil, kopyala, kaydet butonları olacak ve sağa yaslı olacak, modallarda aktif/pasif switch footer da sola yaslı olmalı
+- sayfalama < << 1 2 3 4 .. 20 >> > şeklinde olmalı
+- sayfada gösterilecek kayıt sayısı ayarı toggle buton olmalı, Sığdır, 10, 25, 50, 100. Varsayılan (default) Sığdır seçili yüklenecek.
+- Kayıt: X/Y (Gösterilen/Toplam) ve Sayfa A/B (Mevcut/Toplam)
 
 **Görsel İşlemleri**
 
