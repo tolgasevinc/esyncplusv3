@@ -1,5 +1,8 @@
+import { API_URL } from '@/lib/api'
+
 const STORAGE_KEY = 'esync-sidebar-menus'
 const HEADER_STORAGE_KEY = 'esync-sidebar-header'
+const API_CATEGORY = 'sidebar'
 
 /** Ayırıcı renk seçenekleri */
 export const SEPARATOR_COLORS = [
@@ -34,6 +37,17 @@ export interface SidebarMenuItem {
   separatorThickness?: number
 }
 
+/** Sidebar başlık (logo + uygulama adı) */
+export interface SidebarHeaderConfig {
+  logoPath?: string
+  title?: string
+}
+
+const DEFAULT_TITLE = 'eSync+'
+const STORAGE_EVENT = 'esync-sidebar-menus-updated'
+
+// ---------- Senkron (localStorage - fallback / cache) ----------
+
 export function getSidebarMenus(): SidebarMenuItem[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -44,21 +58,6 @@ export function getSidebarMenus(): SidebarMenuItem[] {
     return []
   }
 }
-
-const STORAGE_EVENT = 'esync-sidebar-menus-updated'
-
-export function saveSidebarMenus(items: SidebarMenuItem[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
-  window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
-}
-
-/** Sidebar başlık (logo + uygulama adı) */
-export interface SidebarHeaderConfig {
-  logoPath?: string
-  title?: string
-}
-
-const DEFAULT_TITLE = 'eSync+'
 
 export function getSidebarHeader(): SidebarHeaderConfig {
   try {
@@ -74,7 +73,101 @@ export function getSidebarHeader(): SidebarHeaderConfig {
   }
 }
 
-export function saveSidebarHeader(config: SidebarHeaderConfig): void {
-  localStorage.setItem(HEADER_STORAGE_KEY, JSON.stringify(config))
+// ---------- API (sidebar_menu_items tablosu) ----------
+
+/** API'den sidebar menülerini çeker. */
+export async function fetchSidebarMenus(): Promise<SidebarMenuItem[]> {
+  try {
+    const res = await fetch(`${API_URL}/api/sidebar-menu-items`)
+    if (!res.ok) return getSidebarMenus()
+    const items = (await res.json()) as SidebarMenuItem[]
+    if (Array.isArray(items) && items.length > 0) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
+      return items
+    }
+    return getSidebarMenus()
+  } catch {
+    return getSidebarMenus()
+  }
+}
+
+/** API'den sidebar header'ı çeker (app_settings). */
+export async function fetchSidebarHeader(): Promise<SidebarHeaderConfig> {
+  try {
+    const res = await fetch(`${API_URL}/api/app-settings?category=${encodeURIComponent(API_CATEGORY)}`)
+    if (!res.ok) return getSidebarHeader()
+    const data = (await res.json()) as Record<string, string>
+    const raw = data?.header
+    if (!raw) return getSidebarHeader()
+    const parsed = JSON.parse(raw) as SidebarHeaderConfig
+    const config = {
+      logoPath: parsed.logoPath,
+      title: parsed.title ?? DEFAULT_TITLE,
+    }
+    localStorage.setItem(HEADER_STORAGE_KEY, JSON.stringify(config))
+    return config
+  } catch {
+    return getSidebarHeader()
+  }
+}
+
+/** Menüleri API'ye ve localStorage'a kaydeder. API hatasında sessizce geçer (localStorage güncellenir). */
+export async function saveSidebarMenus(items: SidebarMenuItem[]): Promise<void> {
+  const toSave = items.map(({ iconDataUrl, ...rest }) => rest)
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
   window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
+  try {
+    const res = await fetch(`${API_URL}/api/sidebar-menu-items`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toSave),
+    })
+    if (res.ok) {
+      const saved = (await res.json()) as SidebarMenuItem[]
+      if (Array.isArray(saved) && saved.length > 0) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+      }
+    }
+  } catch {
+    // API hatası - localStorage zaten güncellendi
+  }
+}
+
+/** Menüleri API'ye aktarır. Hata durumunda throw eder (sync butonu için). */
+export async function syncSidebarMenusToApi(items: SidebarMenuItem[]): Promise<void> {
+  const toSave = items.map(({ iconDataUrl, ...rest }) => rest)
+  const res = await fetch(`${API_URL}/api/sidebar-menu-items`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(toSave),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error((err as { error?: string })?.error || `HTTP ${res.status}`)
+  }
+  const saved = (await res.json()) as SidebarMenuItem[]
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+  window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
+}
+
+/** Header'ı API'ye ve localStorage'a kaydeder */
+export async function saveSidebarHeader(config: SidebarHeaderConfig): Promise<void> {
+  const toSave = {
+    logoPath: config.logoPath,
+    title: config.title ?? DEFAULT_TITLE,
+  }
+  localStorage.setItem(HEADER_STORAGE_KEY, JSON.stringify(toSave))
+  window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
+  try {
+    await fetch(`${API_URL}/api/app-settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        category: API_CATEGORY,
+        settings: { header: JSON.stringify(toSave) },
+      }),
+    })
+  } catch {
+    // API hatası - localStorage zaten güncellendi
+  }
 }

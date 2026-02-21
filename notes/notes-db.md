@@ -61,14 +61,25 @@ updated_at
 - description
 - sort_order
 
-**common_tax_offices**
+**product_tax_rates**
 - name
-- city
-- code
+- value
+- description
+- sort_order
 
 **app_settings**
-
 - category
 - key
 - value
 - description
+
+**sidebar_menu_items**
+- item_id (benzersiz, client id)
+- sort_order
+- type (menu | separator)
+- label
+- link
+- module_id
+- icon_path
+- separator_color
+- separator_thickness

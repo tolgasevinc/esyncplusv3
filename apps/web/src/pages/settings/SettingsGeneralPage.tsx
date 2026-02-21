@@ -15,15 +15,18 @@ import {
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
 import {
-  getSidebarMenus,
   saveSidebarMenus,
+  syncSidebarMenusToApi,
   getSidebarHeader,
   saveSidebarHeader,
+  fetchSidebarMenus,
+  fetchSidebarHeader,
   type SidebarMenuItem,
   SEPARATOR_COLORS,
   SEPARATOR_THICKNESSES,
 } from '@/lib/sidebar-menus'
 import { APP_MODULES } from '@/lib/app-modules'
+import { toastSuccess, toastError } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { ImageInput, getImageDisplayUrl } from '@/components/ImageInput'
 
@@ -50,17 +53,37 @@ export function SettingsGeneralPage() {
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
   const [headerLogo, setHeaderLogo] = useState('')
   const [headerTitle, setHeaderTitle] = useState('')
+  const [syncing, setSyncing] = useState(false)
 
   useEffect(() => {
-    setMenus(getSidebarMenus())
-    const h = getSidebarHeader()
-    setHeaderLogo(h.logoPath || '')
-    setHeaderTitle(h.title || 'eSync+')
+    const load = async () => {
+      const [menusData, headerData] = await Promise.all([
+        fetchSidebarMenus(),
+        fetchSidebarHeader(),
+      ])
+      setMenus(menusData)
+      setHeaderLogo(headerData.logoPath || '')
+      setHeaderTitle(headerData.title || 'eSync+')
+    }
+    load()
   }, [])
 
   const handleSaveMenus = (items: SidebarMenuItem[]) => {
     setMenus(items)
     saveSidebarMenus(items)
+  }
+
+  const handleSyncToDb = async () => {
+    if (menus.length === 0) return
+    setSyncing(true)
+    try {
+      await syncSidebarMenusToApi(menus)
+      toastSuccess('Veritabanına aktarıldı', `${menus.length} menü öğesi kaydedildi.`)
+    } catch (err) {
+      toastError('Aktarım hatası', err instanceof Error ? err.message : 'Menüler aktarılamadı.')
+    } finally {
+      setSyncing(false)
+    }
   }
 
   const handleAddMenu = () => {
@@ -237,7 +260,7 @@ export function SettingsGeneralPage() {
             <CardHeader>
               <CardTitle>Menüler</CardTitle>
               <CardDescription>
-                Sidebar menü öğelerini ve ayırıcıları ekleyin. Sıralamak için sürükleyin, düzenlemek için kalem ikonuna tıklayın. İkon, etiket ve link bilgileri tarayıcıda saklanır.
+                Sidebar menü öğelerini ve ayırıcıları ekleyin. Sıralamak için sürükleyin, düzenlemek için kalem ikonuna tıklayın. Veriler veritabanında saklanır.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -303,7 +326,19 @@ export function SettingsGeneralPage() {
                 </div>
               </div>
               <div className="space-y-2">
-                <Label>Öğeler ({menus.length})</Label>
+                <div className="flex items-center justify-between gap-4">
+                  <Label>Öğeler ({menus.length})</Label>
+                  {menus.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleSyncToDb}
+                      disabled={syncing}
+                    >
+                      {syncing ? 'Aktarılıyor...' : 'Veritabanına aktar'}
+                    </Button>
+                  )}
+                </div>
                 {menus.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-4">Henüz menü eklenmedi.</p>
                 ) : (

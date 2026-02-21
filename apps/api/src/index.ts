@@ -2102,6 +2102,91 @@ app.post('/api/transfer/execute', async (c) => {
   }
 });
 
+// ========== SIDEBAR MENU ITEMS ==========
+app.get('/api/sidebar-menu-items', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results } = await c.env.DB.prepare(
+      `SELECT item_id as id, type, label, link, module_id as moduleId, icon_path as iconPath,
+              separator_color as separatorColor, separator_thickness as separatorThickness
+       FROM sidebar_menu_items ORDER BY sort_order, id`
+    ).all();
+    const items = (results || []).map((r: Record<string, unknown>) => ({
+      id: r.id,
+      type: r.type || 'menu',
+      label: r.label || '',
+      link: r.link || '',
+      moduleId: r.moduleId || undefined,
+      iconPath: r.iconPath || undefined,
+      separatorColor: r.separatorColor || undefined,
+      separatorThickness: r.separatorThickness ?? undefined,
+    }));
+    return c.json(items);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('no such table') || msg.includes('does not exist')) {
+      return c.json([]);
+    }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+app.put('/api/sidebar-menu-items', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<Array<{
+      id: string;
+      type?: string;
+      label?: string;
+      link?: string;
+      moduleId?: string;
+      iconPath?: string;
+      separatorColor?: string;
+      separatorThickness?: number;
+    }>>();
+    if (!Array.isArray(body)) return c.json({ error: 'items dizisi gerekli' }, 400);
+
+    await c.env.DB.prepare(`DELETE FROM sidebar_menu_items`).run();
+
+    for (let i = 0; i < body.length; i++) {
+      const item = body[i];
+      const item_id = (item?.id || `m-${Date.now()}-${i}`).toString();
+      const type = (item?.type || 'menu').toString();
+      const label = (item?.label || '').toString();
+      const link = (item?.link || '').toString();
+      const module_id = item?.moduleId?.toString().trim() || null;
+      const icon_path = item?.iconPath?.toString().trim() || null;
+      const separator_color = item?.separatorColor?.toString().trim() || null;
+      const separator_thickness = item?.separatorThickness ?? null;
+
+      await c.env.DB.prepare(
+        `INSERT INTO sidebar_menu_items (item_id, sort_order, type, label, link, module_id, icon_path, separator_color, separator_thickness)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(item_id, i, type, label, link, module_id, icon_path, separator_color, separator_thickness).run();
+    }
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT item_id as id, type, label, link, module_id as moduleId, icon_path as iconPath,
+              separator_color as separatorColor, separator_thickness as separatorThickness
+       FROM sidebar_menu_items ORDER BY sort_order, id`
+    ).all();
+    const items = (results || []).map((r: Record<string, unknown>) => ({
+      id: r.id,
+      type: r.type || 'menu',
+      label: r.label || '',
+      link: r.link || '',
+      moduleId: r.moduleId || undefined,
+      iconPath: r.iconPath || undefined,
+      separatorColor: r.separatorColor || undefined,
+      separatorThickness: r.separatorThickness ?? undefined,
+    }));
+    return c.json(items);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: msg }, 500);
+  }
+});
+
 // ========== APP SETTINGS ==========
 app.get('/api/app-settings', async (c) => {
   try {

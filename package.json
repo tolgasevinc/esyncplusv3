@@ -8,6 +8,9 @@
     "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
     "dev:api": "npm run dev -w api",
     "dev:web": "npm run dev -w web",
+    "dev:web-only": "npm run dev -w web",
+    "dev:remote": "concurrently \"npm run dev:api:remote\" \"npm run dev:web\"",
+    "dev:api:remote": "npm run dev:remote -w api",
     "build": "npm run build -w api && npm run build -w web",
     "deploy:api": "npm run deploy -w api",
     "deploy:web": "npm run deploy -w web"

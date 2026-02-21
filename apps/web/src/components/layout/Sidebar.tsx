@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { API_URL } from '@/lib/api'
 import { getImageDisplayUrl } from '@/components/ImageInput'
-import { getSidebarMenus, getSidebarHeader, SEPARATOR_COLORS } from '@/lib/sidebar-menus'
+import { getSidebarMenus, getSidebarHeader, fetchSidebarMenus, fetchSidebarHeader, SEPARATOR_COLORS } from '@/lib/sidebar-menus'
 import { getModuleById } from '@/lib/app-modules'
 import {
   Package,
@@ -34,16 +34,25 @@ export function Sidebar() {
   const { toggle, isDark } = useTheme()
 
   useEffect(() => {
-    const load = () => {
+    const loadFromStorage = () => {
       setMenus(getSidebarMenus())
       setHeader(getSidebarHeader())
     }
-    load()
-    window.addEventListener('esync-sidebar-menus-updated', load)
-    window.addEventListener('storage', load)
+    loadFromStorage()
+    const loadFromApi = async () => {
+      const [menusData, headerData] = await Promise.all([
+        fetchSidebarMenus(),
+        fetchSidebarHeader(),
+      ])
+      setMenus(menusData)
+      setHeader(headerData)
+    }
+    loadFromApi()
+    window.addEventListener('esync-sidebar-menus-updated', loadFromStorage)
+    window.addEventListener('storage', loadFromStorage)
     return () => {
-      window.removeEventListener('esync-sidebar-menus-updated', load)
-      window.removeEventListener('storage', load)
+      window.removeEventListener('esync-sidebar-menus-updated', loadFromStorage)
+      window.removeEventListener('storage', loadFromStorage)
     }
   }, [])
 
