@@ -2,7 +2,6 @@ import { Toaster } from 'sonner'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { HomePage } from '@/pages/HomePage'
-import { ProductsPage } from '@/pages/ProductsPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ParametersPage } from '@/pages/ParametersPage'
 import { MarkalarPage } from '@/pages/parameters/MarkalarPage'
@@ -11,7 +10,9 @@ import { GruplarPage } from '@/pages/parameters/GruplarPage'
 import { KategorilerPage } from '@/pages/parameters/KategorilerPage'
 import { UrunTipleriPage } from '@/pages/parameters/UrunTipleriPage'
 import { ParaBirimleriPage } from '@/pages/parameters/ParaBirimleriPage'
+import { VergiOranlariPage } from '@/pages/parameters/VergiOranlariPage'
 import { MusteriTipleriPage } from '@/pages/parameters/MusteriTipleriPage'
+import { ProductsPage } from '@/pages/products/ProductsPage'
 import { SettingsGeneralPage } from '@/pages/settings/SettingsGeneralPage'
 import { SettingsDatabasePage } from '@/pages/settings/SettingsDatabasePage'
 import { SettingsStoragePage } from '@/pages/settings/SettingsStoragePage'
@@ -28,7 +29,6 @@ function App() {
       <AppLayout>
       <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/products" element={<ProductsPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
         <Route path="/ayarlar/veritabani" element={<SettingsDatabasePage />} />
@@ -45,7 +45,10 @@ function App() {
         <Route path="/parametreler/kategoriler" element={<KategorilerPage />} />
         <Route path="/parametreler/urun-tipleri" element={<UrunTipleriPage />} />
         <Route path="/parametreler/para-birimleri" element={<ParaBirimleriPage />} />
+        <Route path="/parametreler/vergi-oranlari" element={<VergiOranlariPage />} />
         <Route path="/parametreler/musteri-tipleri" element={<MusteriTipleriPage />} />
+        <Route path="/products" element={<ProductsPage />} />
+        <Route path="/urunler" element={<Navigate to="/products" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppLayout>

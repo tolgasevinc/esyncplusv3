@@ -37,35 +37,11 @@ interface ImageInputProps {
   size?: ImageSize
   folderStorageKey: string
   placeholder?: string
+  /** İkonlar klasörü için: orijinal dosya adı korunur, boyut/format işlemleri uygulanır */
+  preserveFilename?: boolean
 }
 
-/** Kenar rengini al (köşe piksellerinin ortalaması). Şeffaf köşelerde beyaz döner. */
-function getEdgeColor(ctx: CanvasRenderingContext2D, w: number, h: number): string {
-  try {
-    const corners = [
-      ctx.getImageData(0, 0, 1, 1).data,
-      ctx.getImageData(w - 1, 0, 1, 1).data,
-      ctx.getImageData(0, h - 1, 1, 1).data,
-      ctx.getImageData(w - 1, h - 1, 1, 1).data,
-    ]
-    let r = 0, g = 0, b = 0, aSum = 0
-    for (const p of corners) {
-      r += p[0]
-      g += p[1]
-      b += p[2]
-      aSum += p[3]
-    }
-    const avgA = aSum / 4
-    if (avgA < 30) return '#ffffff'
-    const luminance = (r + g + b) / 3 / 255
-    if (luminance < 0.1) return '#ffffff'
-    return `rgb(${Math.round(r / 4)},${Math.round(g / 4)},${Math.round(b / 4)})`
-  } catch {
-    return '#ffffff'
-  }
-}
-
-/** Görseli kare yap: kısa kenarı uzun kenara eşitle, eklenen alanları kenar rengiyle doldur */
+/** Görseli kare yap: kısa kenarı uzun kenara eşitle. Arkaplan şeffaflığı korunur. */
 async function processToSquare(
   img: HTMLImageElement,
   targetSize: number
@@ -76,19 +52,12 @@ async function processToSquare(
   const canvas = document.createElement('canvas')
   canvas.width = targetSize
   canvas.height = targetSize
-  const ctx = canvas.getContext('2d')!
+  const ctx = canvas.getContext('2d', { alpha: true })!
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'high'
 
-  const tempCanvas = document.createElement('canvas')
-  tempCanvas.width = w
-  tempCanvas.height = h
-  const tctx = tempCanvas.getContext('2d')!
-  tctx.drawImage(img, 0, 0)
-  const fillColor = getEdgeColor(tctx, w, h)
-
-  ctx.fillStyle = fillColor
-  ctx.fillRect(0, 0, targetSize, targetSize)
+  // Şeffaf arkaplan - eklenen alanlar (letterbox) şeffaf kalır
+  ctx.clearRect(0, 0, targetSize, targetSize)
 
   const scale = Math.min(targetSize / w, targetSize / h)
   const dw = w * scale
@@ -112,6 +81,7 @@ export function ImageInput({
   size = 'brand',
   folderStorageKey,
   placeholder = 'Görsel linki',
+  preserveFilename = false,
 }: ImageInputProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
@@ -121,13 +91,14 @@ export function ImageInput({
   const [error, setError] = useState<string | null>(null)
 
   const targetSize = SIZE_MAP[size]
-  const folder = (typeof localStorage !== 'undefined' ? localStorage.getItem(folderStorageKey) : null) || 'images/'
+  const defaultFolder = folderStorageKey === 'ikonlar-klasor' ? 'icons/' : 'images/'
+  const folder = (typeof localStorage !== 'undefined' ? localStorage.getItem(folderStorageKey) : null) || defaultFolder
 
-
-  async function uploadBlob(blob: Blob, filename: string): Promise<string> {
+  async function uploadBlob(blob: Blob, filename: string, keepName: boolean): Promise<string> {
     const formData = new FormData()
     formData.append('file', blob, filename)
     formData.append('folder', folder)
+    if (keepName) formData.append('preserveFilename', 'true')
 
     const res = await fetch(`${API_URL}/storage/upload`, {
       method: 'POST',
@@ -138,6 +109,16 @@ export function ImageInput({
     return json.path
   }
 
+  /** Storage'daki eski görseli sil (dış URL'ler hariç) */
+  async function deleteOldImage(oldPath: string): Promise<void> {
+    if (!oldPath || oldPath.startsWith('http')) return
+    try {
+      await fetch(`${API_URL}/storage/delete?key=${encodeURIComponent(oldPath)}`, { method: 'DELETE' })
+    } catch {
+      // Silme hatası sessizce geç - yeni görsel yüklendi
+    }
+  }
+
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file || !file.type.startsWith('image/')) return
@@ -145,15 +126,26 @@ export function ImageInput({
     setUploading(true)
     setError(null)
     try {
-      const htmlImg = new Image()
-      htmlImg.src = URL.createObjectURL(file)
-      await new Promise<void>((r, reject) => {
-        htmlImg.onload = () => r()
-        htmlImg.onerror = () => reject(new Error('Görsel yüklenemedi'))
-      })
-      const blob = await processToSquare(htmlImg, targetSize)
-      URL.revokeObjectURL(htmlImg.src)
-      const path = await uploadBlob(blob, file.name.replace(/\.[^.]+$/, '.png'))
+      const isSvg = file.type === 'image/svg+xml'
+      const uploadFilename = preserveFilename ? file.name : file.name.replace(/\.[^.]+$/, '.png')
+
+      let blob: Blob
+      if (isSvg && preserveFilename) {
+        // SVG: işleme yapmadan orijinal olarak yükle
+        blob = file
+      } else {
+        const htmlImg = new Image()
+        htmlImg.src = URL.createObjectURL(file)
+        await new Promise<void>((r, reject) => {
+          htmlImg.onload = () => r()
+          htmlImg.onerror = () => reject(new Error('Görsel yüklenemedi'))
+        })
+        blob = await processToSquare(htmlImg, targetSize)
+        URL.revokeObjectURL(htmlImg.src)
+      }
+
+      const path = await uploadBlob(blob, uploadFilename, preserveFilename)
+      if (value) await deleteOldImage(value)
       onChange(path)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Yükleme başarısız')
@@ -203,7 +195,9 @@ export function ImageInput({
       img.src = linkPreview
       await new Promise<void>((r) => { img.onload = () => r() })
       const processed = await processToSquare(img, targetSize)
-      const url = await uploadBlob(processed, 'image.png')
+      const linkFilename = preserveFilename ? 'icon.png' : 'image.png'
+      const url = await uploadBlob(processed, linkFilename, preserveFilename)
+      if (value) await deleteOldImage(value)
       onChange(url)
       setLinkModalOpen(false)
       setLinkUrl('')

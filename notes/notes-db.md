@@ -7,6 +7,11 @@ is_deleted
 created_at
 updated_at
 
+**product_marketplaces**
+- name
+- code
+- logo
+
 **product_brands**
 
 - name
@@ -42,6 +47,24 @@ updated_at
 - code
 - description
 - sort_order
+
+**product_currencies**
+- name
+- code
+- symbol
+- is_default
+- sort_order
+
+**customer_types**
+- name
+- code
+- description
+- sort_order
+
+**common_tax_offices**
+- name
+- city
+- code
 
 **app_settings**
 

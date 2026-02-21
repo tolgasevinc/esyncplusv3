@@ -112,11 +112,13 @@ export function TablePaginationFooter({
     <div className="flex flex-wrap items-center justify-between gap-4">
       <div className="flex items-center gap-4">
         <span className="text-sm">
-          Kayıt: {showing}/{total}
+          Kayıt: <span className="font-semibold text-foreground">{showing}</span>
+          <span className="text-muted-foreground">/{total}</span>
           {hasFilter && ' (filtrelenmiş)'}
         </span>
-        <span className="text-sm text-muted-foreground">
-          Sayfa {page}/{totalPages}
+        <span className="text-sm">
+          Sayfa <span className="font-semibold text-foreground">{page}</span>
+          <span className="text-muted-foreground">/{totalPages}</span>
         </span>
         <div className="flex items-center gap-1">
           {PAGE_SIZE_OPTIONS.map((opt) => (
@@ -124,7 +126,7 @@ export function TablePaginationFooter({
               key={String(opt.value)}
               variant={pageSize === opt.value ? 'secondary' : 'outline'}
               size="sm"
-              className="h-7 px-2 text-xs"
+              className={`h-7 px-2 text-xs ${pageSize === opt.value ? 'ring-2 ring-primary font-semibold' : ''}`}
               onClick={() => handlePageSizeClick(opt.value)}
             >
               {opt.label}
@@ -175,7 +177,7 @@ export function TablePaginationFooter({
               key={n}
               variant={page === n ? 'secondary' : 'outline'}
               size="icon"
-              className="h-8 w-8"
+              className={`h-8 w-8 ${page === n ? 'ring-2 ring-primary font-semibold' : ''}`}
               onClick={() => onPageChange(n)}
             >
               {n}

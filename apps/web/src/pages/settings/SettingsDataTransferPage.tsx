@@ -771,11 +771,6 @@ export function SettingsDataTransferPage() {
             <div className="flex items-center gap-2 text-sm flex-wrap">
               <span className="text-muted-foreground">API:</span>
               <code className="bg-muted px-2 py-0.5 rounded text-xs">{API_URL}</code>
-              {API_URL.includes('localhost') && (
-                <span className="text-amber-600 font-medium">
-                  ⚠️ Yerel API → veriler Cloudflare D1'e değil, yerel D1'e yazılır. Canlı D1 için .env'de VITE_API_URL=deploy-URL kullanın veya canlı siteden aktarın.
-                </span>
-              )}
               <Button
                 variant="outline"
                 size="sm"

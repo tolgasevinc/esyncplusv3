@@ -174,10 +174,10 @@ npm run deploy:web
 
 | Ortam | Web URL | API URL | D1 |
 |-------|---------|---------|-----|
-| Yerel (`npm run dev`) | `http://localhost:5173` | `http://localhost:8787` | Yerel SQLite (Cloudflare Dashboard'da görünmez) |
+| Yerel (`npm run dev`) | `http://localhost:5173` | `http://localhost:8787` | Cloudflare D1 (remote, `--remote` ile) |
 | Deploy | https://www.e-syncplus.com | `https://project-v3-api.xxx.workers.dev` | Cloudflare D1 (remote) |
 
-Veri aktarımı yaparken `.env` içindeki `VITE_API_URL` değerine dikkat edin; localhost kullanırsanız yerel D1'e yazılır.
+Yerel DB yok; her zaman Cloudflare D1 kullanılır.
 
 ---
 

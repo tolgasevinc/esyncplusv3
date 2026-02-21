@@ -32,7 +32,7 @@ npm install
 # Her iki uygulamayı aynı anda çalıştır
 npm run dev
 
-# Sadece API (http://localhost:8787)
+# Sadece API (http://localhost:8787) - --remote ile Cloudflare D1 kullanır, yerel DB yok
 npm run dev:api
 
 # Sadece Web (http://localhost:5173)

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Cloud, Database, FolderOpen, Image, Package, Plus, Users } from 'lucide-react'
+import { Cloud, Database, FolderOpen, Image, Images, Package, Plus, Users } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
@@ -274,6 +274,12 @@ export function SettingsStoragePage() {
               Uygulama içinde kullanılacak özel klasörleri seçin. Klasör butonu ile listeden seçim yapın veya + ile mevcut konumda yeni klasör oluşturun.
             </p>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <FolderPickerCard
+                title="İkonlar"
+                description="Uygulamada kullanılan tüm ikonların saklanacağı klasör (sidebar, menü vb.). Yüklemede dosya adları korunur, boyut ve format işlemleri uygulanır."
+                icon={<Images className="h-5 w-5" />}
+                storageKey="ikonlar-klasor"
+              />
               <FolderPickerCard
                 title="Marka Logoları"
                 description="Marka logolarının saklanacağı klasör"

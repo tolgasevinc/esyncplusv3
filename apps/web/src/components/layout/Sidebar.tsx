@@ -1,16 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { API_URL } from '@/lib/api'
 import { getImageDisplayUrl } from '@/components/ImageInput'
+import { getSidebarMenus, getSidebarHeader, SEPARATOR_COLORS } from '@/lib/sidebar-menus'
+import { getModuleById } from '@/lib/app-modules'
 import {
   Package,
-  Users,
-  Truck,
-  Tag,
-  Umbrella,
-  Database,
-  ShoppingCart,
-  Store,
   Moon,
   Sun,
   Bell,
@@ -18,8 +13,6 @@ import {
   SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
-  FileText,
-  LucideIcon,
 } from 'lucide-react'
 import { useTheme } from '@/contexts/ThemeContext'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -33,66 +26,26 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-const SIDEBAR_SEPARATOR = 'border-orange-500 border-t-2'
-
-const ICONS_BASE = 'images/icons/'
-
-function labelToIconPath(label: string): string {
-  const tr = label
-    .toLowerCase()
-    .replace(/ş/g, 's')
-    .replace(/ü/g, 'u')
-    .replace(/ı/g, 'i')
-    .replace(/ö/g, 'o')
-    .replace(/ç/g, 'c')
-    .replace(/ğ/g, 'g')
-  return `${ICONS_BASE}icon-${tr}.png`
-}
-
-function MenuIcon({ label, iconPath, fallback: FallbackIcon }: { label: string; iconPath?: string; fallback: LucideIcon }) {
-  const [error, setError] = useState(false)
-  const path = iconPath ?? labelToIconPath(label)
-  const src = getImageDisplayUrl(path)
-
-  if (error) {
-    return <FallbackIcon className="w-5 h-5 shrink-0" />
-  }
-
-  return (
-    <img
-      src={src}
-      alt=""
-      className="w-5 h-5 shrink-0 object-contain"
-      onError={() => setError(true)}
-    />
-  )
-}
-
-type MenuItem = { label: string; icon: LucideIcon; iconPath?: string }
-
-const menuGroups: MenuItem[][] = [
-  [
-    { label: 'Products', icon: Package, iconPath: 'images/icons/1771574151333-tn563lke5gr.png' },
-    { label: 'Customers', icon: Users, iconPath: 'images/icons/1771574150973-3ot1twxfpq3.png' },
-    { label: 'Suppliers', icon: Truck, iconPath: 'images/icons/1771574279698-dwfyqplj5ek.png' },
-    { label: 'E-Documents', icon: FileText, iconPath: 'images/icons/1771575433321-8yvk6plup8y.webp' },
-  ],
-  [{ label: 'Offers', icon: Tag, iconPath: 'images/icons/1771574279885-9xi1myoa9n.png' }],
-  [
-    { label: 'Paraşüt', icon: Umbrella, iconPath: 'images/icons/1771575433902-gwz671434kc.webp' },
-    { label: 'Dia', icon: Database, iconPath: 'images/icons/1771575433720-0xigytccnxpl.webp' },
-  ],
-  [
-    { label: 'OKM', icon: ShoppingCart, iconPath: 'images/icons/1771575434113-1d9nide42zr.webp' },
-    { label: 'Opencart', icon: Store, iconPath: 'images/icons/1771575433530-d1y2j84npq8.webp' },
-    { label: 'Shopify', icon: Store, iconPath: 'images/icons/1771575113808-6fvfoeof6ei.webp' },
-  ],
-]
-
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
+  const [menus, setMenus] = useState<ReturnType<typeof getSidebarMenus>>([])
+  const [header, setHeader] = useState<ReturnType<typeof getSidebarHeader>>(getSidebarHeader())
   const location = useLocation()
   const { toggle, isDark } = useTheme()
+
+  useEffect(() => {
+    const load = () => {
+      setMenus(getSidebarMenus())
+      setHeader(getSidebarHeader())
+    }
+    load()
+    window.addEventListener('esync-sidebar-menus-updated', load)
+    window.addEventListener('storage', load)
+    return () => {
+      window.removeEventListener('esync-sidebar-menus-updated', load)
+      window.removeEventListener('storage', load)
+    }
+  }, [])
 
   return (
     <aside
@@ -102,13 +55,23 @@ export function Sidebar() {
       )}
     >
       {/* Header - Sticky */}
-        <header className={cn('sticky top-0 z-10 flex items-center gap-2 p-4 bg-sidebar shrink-0 border-b-2 border-orange-500', SIDEBAR_SEPARATOR)}>
-        <Link to="/" className="flex items-center gap-2 min-w-0">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground shrink-0">
-            <Package className="w-5 h-5" />
-          </div>
+        <header className={cn('sticky top-0 z-10 flex items-center justify-center p-4 bg-sidebar shrink-0 border-b border-gray-200 dark:border-gray-600 w-full')}>
+        <Link to="/" className={cn('flex items-center gap-2 min-w-0', !collapsed && 'w-full justify-center')}>
+          {header.logoPath ? (
+            <div className="w-8 h-8 shrink-0 overflow-hidden flex items-center justify-center">
+              <img
+                src={getImageDisplayUrl(header.logoPath)}
+                alt=""
+                className="w-full h-full object-contain"
+              />
+            </div>
+          ) : (
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground shrink-0">
+              <Package className="w-5 h-5" />
+            </div>
+          )}
           {!collapsed && (
-            <h1 className="font-bold text-lg text-foreground truncate">eSync+</h1>
+            <h1 className="font-bold text-lg text-foreground truncate">{header.title || 'eSync+'}</h1>
           )}
         </Link>
       </header>
@@ -116,52 +79,69 @@ export function Sidebar() {
       {/* Body - Scrollable */}
       <nav className="flex-1 overflow-y-auto py-4">
         <div className="space-y-1 px-3">
-          {menuGroups.map((group, groupIndex) => (
-            <div key={groupIndex}>
-              {groupIndex > 0 && (
-                <div className={cn('my-3', SIDEBAR_SEPARATOR)} />
-              )}
-              {group.map((item) => {
-                const href = item.label === 'Products' ? '/products' : undefined
-                const content = (
-                  <>
-                    <MenuIcon label={item.label} iconPath={item.iconPath} fallback={item.icon} />
-                    {!collapsed && <span>{item.label}</span>}
-                  </>
-                )
-                return href ? (
-                  <Link
-                    key={item.label}
-                    to={href}
-                    className={cn(
-                      buttonVariants({ variant: 'ghost' }),
-                      'w-full justify-start gap-3',
-                      collapsed && 'justify-center px-0',
-                      location.pathname === href && 'bg-accent'
-                    )}
-                  >
-                    {content}
-                  </Link>
+          {menus.map((item) => {
+            if (item.type === 'separator') {
+              const colorClass = SEPARATOR_COLORS.find((c) => c.id === item.separatorColor)?.class ?? 'border-border'
+              const thickness = item.separatorThickness ?? 1
+              const thicknessClass = thickness >= 4 ? 'border-t-4' : thickness >= 2 ? 'border-t-2' : 'border-t'
+              return (
+                <div
+                  key={item.id}
+                  className={cn(thicknessClass, colorClass, 'my-2', collapsed && 'mx-2')}
+                  role="separator"
+                />
+              )
+            }
+            const href =
+              (item.moduleId ? getModuleById(item.moduleId)?.path : undefined) || item.link?.trim() || undefined
+            const iconSrc = item.iconPath
+              ? getImageDisplayUrl(item.iconPath)
+              : item.iconDataUrl || ''
+            const content = (
+              <>
+                {iconSrc ? (
+                  <img
+                    src={iconSrc}
+                    alt=""
+                    className="w-10 h-10 shrink-0 object-contain"
+                  />
                 ) : (
-                  <Button
-                    key={item.label}
-                    variant="ghost"
-                    className={cn(
-                      'w-full justify-start gap-3',
-                      collapsed && 'justify-center px-0'
-                    )}
-                  >
-                    {content}
-                  </Button>
-                )
-              })}
-            </div>
-          ))}
+                  <Package className="w-10 h-10 shrink-0 opacity-50" />
+                )}
+                {!collapsed && <span>{item.label}</span>}
+              </>
+            )
+            return href ? (
+              <Link
+                key={item.id}
+                to={href}
+                className={cn(
+                  buttonVariants({ variant: 'ghost' }),
+                  'w-full justify-start gap-3',
+                  collapsed && 'justify-center px-0',
+                  location.pathname === href && 'bg-accent'
+                )}
+              >
+                {content}
+              </Link>
+            ) : (
+              <Button
+                key={item.id}
+                variant="ghost"
+                className={cn(
+                  'w-full justify-start gap-3',
+                  collapsed && 'justify-center px-0'
+                )}
+              >
+                {content}
+              </Button>
+            )
+          })}
         </div>
       </nav>
 
       {/* Footer */}
-      <footer className={cn('shrink-0 p-3 space-y-3', SIDEBAR_SEPARATOR)}>
+      <footer className={cn('shrink-0 p-3 space-y-3 border-t border-gray-200 dark:border-gray-600 w-full')}>
         {/* 5 Butonlar */}
         {collapsed ? (
           <DropdownMenu>
@@ -258,7 +238,7 @@ export function Sidebar() {
             <TooltipContent side="right" className="max-w-xs">
               <p className="font-medium">API: {API_URL}</p>
               <p className="text-xs mt-1 opacity-90">
-                Tüm işlemler (ekleme, güncelleme, silme) bu sunucuya gider. localhost = yerel D1, deploy URL = Cloudflare D1.
+                Tüm işlemler (ekleme, güncelleme, silme) bu sunucuya gider. D1 her zaman Cloudflare remote.
               </p>
             </TooltipContent>
           </Tooltip>

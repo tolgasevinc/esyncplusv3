@@ -1,15 +1,17 @@
 import { Link } from 'react-router-dom'
-import { Package, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, UserCircle } from 'lucide-react'
+import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
 const productTables = [
+  { id: 'urunler', title: 'Ürünler', icon: PackageSearch, path: '/products' },
   { id: 'markalar', title: 'Markalar', icon: Tag, path: '/parametreler/markalar' },
   { id: 'birimler', title: 'Birimler', icon: Ruler, path: '/parametreler/birimler' },
   { id: 'gruplar', title: 'Gruplar', icon: FolderTree, path: '/parametreler/gruplar' },
   { id: 'kategoriler', title: 'Kategoriler', icon: Layers, path: '/parametreler/kategoriler' },
   { id: 'urun-tipleri', title: 'Ürün Tipleri', icon: Type, path: '/parametreler/urun-tipleri' },
   { id: 'para-birimleri', title: 'Para Birimleri', icon: CircleDollarSign, path: '/parametreler/para-birimleri' },
+  { id: 'vergi-oranlari', title: 'Vergi Oranları', icon: Percent, path: '/parametreler/vergi-oranlari' },
 ]
 
 const customerTables = [
@@ -35,7 +37,7 @@ export function ParametersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 pt-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {productTables.map((table) => (
                 <Link key={table.id} to={table.path}>
                   <div
@@ -69,7 +71,7 @@ export function ParametersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 pt-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {customerTables.map((table) => (
                 <Link key={table.id} to={table.path}>
                   <div

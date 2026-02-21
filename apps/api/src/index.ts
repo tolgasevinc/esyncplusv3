@@ -366,6 +366,172 @@ app.delete('/api/product-brands/:id', async (c) => {
   }
 });
 
+// ========== PRODUCTS (Ürünler) ==========
+app.get('/api/products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE p.is_deleted = 0';
+    const params: (string | number)[] = [];
+    if (search) {
+      where += ' AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM products p ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.unit_id, p.currency_id,
+       p.price, p.quantity, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
+       p.created_at, p.updated_at,
+       b.name as brand_name, c.name as category_name, t.name as type_name, u.name as unit_name, cur.symbol as currency_symbol
+       FROM products p
+       LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
+       LEFT JOIN product_categories c ON p.category_id = c.id AND c.is_deleted = 0
+       LEFT JOIN product_types t ON p.type_id = t.id AND t.is_deleted = 0
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       ${where} ORDER BY p.sort_order, p.name LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/products/next-sort-order', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const row = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM products WHERE is_deleted = 0`
+    ).first<{ next: number }>();
+    return c.json({ next: row?.next ?? 1 });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/products/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const row = await c.env.DB.prepare(
+      `SELECT p.*, b.name as brand_name, c.name as category_name, t.name as type_name, u.name as unit_name, cur.name as currency_name, cur.symbol as currency_symbol
+       FROM products p
+       LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
+       LEFT JOIN product_categories c ON p.category_id = c.id AND c.is_deleted = 0
+       LEFT JOIN product_types t ON p.type_id = t.id AND t.is_deleted = 0
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0`
+    ).bind(id).first();
+    if (!row) return c.json({ error: 'Ürün bulunamadı' }, 404);
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      name: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
+      type_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
+      image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
+      sort_order?: number; status?: number;
+    }>();
+    const name = (body.name || '').trim();
+    if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
+    const sort_order = body.sort_order ?? 0;
+    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    await c.env.DB.prepare(
+      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      name,
+      body.sku?.trim() || null,
+      body.barcode?.trim() || null,
+      body.brand_id || null,
+      body.category_id || null,
+      body.type_id || null,
+      body.unit_id || null,
+      body.currency_id || null,
+      body.price ?? 0,
+      body.quantity ?? 0,
+      body.image?.trim() || null,
+      body.tax_rate ?? 0,
+      body.supplier_code?.trim() || null,
+      body.gtip_code?.trim() || null,
+      sort_order,
+      status
+    ).run();
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM products WHERE id = last_insert_rowid()`
+    ).all();
+    return c.json(results![0], 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/products/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{
+      name?: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
+      type_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
+      image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
+      sort_order?: number; status?: number;
+    }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Ürün bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
+    if (body.sku !== undefined) { updates.push('sku = ?'); values.push(body.sku?.trim() || null); }
+    if (body.barcode !== undefined) { updates.push('barcode = ?'); values.push(body.barcode?.trim() || null); }
+    if (body.brand_id !== undefined) { updates.push('brand_id = ?'); values.push(body.brand_id || null); }
+    if (body.category_id !== undefined) { updates.push('category_id = ?'); values.push(body.category_id || null); }
+    if (body.type_id !== undefined) { updates.push('type_id = ?'); values.push(body.type_id || null); }
+    if (body.unit_id !== undefined) { updates.push('unit_id = ?'); values.push(body.unit_id || null); }
+    if (body.currency_id !== undefined) { updates.push('currency_id = ?'); values.push(body.currency_id || null); }
+    if (body.price !== undefined) { updates.push('price = ?'); values.push(body.price); }
+    if (body.quantity !== undefined) { updates.push('quantity = ?'); values.push(body.quantity); }
+    if (body.image !== undefined) { updates.push('image = ?'); values.push(body.image?.trim() || null); }
+    if (body.tax_rate !== undefined) { updates.push('tax_rate = ?'); values.push(body.tax_rate); }
+    if (body.supplier_code !== undefined) { updates.push('supplier_code = ?'); values.push(body.supplier_code?.trim() || null); }
+    if (body.gtip_code !== undefined) { updates.push('gtip_code = ?'); values.push(body.gtip_code?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run();
+    const { results } = await c.env.DB.prepare(`SELECT * FROM products WHERE id = ?`).bind(id).all();
+    return c.json(results![0]);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/products/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const res = await c.env.DB.prepare(
+      `UPDATE products SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Ürün bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 // ========== PRODUCT UNITS (Birimler) ==========
 app.get('/api/product-units', async (c) => {
   try {
@@ -695,6 +861,108 @@ app.delete('/api/product-currencies/:id', async (c) => {
   }
 });
 
+// ========== PRODUCT TAX RATES (Vergi Oranları) ==========
+app.get('/api/product-tax-rates', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE is_deleted = 0 AND status = 1';
+    const params: (string | number)[] = [];
+    if (search) {
+      where += ' AND (name LIKE ? OR description LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM product_tax_rates ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, value, description, sort_order, status, created_at FROM product_tax_rates ${where}
+       ORDER BY sort_order, name LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/product-tax-rates/next-sort-order', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const row = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM product_tax_rates WHERE is_deleted = 0`
+    ).first<{ next: number }>();
+    return c.json({ next: row?.next ?? 1 });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/product-tax-rates', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ name: string; value?: number; description?: string; sort_order?: number; status?: number }>();
+    const name = (body.name || '').trim();
+    if (!name) return c.json({ error: 'Vergi oranı adı gerekli' }, 400);
+    const value = body.value ?? 0;
+    const description = body.description?.trim() || null;
+    const sort_order = body.sort_order ?? 0;
+    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    await c.env.DB.prepare(
+      `INSERT INTO product_tax_rates (name, value, description, sort_order, status) VALUES (?, ?, ?, ?, ?)`
+    ).bind(name, value, description, sort_order, status).run();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, value, description, sort_order, status, created_at FROM product_tax_rates WHERE id = last_insert_rowid()`
+    ).all();
+    return c.json(results![0], 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/product-tax-rates/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ name?: string; value?: number; description?: string; sort_order?: number; status?: number }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM product_tax_rates WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Vergi oranı bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
+    if (body.value !== undefined) { updates.push('value = ?'); values.push(body.value); }
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE product_tax_rates SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(
+      `SELECT id, name, value, description, sort_order, status, created_at, updated_at FROM product_tax_rates WHERE id = ?`
+    ).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/product-tax-rates/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const res = await c.env.DB.prepare(
+      `UPDATE product_tax_rates SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Vergi oranı bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 // ========== CUSTOMER TYPES (Müşteri Tipleri) ==========
 app.get('/api/customer-types', async (c) => {
   try {
@@ -917,7 +1185,7 @@ app.get('/api/product-groups', async (c) => {
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
     const offset = (page - 1) * limit;
-    let where = 'WHERE is_deleted = 0 AND status = 1';
+    let where = 'WHERE is_deleted = 0 AND (status = 1 OR status IS NULL)';
     const params: (string | number)[] = [];
     if (search) {
       where += ' AND (name LIKE ? OR code LIKE ?)';
@@ -1015,138 +1283,6 @@ app.delete('/api/product-groups/:id', async (c) => {
   }
 });
 
-// ========== PRODUCTS (Ürünler) ==========
-app.get('/api/products', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const search = (c.req.query('search') || '').trim();
-    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
-    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
-    const offset = (page - 1) * limit;
-    let where = 'WHERE p.is_deleted = 0';
-    const params: (string | number)[] = [];
-    if (search) {
-      where += ' AND (p.name LIKE ? OR p.code LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
-    }
-    const countRes = await c.env.DB.prepare(
-      `SELECT COUNT(*) as total FROM products p ${where}`
-    ).bind(...params).first<{ total: number }>();
-    const { results } = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.code, p.brand_id, p.category_id, p.type_id, p.unit_id, p.currency_id,
-        p.price, p.quantity, p.image, p.sort_order, p.status, p.created_at,
-        b.name as brand_name, b.image as brand_image, c.name as category_name, u.name as unit_name
-       FROM products p
-       LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
-       LEFT JOIN product_categories c ON p.category_id = c.id AND c.is_deleted = 0
-       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
-       ${where}
-       ORDER BY p.sort_order, p.name LIMIT ? OFFSET ?`
-    ).bind(...params, limit, offset).all();
-    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
-  }
-});
-
-app.get('/api/products/next-sort-order', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const row = await c.env.DB.prepare(
-      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM products WHERE is_deleted = 0`
-    ).first<{ next: number }>();
-    return c.json({ next: row?.next ?? 1 });
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
-  }
-});
-
-app.post('/api/products', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const body = await c.req.json<{
-      name: string; code?: string; brand_id?: number; category_id?: number; type_id?: number;
-      unit_id?: number; currency_id?: number; price?: number; quantity?: number;
-      image?: string; sort_order?: number; status?: number;
-    }>();
-    const name = (body.name || '').trim();
-    if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
-    const code = body.code?.trim() || null;
-    const brand_id = body.brand_id ?? null;
-    const category_id = body.category_id ?? null;
-    const type_id = body.type_id ?? null;
-    const unit_id = body.unit_id ?? null;
-    const currency_id = body.currency_id ?? null;
-    const price = body.price ?? 0;
-    const quantity = body.quantity ?? 0;
-    const image = body.image?.trim() || null;
-    const sort_order = body.sort_order ?? 0;
-    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
-    await c.env.DB.prepare(
-      `INSERT INTO products (name, code, brand_id, category_id, type_id, unit_id, currency_id, price, quantity, image, sort_order, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(name, code, brand_id, category_id, type_id, unit_id, currency_id, price, quantity, image, sort_order, status).run();
-    const { results } = await c.env.DB.prepare(
-      `SELECT id, name, code, brand_id, category_id, type_id, unit_id, currency_id, price, quantity, image, sort_order, status, created_at FROM products WHERE id = last_insert_rowid()`
-    ).all();
-    return c.json(results![0], 201);
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
-  }
-});
-
-app.put('/api/products/:id', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const id = c.req.param('id');
-    const body = await c.req.json<{
-      name?: string; code?: string; brand_id?: number; category_id?: number; type_id?: number;
-      unit_id?: number; currency_id?: number; price?: number; quantity?: number;
-      image?: string; sort_order?: number; status?: number;
-    }>();
-    const existing = await c.env.DB.prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`).bind(id).first();
-    if (!existing) return c.json({ error: 'Ürün bulunamadı' }, 404);
-    const updates: string[] = [];
-    const values: (string | number | null)[] = [];
-    if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
-    if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code?.trim() || null); }
-    if (body.brand_id !== undefined) { updates.push('brand_id = ?'); values.push(body.brand_id ?? null); }
-    if (body.category_id !== undefined) { updates.push('category_id = ?'); values.push(body.category_id ?? null); }
-    if (body.type_id !== undefined) { updates.push('type_id = ?'); values.push(body.type_id ?? null); }
-    if (body.unit_id !== undefined) { updates.push('unit_id = ?'); values.push(body.unit_id ?? null); }
-    if (body.currency_id !== undefined) { updates.push('currency_id = ?'); values.push(body.currency_id ?? null); }
-    if (body.price !== undefined) { updates.push('price = ?'); values.push(body.price); }
-    if (body.quantity !== undefined) { updates.push('quantity = ?'); values.push(body.quantity); }
-    if (body.image !== undefined) { updates.push('image = ?'); values.push(body.image?.trim() || null); }
-    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
-    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
-    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
-    updates.push("updated_at = datetime('now')");
-    values.push(id);
-    await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
-    const row = await c.env.DB.prepare(
-      `SELECT id, name, code, brand_id, category_id, type_id, unit_id, currency_id, price, quantity, image, sort_order, status, created_at, updated_at FROM products WHERE id = ?`
-    ).bind(id).first();
-    return c.json(row);
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
-  }
-});
-
-app.delete('/api/products/:id', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const id = c.req.param('id');
-    const res = await c.env.DB.prepare(
-      `UPDATE products SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
-    ).bind(id).run();
-    if (res.meta.changes === 0) return c.json({ error: 'Ürün bulunamadı' }, 404);
-    return c.json({ success: true });
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
-  }
-});
-
 // ========== PRODUCT CATEGORIES (Kategoriler) ==========
 app.get('/api/product-categories', async (c) => {
   try {
@@ -1157,7 +1293,7 @@ app.get('/api/product-categories', async (c) => {
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
     const offset = (page - 1) * limit;
-    let where = 'WHERE is_deleted = 0 AND status = 1';
+    let where = 'WHERE is_deleted = 0 AND (status = 1 OR status IS NULL)';
     const params: (string | number)[] = [];
     if (search) {
       where += ' AND (name LIKE ? OR code LIKE ?)';
@@ -1324,18 +1460,30 @@ app.put('/storage/folder', async (c) => {
 });
 
 // R2 Storage - Dosya yükle
+// preserveFilename=true: İkonlar klasörü için - orijinal dosya adı korunur (boyut/format işlemleri client'ta uygulanır)
 app.post('/storage/upload', async (c) => {
   try {
     if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
     const body = await c.req.parseBody();
     const file = body.file;
     const folder = (body.folder as string) || 'images/';
+    const preserveFilename = body.preserveFilename === 'true' || body.preserveFilename === true;
     if (!file || typeof file === 'string') return c.json({ error: 'Dosya gerekli' }, 400);
 
     const f = file as File;
     const ext = f.name.split('.').pop()?.toLowerCase() || 'png';
-    const safeExt = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext) ? ext : 'png';
-    const key = `${folder.replace(/\/+$/, '')}/${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
+    const safeExt = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) ? ext : 'png';
+
+    let key: string;
+    if (preserveFilename) {
+      // Orijinal dosya adını koru (güvenli karakterlere çevir)
+      const baseName = f.name.replace(/\.[^.]+$/, '');
+      const safeName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100) || 'icon';
+      const finalName = `${safeName}.${safeExt}`;
+      key = `${folder.replace(/\/+$/, '')}/${finalName}`;
+    } else {
+      key = `${folder.replace(/\/+$/, '')}/${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
+    }
 
     const buf = await f.arrayBuffer();
     await c.env.STORAGE.put(key, buf, {
@@ -1345,6 +1493,19 @@ app.post('/storage/upload', async (c) => {
     return c.json({ path: key });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Yükleme hatası' }, 500);
+  }
+});
+
+// R2 Storage - Dosya sil (eski görsel değiştirildiğinde)
+app.delete('/storage/delete', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    const key = c.req.query('key');
+    if (!key) return c.json({ error: 'key gerekli' }, 400);
+    await c.env.STORAGE.delete(key);
+    return c.json({ ok: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Silme hatası' }, 500);
   }
 });
 
@@ -1546,7 +1707,7 @@ app.get('/api/d1/table-count/:table', async (c) => {
 app.get('/api/d1/debug', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'D1 bulunamadı' }, 500);
-    const tables = ['product_brands', 'product_categories', 'product_groups', 'product_types', 'product_currencies', 'product_unit', 'products', 'customer_types', 'common_tax_offices', 'app_settings'];
+    const tables = ['product_brands', 'product_categories', 'product_groups', 'product_types', 'product_currencies', 'product_unit', 'customer_types', 'common_tax_offices', 'app_settings'];
     const counts: Record<string, number> = {};
     for (const t of tables) {
       try {
@@ -1752,8 +1913,32 @@ app.post('/api/transfer/execute-batch', async (c) => {
         if (existing) updated++;
         else inserted++;
       } else {
-        await c.env.DB.prepare(`INSERT INTO ${safeTableFinal} (${finalColList}) VALUES (${finalPlaceholders})`).bind(...values).run();
-        inserted++;
+        const upsertCol = 'code';
+        const colIdx = allTargetCols.findIndex((col) => String(col).toLowerCase() === upsertCol);
+        const hasUpsertCol = colIdx >= 0;
+        const upsertVal = hasUpsertCol ? values[colIdx] : null;
+        let existing: { id: number } | null = null;
+        if (hasUpsertCol && upsertVal != null && String(upsertVal).trim()) {
+          existing = await c.env.DB.prepare(
+            `SELECT id FROM ${safeTableFinal} WHERE "${upsertCol.replace(/"/g, '""')}" = ? AND is_deleted = 0`
+          ).bind(String(upsertVal).trim()).first() as { id: number } | null;
+        }
+        if (existing) {
+          const updateCols = allTargetCols.filter(
+            (col) => { const l = String(col).toLowerCase(); return l !== 'id' && l !== 'created_at'; }
+          );
+          const updateSet = updateCols
+            .map((col) => `"${String(col).replace(/"/g, '""')}" = ?`)
+            .join(', ');
+          const updateValues = updateCols.map((col) => values[allTargetCols.indexOf(col)]);
+          await c.env.DB.prepare(
+            `UPDATE ${safeTableFinal} SET ${updateSet}, "updated_at" = datetime('now') WHERE id = ?`
+          ).bind(...updateValues, existing.id).run();
+          updated++;
+        } else {
+          await c.env.DB.prepare(`INSERT INTO ${safeTableFinal} (${finalColList}) VALUES (${finalPlaceholders})`).bind(...values).run();
+          inserted++;
+        }
       }
     }
     return c.json({ ok: true, inserted, updated, total: rows.length });
