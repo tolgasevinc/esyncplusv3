@@ -78,7 +78,7 @@ export function getSidebarHeader(): SidebarHeaderConfig {
 /** API'den sidebar menülerini çeker. */
 export async function fetchSidebarMenus(): Promise<SidebarMenuItem[]> {
   try {
-    const res = await fetch(`${API_URL}/api/sidebar-menu-items`)
+    const res = await fetch(`${API_URL}/api/sidebar-menu-items`, { cache: 'no-store' })
     if (!res.ok) return getSidebarMenus()
     const items = (await res.json()) as SidebarMenuItem[]
     if (Array.isArray(items) && items.length > 0) {

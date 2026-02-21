@@ -12,6 +12,7 @@ import { UrunTipleriPage } from '@/pages/parameters/UrunTipleriPage'
 import { ParaBirimleriPage } from '@/pages/parameters/ParaBirimleriPage'
 import { VergiOranlariPage } from '@/pages/parameters/VergiOranlariPage'
 import { MusteriTipleriPage } from '@/pages/parameters/MusteriTipleriPage'
+import { SuppliersPage } from '@/pages/parameters/SuppliersPage'
 import { ProductsPage } from '@/pages/products/ProductsPage'
 import { SettingsGeneralPage } from '@/pages/settings/SettingsGeneralPage'
 import { SettingsDatabasePage } from '@/pages/settings/SettingsDatabasePage'
@@ -47,6 +48,7 @@ function App() {
         <Route path="/parametreler/para-birimleri" element={<ParaBirimleriPage />} />
         <Route path="/parametreler/vergi-oranlari" element={<VergiOranlariPage />} />
         <Route path="/parametreler/musteri-tipleri" element={<MusteriTipleriPage />} />
+        <Route path="/parametreler/tedarikciler" element={<SuppliersPage />} />
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/urunler" element={<Navigate to="/products" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

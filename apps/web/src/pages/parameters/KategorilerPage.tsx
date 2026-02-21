@@ -17,6 +17,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ColorPresetPicker } from '@/components/ColorPresetPicker'
+import { hexToRgba } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
@@ -31,6 +33,7 @@ interface ProductCategory {
   description?: string
   image?: string
   icon?: string
+  color?: string
   sort_order: number
   status?: number
   created_at?: string
@@ -40,6 +43,7 @@ interface ProductGroup {
   id: number
   name: string
   code: string
+  color?: string
 }
 
 const emptyForm = {
@@ -49,6 +53,7 @@ const emptyForm = {
   description: '',
   image: '',
   icon: '',
+  color: '',
   group_id: '' as number | '',
   category_id: '' as number | '',
   sort_order: 0,
@@ -140,6 +145,7 @@ export function KategorilerPage() {
       description: item.description || '',
       image: item.image || '',
       icon: item.icon || '',
+      color: item.color || '',
       group_id: item.group_id ?? '',
       category_id: item.category_id ?? '',
       sort_order: item.sort_order ?? 0,
@@ -170,6 +176,7 @@ export function KategorilerPage() {
       const body = {
         ...form,
         code: form.code || form.name.slice(0, 2).toUpperCase(),
+        color: form.color || undefined,
         group_id: (form.group_id === '' || form.group_id === undefined || form.group_id === null) ? undefined : Number(form.group_id),
         category_id: (form.category_id === '' || form.category_id === undefined || form.category_id === null) ? 0 : Number(form.category_id),
         status: form.status,
@@ -301,7 +308,13 @@ export function KategorilerPage() {
           <div className="flex items-center mb-4">
             <TabsList className="flex-1">
               {groups.map((g) => (
-                <TabsTrigger key={g.id} value={String(g.id)}>
+                <TabsTrigger key={g.id} value={String(g.id)} className="flex items-center gap-1.5">
+                  {g.color && (
+                    <span
+                      className="shrink-0 w-3 h-3 rounded-full border"
+                      style={{ backgroundColor: g.color }}
+                    />
+                  )}
                   {g.name} ({g.code})
                 </TabsTrigger>
               ))}
@@ -350,9 +363,18 @@ export function KategorilerPage() {
                             className="flex items-center justify-between gap-2 p-4 cursor-pointer hover:bg-muted/50 transition-colors border-b"
                             onClick={() => openEdit(mainCat)}
                           >
-                            <div className="min-w-0 flex-1">
-                              <p className="font-medium truncate">{mainCat.name}</p>
-                              <p className="text-xs text-muted-foreground">{mainCat.code}</p>
+                            <div className="min-w-0 flex-1 flex items-center gap-2">
+                              <span
+                                className="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium border shrink-0"
+                                style={{
+                                  backgroundColor: mainCat.color ? hexToRgba(mainCat.color, 0.15) : undefined,
+                                  borderColor: mainCat.color || 'var(--border)',
+                                  color: mainCat.color || 'var(--muted-foreground)',
+                                }}
+                              >
+                                {mainCat.code}
+                              </span>
+                              <p className="font-medium truncate min-w-0 flex-1">{mainCat.name}</p>
                             </div>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -384,8 +406,19 @@ export function KategorilerPage() {
                                     className="flex items-center justify-between gap-2 px-4 py-2 cursor-pointer hover:bg-muted/30 transition-colors text-sm"
                                     onClick={() => openEdit(sub)}
                                   >
-                                    <span className="truncate">{sub.name}</span>
-                                    <span className="text-xs text-muted-foreground shrink-0">{sub.code}</span>
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <span
+                                        className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium border shrink-0"
+                                        style={{
+                                          backgroundColor: sub.color ? hexToRgba(sub.color, 0.15) : undefined,
+                                          borderColor: sub.color || 'var(--border)',
+                                          color: sub.color || 'var(--muted-foreground)',
+                                        }}
+                                      >
+                                        {sub.code}
+                                      </span>
+                                      <span className="truncate">{sub.name}</span>
+                                    </div>
                                   </li>
                                 ))}
                               </ul>
@@ -454,6 +487,11 @@ export function KategorilerPage() {
               <Label htmlFor="description">Açıklama</Label>
               <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
             </div>
+            <ColorPresetPicker
+              value={form.color}
+              onChange={(color) => setForm((f) => ({ ...f, color }))}
+              label="Renk"
+            />
             <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">

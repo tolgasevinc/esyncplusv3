@@ -16,6 +16,7 @@ import {
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ColorPresetPicker } from '@/components/ColorPresetPicker'
 import { toastSuccess, toastError } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
@@ -29,12 +30,13 @@ interface ProductCategoryGroup {
   code: string
   slug?: string
   description?: string
+  color?: string
   sort_order: number
   status?: number
   created_at?: string
 }
 
-const emptyForm = { name: '', code: '', description: '', sort_order: 0, status: 1 }
+const emptyForm = { name: '', code: '', description: '', color: '', sort_order: 0, status: 1 }
 
 export function GruplarPage() {
   const [search, setSearch] = useState('')
@@ -83,7 +85,7 @@ export function GruplarPage() {
     setForm(emptyForm)
     setModalOpen(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-groups/next-sort-order`)
+      const res = await fetch(`${API_URL}/api/product-categories/next-sort-order?group_id=0`)
       const json = await res.json()
       if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
     } catch { /* ignore */ }
@@ -95,6 +97,7 @@ export function GruplarPage() {
       name: item.name,
       code: item.code,
       description: item.description || '',
+      color: item.color || '',
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
     })
@@ -121,8 +124,8 @@ export function GruplarPage() {
       const url = editingId ? `${API_URL}/api/product-categories/${editingId}` : `${API_URL}/api/product-categories`
       const method = editingId ? 'PUT' : 'POST'
       const body = editingId
-        ? { ...form, group_id: 0, category_id: 0, status: form.status }
-        : { ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), group_id: 0, category_id: 0, status: form.status }
+        ? { ...form, color: form.color || undefined, group_id: 0, category_id: 0, status: form.status }
+        : { ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), color: form.color || undefined, group_id: 0, category_id: 0, status: form.status }
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
@@ -219,6 +222,7 @@ export function GruplarPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
+                  <th className="text-left p-3 font-medium w-12">Renk</th>
                   <th className="text-left p-3 font-medium">Grup Adı</th>
                   <th className="text-left p-3 font-medium">Kod</th>
                   <th className="text-left p-3 font-medium">Açıklama</th>
@@ -226,9 +230,9 @@ export function GruplarPage() {
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz grup kaydı yok.'}</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz grup kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
                     <tr
@@ -236,6 +240,13 @@ export function GruplarPage() {
                       className="border-b hover:bg-muted/30 cursor-pointer"
                       onClick={() => openEdit(item)}
                     >
+                      <td className="p-3">
+                        {item.color ? (
+                          <span className="inline-block w-6 h-6 rounded border" style={{ backgroundColor: item.color }} />
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{item.code}</td>
                       <td className="p-3">{item.description || '—'}</td>
@@ -270,6 +281,11 @@ export function GruplarPage() {
               <Label htmlFor="description">Açıklama</Label>
               <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
             </div>
+            <ColorPresetPicker
+              value={form.color}
+              onChange={(color) => setForm((f) => ({ ...f, color }))}
+              label="Renk"
+            />
             <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">

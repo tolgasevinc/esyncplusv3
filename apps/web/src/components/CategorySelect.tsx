@@ -1,7 +1,5 @@
-import { useState, useMemo } from 'react'
-import { ChevronDown, Search } from 'lucide-react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { Input } from '@/components/ui/input'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 
 export interface CategoryItem {
@@ -10,6 +8,8 @@ export interface CategoryItem {
   code: string
   group_id?: number | null
   category_id?: number | null
+  sort_order?: number
+  color?: string
 }
 
 export interface CategorySelectProps {
@@ -27,17 +27,11 @@ interface HierarchyItem {
   path: { name: string; code: string }[]
   level: 'group' | 'category' | 'subcategory'
   selectable: boolean
+  color?: string
 }
 
-/**
- * Sadece product_categories tablosundan hiyerarşi oluşturur.
- * group_id=0 → grup (üst seviye)
- * category_id=0 → kategori (gruba bağlı)
- * category_id>0 → alt kategori (kategoriye bağlı)
- */
 function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
   const result: HierarchyItem[] = []
-
   const groups = categories.filter(
     (c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0)
   )
@@ -60,54 +54,55 @@ function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
     byParent.get(pid)!.push(c)
   })
 
-  groups
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .forEach((group) => {
-      result.push({
-        id: group.id,
-        label: `${group.name} [${group.code}]`,
-        path: [{ name: group.name, code: group.code }],
-        level: 'group',
-        selectable: false,
-      })
-      const groupCats = byGroup.get(group.id) || []
-      groupCats.sort((a, b) => a.name.localeCompare(b.name))
-      groupCats.forEach((cat) => {
-        const subs = byParent.get(cat.id) || []
-        subs.sort((a, b) => a.name.localeCompare(b.name))
-        if (subs.length === 0) {
+  groups.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)).forEach((group) => {
+    result.push({
+      id: group.id,
+      label: `${group.name} [${group.code}]`,
+      path: [{ name: group.name, code: group.code }],
+      level: 'group',
+      selectable: false,
+      color: group.color,
+    })
+    const groupCats = byGroup.get(group.id) || []
+    groupCats.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+    groupCats.forEach((cat) => {
+      const subs = byParent.get(cat.id) || []
+      subs.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+      if (subs.length === 0) {
+        result.push({
+          id: cat.id,
+          label: `${group.name} [${group.code}] > ${cat.name} [${cat.code}]`,
+          path: [
+            { name: group.name, code: group.code },
+            { name: cat.name, code: cat.code },
+          ],
+          level: 'category',
+          selectable: true,
+          color: cat.color,
+        })
+      } else {
+        subs.forEach((sub) => {
           result.push({
-            id: cat.id,
-            label: `${group.name} [${group.code}] > ${cat.name} [${cat.code}]`,
+            id: sub.id,
+            label: `${group.name} [${group.code}] > ${cat.name} [${cat.code}] > ${sub.name} [${sub.code}]`,
             path: [
               { name: group.name, code: group.code },
               { name: cat.name, code: cat.code },
+              { name: sub.name, code: sub.code },
             ],
-            level: 'category',
+            level: 'subcategory',
             selectable: true,
+            color: sub.color,
           })
-        } else {
-          subs.forEach((sub) => {
-            result.push({
-              id: sub.id,
-              label: `${group.name} [${group.code}] > ${cat.name} [${cat.code}] > ${sub.name} [${sub.code}]`,
-              path: [
-                { name: group.name, code: group.code },
-                { name: cat.name, code: cat.code },
-                { name: sub.name, code: sub.code },
-              ],
-              level: 'subcategory',
-              selectable: true,
-            })
-          })
-        }
-      })
+        })
+      }
     })
+  })
 
   const noGroupCats = cats.filter(
     (c) => c.group_id == null && !groups.some((g) => g.id === c.id)
   )
-  noGroupCats.sort((a, b) => a.name.localeCompare(b.name))
+  noGroupCats.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
   noGroupCats.forEach((cat) => {
     const subs = byParent.get(cat.id) || []
     subs.sort((a, b) => a.name.localeCompare(b.name))
@@ -118,6 +113,7 @@ function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
         path: [{ name: cat.name, code: cat.code }],
         level: 'category',
         selectable: true,
+        color: cat.color,
       })
     } else {
       subs.forEach((sub) => {
@@ -130,6 +126,7 @@ function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
           ],
           level: 'subcategory',
           selectable: true,
+          color: sub.color,
         })
       })
     }
@@ -138,151 +135,222 @@ function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
   return result
 }
 
+/** Seçili kategori için path döndürür (kod oluşturucu için) */
+export function getCategoryPath(categories: CategoryItem[], categoryId: number | ''): CategoryPathItem[] {
+  if (!categoryId) return []
+  const hierarchy = buildHierarchy(categories)
+  const item = hierarchy.find((h) => h.id === categoryId)
+  return item?.path ?? []
+}
+
 export function CategorySelect({
   value,
   onChange,
   categories,
-  placeholder = 'Seçin',
+  placeholder = 'Ara veya seçin...',
   id: inputId,
   className,
 }: CategorySelectProps) {
+  const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState('')
+  const [focusedIndex, setFocusedIndex] = useState(-1)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
 
   const hierarchy = useMemo(() => buildHierarchy(categories), [categories])
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return hierarchy
-    const q = search.toLowerCase()
+    if (!query.trim()) return hierarchy
+    const q = query.toLowerCase()
     return hierarchy.filter(
       (h) =>
         h.label.toLowerCase().includes(q) ||
         h.path.some((p) => p.name.toLowerCase().includes(q) || (p.code && p.code.toLowerCase().includes(q)))
     )
-  }, [hierarchy, search])
+  }, [hierarchy, query])
+
+  const selectableFiltered = useMemo(
+    () => filtered.filter((h) => h.selectable),
+    [filtered]
+  )
 
   const selectedItem = useMemo(
     () => hierarchy.find((h) => h.id === value),
     [hierarchy, value]
   )
 
+  const displayValue = open ? query : selectedItem ? selectedItem.label : ''
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    if (open) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [open])
+
+  useEffect(() => {
+    setFocusedIndex(-1)
+  }, [query, filtered])
+
+  useEffect(() => {
+    if (focusedIndex >= 0 && listRef.current) {
+      const el = listRef.current.children[focusedIndex] as HTMLElement
+      el?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [focusedIndex])
+
+  const handleSelect = (item: HierarchyItem) => {
+    if (!item.selectable) return
+    onChange(item.id)
+    setQuery('')
+    setOpen(false)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!open) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        setOpen(true)
+        setQuery('')
+        e.preventDefault()
+      }
+      return
+    }
+    if (e.key === 'Escape') {
+      setOpen(false)
+      setQuery(selectedItem ? selectedItem.label : '')
+      e.preventDefault()
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setFocusedIndex((i) =>
+        i < selectableFiltered.length - 1 ? i + 1 : 0
+      )
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setFocusedIndex((i) =>
+        i > 0 ? i - 1 : selectableFiltered.length - 1
+      )
+      return
+    }
+    if (e.key === 'Enter' && focusedIndex >= 0 && selectableFiltered[focusedIndex]) {
+      e.preventDefault()
+      handleSelect(selectableFiltered[focusedIndex])
+      return
+    }
+  }
+
   return (
-    <Popover open={open} onOpenChange={setOpen} modal={false}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
+    <div ref={containerRef} className={cn('relative', className)}>
+      <div className="relative flex items-center w-full">
+        {selectedItem?.color && !open && (
+          <span
+            className="absolute left-3 z-10 shrink-0 w-3.5 h-3.5 rounded border pointer-events-none"
+            style={{ backgroundColor: selectedItem.color }}
+          />
+        )}
+        <Input
           id={inputId}
-          className={cn(
-            'flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm text-left',
-            'hover:bg-accent/50 transition-colors'
-          )}
+          type="text"
+          value={displayValue}
+          className={cn('h-10 flex-1', selectedItem?.color && !open && 'pl-9')}
+          onChange={(e) => {
+          setQuery(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        autoComplete="off"
+      />
+      </div>
+      {open && (
+        <div
+          ref={listRef}
+          className="absolute z-50 mt-1 w-full rounded-md border bg-popover py-1 shadow-lg"
+          style={{ maxHeight: 260, overflowY: 'auto' }}
         >
-          <span className={cn(!selectedItem && 'text-muted-foreground')}>
-            {selectedItem ? selectedItem.label : placeholder}
-          </span>
-          <ChevronDown className={cn('h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')} />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-[var(--radix-popover-trigger-width)] min-w-[320px] max-w-[calc(100vw-2rem)] p-0" align="start">
-        <div className="flex flex-col max-h-[320px]">
-          <div className="shrink-0 p-2 border-b">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Ara..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                onKeyDown={(e) => e.stopPropagation()}
-                className="pl-8 h-9"
-                autoFocus
-              />
+          <button
+            type="button"
+            onClick={() => {
+              onChange('')
+              setOpen(false)
+              setQuery('')
+            }}
+            className={cn(
+              'w-full text-left px-3 py-2 text-sm',
+              !value && 'bg-accent'
+            )}
+          >
+            <span className="text-muted-foreground">{placeholder}</span>
+          </button>
+          {filtered.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-muted-foreground text-center">
+              {hierarchy.length === 0
+                ? 'Kategori bulunamadı.'
+                : 'Sonuç bulunamadı'}
             </div>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-1 max-h-[260px]">
-            <button
-              type="button"
-              onClick={() => {
-                onChange('')
-                setOpen(false)
-              }}
-              className={cn(
-                'w-full text-left px-2 py-1.5 rounded text-sm',
-                !value && 'bg-accent'
-              )}
-            >
-              <span className="text-muted-foreground">{placeholder}</span>
-            </button>
-            {filtered.length === 0 ? (
-              <div className="px-2 py-4 text-sm text-muted-foreground text-center">
-                {hierarchy.length === 0
-                  ? 'Kategori bulunamadı. Parametrelerden ekleyin.'
-                  : 'Sonuç bulunamadı'}
-              </div>
-            ) : (
-              filtered.map((item) => {
-                const rowClass = cn(
-                  'w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2',
-                  item.level === 'group' && 'bg-blue-100 dark:bg-blue-950/50 font-medium cursor-default',
-                  item.level === 'category' && 'bg-emerald-50 dark:bg-emerald-950/30 hover:bg-emerald-100 dark:hover:bg-emerald-950/50',
-                  item.level === 'subcategory' && 'bg-amber-50 dark:bg-amber-950/20 hover:bg-amber-100 dark:hover:bg-amber-950/40 pl-4',
-                  item.selectable && 'cursor-pointer',
-                  !item.selectable && 'cursor-default',
-                  value === item.id && item.selectable && 'bg-accent'
-                )
-                return item.selectable ? (
-                  <button
-                    key={`${item.level}-${item.id}`}
-                    type="button"
-                    onClick={() => {
-                      onChange(item.id)
-                      setOpen(false)
-                    }}
-                    className={rowClass}
-                  >
+          ) : (
+            filtered.map((item, idx) => {
+              const selIdx = selectableFiltered.indexOf(item)
+              const isFocused = selIdx >= 0 && selIdx === focusedIndex
+              const rowClass = cn(
+                'w-full text-left px-3 py-2 text-sm flex items-center gap-2',
+                item.level === 'group' && 'bg-blue-100 dark:bg-blue-950/50 font-medium',
+                item.level === 'category' && 'bg-emerald-50 dark:bg-emerald-950/30 hover:bg-emerald-100',
+                item.level === 'subcategory' && 'bg-amber-50 dark:bg-amber-950/20 hover:bg-amber-100 pl-4',
+                item.selectable && 'cursor-pointer',
+                !item.selectable && 'cursor-default',
+                value === item.id && item.selectable && 'bg-accent',
+                isFocused && 'bg-accent'
+              )
+              return item.selectable ? (
+                <button
+                  key={`${item.level}-${item.id}`}
+                  type="button"
+                  onClick={() => handleSelect(item)}
+                  onMouseEnter={() => setFocusedIndex(selIdx)}
+                  className={rowClass}
+                >
+                  {item.color ? (
+                    <span
+                      className="shrink-0 w-3.5 h-3.5 rounded border"
+                      style={{ backgroundColor: item.color }}
+                    />
+                  ) : (
                     <span
                       className={cn(
-                        item.level === 'group' && 'w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0',
                         item.level === 'category' && 'w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0',
                         item.level === 'subcategory' && 'w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0'
                       )}
                     />
-                    <span className="truncate">
-                      {item.path.length === 1 && (
-                        <span className={item.level === 'group' ? 'text-blue-700 dark:text-blue-300' : 'text-foreground'}>
-                          {item.path[0].name} <span className="text-muted-foreground text-xs">[{item.path[0].code}]</span>
-                        </span>
-                      )}
-                      {item.path.length === 2 && (
-                        <>
-                          <span className={item.level === 'group' ? 'text-blue-700 dark:text-blue-300' : 'font-medium text-primary'}>{item.path[0].name} <span className="text-xs opacity-80">[{item.path[0].code}]</span></span>
-                          <span className="text-muted-foreground"> › </span>
-                          <span className="text-emerald-700 dark:text-emerald-300">{item.path[1].name} <span className="text-muted-foreground text-xs">[{item.path[1].code}]</span></span>
-                        </>
-                      )}
-                      {item.path.length >= 3 && (
-                        <>
-                          <span className="font-medium text-blue-600 dark:text-blue-400">{item.path[0].name} <span className="text-xs opacity-80">[{item.path[0].code}]</span></span>
-                          <span className="text-muted-foreground"> › </span>
-                          <span className="text-emerald-600 dark:text-emerald-400">{item.path[1].name} <span className="text-muted-foreground text-xs">[{item.path[1].code}]</span></span>
-                          <span className="text-muted-foreground"> › </span>
-                          <span className="text-amber-700 dark:text-amber-300">{item.path[2].name} <span className="text-xs opacity-80">[{item.path[2].code}]</span></span>
-                        </>
-                      )}
-                    </span>
-                  </button>
-                ) : (
-                  <div key={`${item.level}-${item.id}`} className={rowClass}>
+                  )}
+                  <span className="truncate">{item.label}</span>
+                </button>
+              ) : (
+                <div key={`${item.level}-${item.id}`} className={rowClass}>
+                  {item.color ? (
+                    <span
+                      className="shrink-0 w-3.5 h-3.5 rounded border"
+                      style={{ backgroundColor: item.color }}
+                    />
+                  ) : (
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
-                    <span className="text-blue-700 dark:text-blue-300">
-                      {item.path[0].name} <span className="text-muted-foreground text-xs">[{item.path[0].code}]</span>
-                    </span>
-                  </div>
-                )
-              })
-            )}
-          </div>
+                  )}
+                  <span className="text-blue-700 dark:text-blue-300 truncate">{item.label}</span>
+                </div>
+              )
+            })
+          )}
         </div>
-      </PopoverContent>
-    </Popover>
+      )}
+    </div>
   )
 }

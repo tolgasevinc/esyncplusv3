@@ -8,6 +8,7 @@ export interface AppModule {
 export const APP_MODULES: AppModule[] = [
   { id: 'home', label: 'home', path: '/' },
   { id: 'products', label: 'products', path: '/products' },
+  { id: 'suppliers', label: 'suppliers', path: '/parametreler/tedarikciler' },
   { id: 'parametreler', label: 'parameters', path: '/parametreler' },
   { id: 'parametreler-markalar', label: 'parameters › brands', path: '/parametreler/markalar' },
   { id: 'parametreler-birimler', label: 'parameters › units', path: '/parametreler/birimler' },
@@ -17,6 +18,7 @@ export const APP_MODULES: AppModule[] = [
   { id: 'parametreler-para-birimleri', label: 'parameters › currencies', path: '/parametreler/para-birimleri' },
   { id: 'parametreler-vergi-oranlari', label: 'parameters › tax-rates', path: '/parametreler/vergi-oranlari' },
   { id: 'parametreler-musteri-tipleri', label: 'parameters › customer-types', path: '/parametreler/musteri-tipleri' },
+  { id: 'parametreler-tedarikciler', label: 'parameters › suppliers', path: '/parametreler/tedarikciler' },
   { id: 'ayarlar', label: 'settings', path: '/ayarlar' },
   { id: 'ayarlar-genel', label: 'settings › general', path: '/ayarlar/genel' },
   { id: 'ayarlar-veritabani', label: 'settings › database', path: '/ayarlar/veritabani' },

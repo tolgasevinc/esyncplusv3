@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { Search, Plus, X, Trash2, Copy, Save, ChevronDown } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,9 +16,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { ImageInput, getImageDisplayUrl } from '@/components/ImageInput'
-import { CategorySelect, type CategoryItem } from '@/components/CategorySelect'
+import { ProductImagesGrid } from '@/components/ProductImagesGrid'
+import { PackageContentsTab } from '@/components/PackageContentsTab'
+import { getImageDisplayUrl } from '@/components/ImageInput'
+import { CategorySelect, getCategoryPath, type CategoryItem } from '@/components/CategorySelect'
+import { ProductCodeDisplay } from '@/components/ProductCodeDisplay'
+import { buildProductCode } from '@/lib/productCode'
 import { Switch } from '@/components/ui/switch'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toastSuccess, toastError } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
@@ -43,7 +48,9 @@ interface Product {
   status?: number
   brand_name?: string
   category_name?: string
+  category_color?: string
   type_name?: string
+  type_color?: string
   unit_name?: string
   currency_symbol?: string
 }
@@ -51,6 +58,36 @@ interface Product {
 interface SelectOption {
   id: number
   name: string
+}
+
+interface BrandOption extends SelectOption {
+  code: string
+}
+
+/** Bu tiplerde tedarikçi kodu aranmaz (paket, mamül, hizmet) */
+const SKIP_SUPPLIER_CODE_TYPE_CODES = ['PAK', 'MAM', 'HIZ', 'paket', 'mamul', 'hizmet']
+const PACKAGE_TYPE_CODES = ['PAK', 'paket']
+
+const IMAGE_SLOTS = 10
+
+function parseImageToArray(image: string | undefined): string[] {
+  let arr: string[] = []
+  if (image) {
+    try {
+      const parsed = JSON.parse(image)
+      arr = Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [image]
+    } catch {
+      arr = [image]
+    }
+  }
+  while (arr.length < IMAGE_SLOTS) arr.push('')
+  return arr.slice(0, IMAGE_SLOTS)
+}
+
+function serializeImagesToImage(images: string[]): string | undefined {
+  const filtered = images.filter(Boolean)
+  if (filtered.length === 0) return undefined
+  return JSON.stringify(images)
 }
 
 const emptyForm = {
@@ -64,12 +101,19 @@ const emptyForm = {
   currency_id: '' as number | '',
   price: 0,
   quantity: 0,
-  image: '',
-  tax_rate: 0,
+  images: [] as string[],
+  tax_rate: 20,
   supplier_code: '',
   gtip_code: '',
   sort_order: 0,
   status: 1,
+}
+
+interface PackageItem {
+  item_product_id: number
+  quantity: number
+  item_name?: string
+  item_sku?: string
 }
 
 export function ProductsPage() {
@@ -84,46 +128,82 @@ export function ProductsPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [brands, setBrands] = useState<SelectOption[]>([])
+  const [brands, setBrands] = useState<BrandOption[]>([])
+  const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
   const [categories, setCategories] = useState<CategoryItem[]>([])
-  const [types, setTypes] = useState<SelectOption[]>([])
+  const [types, setTypes] = useState<{ id: number; name: string; code?: string; color?: string }[]>([])
   const [units, setUnits] = useState<SelectOption[]>([])
   const [currencies, setCurrencies] = useState<SelectOption[]>([])
 
   const [pageSize, setPageSize] = useState<PageSizeValue>('fit')
   const [fitLimit, setFitLimit] = useState(10)
+  const [packageItems, setPackageItems] = useState<PackageItem[]>([])
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
   const limit = pageSize === 'fit' ? fitLimit : pageSize
 
+  const categoryPath = useMemo(
+    () => getCategoryPath(categories, form.category_id),
+    [categories, form.category_id]
+  )
+  const brandCode = useMemo(
+    () => (form.brand_id ? brands.find((b) => b.id === form.brand_id)?.code ?? '' : ''),
+    [brands, form.brand_id]
+  )
+  const skipSupplierCode = useMemo(() => {
+    if (!form.type_id) return false
+    const t = types.find((x) => x.id === form.type_id)
+    return t?.code ? SKIP_SUPPLIER_CODE_TYPE_CODES.includes(t.code) : false
+  }, [types, form.type_id])
+
+  const isPackageType = useMemo(() => {
+    if (!form.type_id) return false
+    const t = types.find((x) => x.id === form.type_id)
+    return t?.code ? PACKAGE_TYPE_CODES.includes(t.code) : false
+  }, [types, form.type_id])
+
+  const selectedTypeName = useMemo(
+    () => (form.type_id ? types.find((t) => t.id === form.type_id)?.name ?? 'Ürün tipi' : 'Ürün tipi'),
+    [types, form.type_id]
+  )
+
   const fetchOptions = useCallback(async () => {
     try {
-      const [bRes, cRes, tRes, uRes, curRes] = await Promise.all([
+      const [bRes, cRes, tRes, uRes, curRes, taxRes] = await Promise.all([
         fetch(`${API_URL}/api/product-brands?limit=9999`),
         fetch(`${API_URL}/api/product-categories?limit=9999`),
         fetch(`${API_URL}/api/product-types?limit=9999`),
         fetch(`${API_URL}/api/product-units?limit=9999`),
         fetch(`${API_URL}/api/product-currencies?limit=9999`),
+        fetch(`${API_URL}/api/product-tax-rates?limit=9999`),
       ])
       const b = await bRes.json()
       const c = await cRes.json()
       const t = await tRes.json()
       const u = await uRes.json()
       const cur = await curRes.json()
-      setBrands((b.data || []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name })))
+      const tax = await taxRes.json()
+      setBrands((b.data || []).map((x: { id: number; name: string; code?: string }) => ({
+        id: x.id,
+        name: x.name,
+        code: x.code || x.name.slice(0, 2).toUpperCase(),
+      })))
       const catData = Array.isArray(c.data) ? c.data : []
       setCategories(
-        catData.map((x: { id: number; name: string; code?: string; group_id?: number | null; category_id?: number | null }) => ({
+        catData.map((x: { id: number; name: string; code?: string; group_id?: number | null; category_id?: number | null; sort_order?: number; color?: string }) => ({
           id: x.id,
           name: x.name,
           code: x.code || '',
           group_id: x.group_id,
           category_id: x.category_id,
+          sort_order: x.sort_order ?? 0,
+          color: x.color,
         }))
       )
-      setTypes((t.data || []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name })))
+      setTypes((t.data || []).map((x: { id: number; name: string; code?: string; color?: string }) => ({ id: x.id, name: x.name, code: x.code, color: x.color })))
       setUnits((u.data || []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name })))
       setCurrencies((cur.data || []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name })))
+      setTaxRates((tax.data || []).map((x: { id: number; name: string; value: number }) => ({ id: x.id, name: x.name, value: x.value })))
     } catch (err) {
       console.error('fetchOptions:', err)
     }
@@ -171,6 +251,7 @@ export function ProductsPage() {
   async function openNew() {
     setEditingId(null)
     setForm(emptyForm)
+    setPackageItems([])
     setModalOpen(true)
     try {
       const res = await fetch(`${API_URL}/api/products/next-sort-order`)
@@ -179,7 +260,7 @@ export function ProductsPage() {
     } catch { /* ignore */ }
   }
 
-  function openEdit(item: Product) {
+  async function openEdit(item: Product) {
     setEditingId(item.id)
     setForm({
       name: item.name,
@@ -192,7 +273,7 @@ export function ProductsPage() {
       currency_id: item.currency_id ?? '',
       price: item.price ?? 0,
       quantity: item.quantity ?? 0,
-      image: item.image || '',
+      images: parseImageToArray(item.image),
       tax_rate: item.tax_rate ?? 0,
       supplier_code: item.supplier_code || '',
       gtip_code: item.gtip_code || '',
@@ -200,17 +281,34 @@ export function ProductsPage() {
       status: item.status ?? 1,
     })
     setModalOpen(true)
+    try {
+      const res = await fetch(`${API_URL}/api/products/${item.id}/package-items`)
+      const json = await res.json()
+      if (res.ok && json.data) {
+        setPackageItems(json.data.map((x: { item_product_id: number; quantity: number; item_name?: string; item_sku?: string }) => ({
+          item_product_id: x.item_product_id,
+          quantity: x.quantity,
+          item_name: x.item_name,
+          item_sku: x.item_sku,
+        })))
+      } else {
+        setPackageItems([])
+      }
+    } catch {
+      setPackageItems([])
+    }
   }
 
   function handleCopy() {
     setEditingId(null)
-    setForm((f) => ({ ...f, name: f.name + ' (kopya)', sku: '' }))
+    setForm((f) => ({ ...f, name: f.name + ' (kopya)', supplier_code: '' }))
   }
 
   function closeModal() {
     setModalOpen(false)
     setEditingId(null)
     setForm(emptyForm)
+    setPackageItems([])
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -221,8 +319,13 @@ export function ProductsPage() {
     try {
       const url = editingId ? `${API_URL}/api/products/${editingId}` : `${API_URL}/api/products`
       const method = editingId ? 'PUT' : 'POST'
+      const generatedSku = buildProductCode(categoryPath, brandCode, form.supplier_code)
+      const imageValue = serializeImagesToImage(form.images)
+      const { images: _images, ...formRest } = form
       const body = {
-        ...form,
+        ...formRest,
+        image: imageValue,
+        sku: generatedSku || undefined,
         brand_id: form.brand_id || undefined,
         category_id: form.category_id || undefined,
         type_id: form.type_id || undefined,
@@ -236,6 +339,23 @@ export function ProductsPage() {
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
+      const productId = editingId ?? json?.id
+      if (productId && isPackageType && packageItems.length > 0) {
+        const pkgRes = await fetch(`${API_URL}/api/products/${productId}/package-items`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            items: packageItems.filter((i) => i.item_product_id && i.quantity > 0).map((i) => ({
+              item_product_id: i.item_product_id,
+              quantity: i.quantity,
+            })),
+          }),
+        })
+        if (!pkgRes.ok) {
+          const pkgJson = await pkgRes.json()
+          throw new Error(pkgJson.error || 'Paket içeriği kaydedilemedi')
+        }
+      }
       closeModal()
       fetchData()
       toastSuccess(editingId ? 'Ürün güncellendi' : 'Ürün eklendi', 'Değişiklikler başarıyla kaydedildi.')
@@ -354,11 +474,13 @@ export function ProductsPage() {
                       onClick={() => openEdit(item)}
                     >
                       <td className="p-3">
-                        {item.image ? (
+                        {(() => {
+                          const firstImg = parseImageToArray(item.image)[0]
+                          return firstImg ? (
                           <div
                             className="h-10 w-10 rounded bg-white border shrink-0"
                             style={{
-                              backgroundImage: `url(${getImageDisplayUrl(item.image)})`,
+                              backgroundImage: `url(${getImageDisplayUrl(firstImg)})`,
                               backgroundSize: 'contain',
                               backgroundRepeat: 'no-repeat',
                               backgroundPosition: 'center',
@@ -366,14 +488,25 @@ export function ProductsPage() {
                             role="img"
                             aria-label=""
                           />
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )
+                        })()}
                       </td>
                       <td className="p-3 font-medium">{item.name}</td>
                       <td className="p-3">{item.sku || '—'}</td>
                       <td className="p-3">{item.brand_name || '—'}</td>
-                      <td className="p-3">{item.category_name || '—'}</td>
+                      <td className="p-3">
+                        <div className="flex items-center gap-2">
+                          {item.category_color && (
+                            <span
+                              className="shrink-0 w-4 h-4 rounded border"
+                              style={{ backgroundColor: item.category_color }}
+                            />
+                          )}
+                          {item.category_name || '—'}
+                        </div>
+                      </td>
                       <td className="p-3 text-right">
                         {item.price != null
                           ? `${item.price.toLocaleString('tr-TR')} ${item.currency_symbol || ''}`.trim()
@@ -393,22 +526,64 @@ export function ProductsPage() {
 
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{editingId ? 'Ürün Düzenle' : 'Yeni Ürün'}</DialogTitle>
-            <DialogDescription>
-              Ürün bilgilerini girin. Marka, kategori ve diğer alanlar parametrelerden seçilir.
-            </DialogDescription>
+          <DialogHeader className="flex flex-row items-start gap-4">
+            <div className="shrink-0">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 rounded-full border bg-muted/50 px-3 py-1 text-sm font-medium hover:bg-muted transition-colors"
+                  >
+                    {form.type_id && types.find((t) => t.id === form.type_id)?.color && (
+                      <span
+                        className="shrink-0 w-3 h-3 rounded-full border"
+                        style={{ backgroundColor: types.find((t) => t.id === form.type_id)!.color }}
+                      />
+                    )}
+                    {selectedTypeName}
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-56 p-1">
+                  {types.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, type_id: t.id }))}
+                      className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent flex items-center gap-2"
+                    >
+                      {t.color && (
+                        <span
+                          className="shrink-0 w-3.5 h-3.5 rounded border"
+                          style={{ backgroundColor: t.color }}
+                        />
+                      )}
+                      {t.name}
+                    </button>
+                  ))}
+                </PopoverContent>
+              </Popover>
+            </div>
+            <div className="flex-1 min-w-0">
+              <DialogTitle>{editingId ? 'Ürün Düzenle' : 'Yeni Ürün'}</DialogTitle>
+              <DialogDescription>
+                Ürün bilgilerini girin. Marka, kategori ve diğer alanlar parametrelerden seçilir.
+              </DialogDescription>
+            </div>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
             <Tabs defaultValue="genel" className="w-full">
-              <TabsList className="grid w-full grid-cols-4">
+              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-5' : 'grid-cols-4'}`}>
                 <TabsTrigger value="genel">Genel</TabsTrigger>
                 <TabsTrigger value="fiyat">Fiyat & Stok</TabsTrigger>
                 <TabsTrigger value="gorsel">Görsel</TabsTrigger>
+                {isPackageType && (
+                  <TabsTrigger value="paket">Paket içeriği</TabsTrigger>
+                )}
                 <TabsTrigger value="diger">Diğer</TabsTrigger>
               </TabsList>
-              <TabsContent value="genel" className="space-y-4 mt-4">
+              <TabsContent value="genel" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="space-y-2">
                   <Label htmlFor="category">Kategori</Label>
                   <CategorySelect
@@ -450,15 +625,17 @@ export function ProductsPage() {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="tax_rate">Vergi (KDV %)</Label>
-                    <Input
+                    <select
                       id="tax_rate"
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={form.tax_rate || ''}
-                      onChange={(e) => setForm((f) => ({ ...f, tax_rate: parseFloat(e.target.value) || 0 }))}
-                      placeholder="0"
-                    />
+                      value={form.tax_rate != null ? form.tax_rate : ''}
+                      onChange={(e) => setForm((f) => ({ ...f, tax_rate: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="">Seçin</option>
+                      {taxRates.map((tr) => (
+                        <option key={tr.id} value={tr.value}>{tr.name} ({tr.value}%)</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -473,23 +650,27 @@ export function ProductsPage() {
                 </div>
                 <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="sku">SKU</Label>
-                    <Input
-                      id="sku"
-                      value={form.sku}
-                      onChange={(e) => setForm((f) => ({ ...f, sku: e.target.value }))}
-                      placeholder="Stok kodu"
+                    <Label htmlFor="product-code">Ürün Kodu (SKU)</Label>
+                    <ProductCodeDisplay
+                      id="product-code"
+                      categoryPath={categoryPath}
+                      brandCode={brandCode}
+                      supplierCode={form.supplier_code}
+                      onSupplierCodeChange={(v) => setForm((f) => ({ ...f, supplier_code: v }))}
+                      placeholder="Kategori, marka ve tedarikçi kodu seçin"
                     />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="supplier_code">Tedarikçi Kodu</Label>
-                    <Input
-                      id="supplier_code"
-                      value={form.supplier_code}
-                      onChange={(e) => setForm((f) => ({ ...f, supplier_code: e.target.value }))}
-                      placeholder="Tedarikçi ürün kodu"
-                    />
-                  </div>
+                  {!skipSupplierCode && (
+                    <div className="space-y-2">
+                      <Label htmlFor="supplier_code">Tedarikçi Kodu</Label>
+                      <Input
+                        id="supplier_code"
+                        value={form.supplier_code}
+                        onChange={(e) => setForm((f) => ({ ...f, supplier_code: e.target.value }))}
+                        placeholder="Tedarikçi ürün kodu (son kısım)"
+                      />
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <Label htmlFor="barcode">Barkod</Label>
                     <Input
@@ -501,7 +682,7 @@ export function ProductsPage() {
                   </div>
                 </div>
               </TabsContent>
-              <TabsContent value="fiyat" className="space-y-4 mt-4">
+              <TabsContent value="fiyat" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="price">Fiyat</Label>
@@ -543,68 +724,66 @@ export function ProductsPage() {
                   </div>
                 </div>
               </TabsContent>
-              <TabsContent value="gorsel" className="space-y-4 mt-4">
-                <div className="space-y-2">
-                  <Label>Görsel</Label>
-                  <ImageInput
-                    value={form.image}
-                    onChange={(url) => setForm((f) => ({ ...f, image: url }))}
-                    size="product"
+              <TabsContent value="gorsel" className="space-y-4 mt-4 min-h-[55vh]">
+                <div>
+                  <ProductImagesGrid
+                    images={form.images}
+                    onChange={(images) => setForm((f) => ({ ...f, images }))}
                     folderStorageKey="urun-gorselleri-klasor"
-                    placeholder="Ürün görseli yükle"
                   />
                 </div>
               </TabsContent>
-              <TabsContent value="diger" className="space-y-4 mt-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="type">Ürün Tipi</Label>
-                    <select
-                      id="type"
-                      value={form.type_id}
-                      onChange={(e) => setForm((f) => ({ ...f, type_id: e.target.value ? Number(e.target.value) : '' }))}
-                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    >
-                      <option value="">Seçin</option>
-                      {types.map((t) => (
-                        <option key={t.id} value={t.id}>{t.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="gtip_code">GTİP Kodu</Label>
-                    <Input
-                      id="gtip_code"
-                      value={form.gtip_code}
-                      onChange={(e) => setForm((f) => ({ ...f, gtip_code: e.target.value }))}
-                      placeholder="Gümrük tarife kodu"
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center gap-6 pt-2">
-                  <div className="flex items-center gap-2">
-                    <Label htmlFor="sort_order" className="text-sm">Sıra</Label>
-                    <Input
-                      id="sort_order"
-                      type="number"
-                      value={form.sort_order}
-                      onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))}
-                      className="w-16 h-9"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      id="modal-status"
-                      checked={!!form.status}
-                      onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
-                    />
-                    <Label htmlFor="modal-status" className="text-sm cursor-pointer">Aktif</Label>
-                  </div>
+              {isPackageType && (
+                <TabsContent value="paket" className="space-y-4 mt-4 min-h-[55vh]">
+                  <PackageContentsTab
+                    packageItems={packageItems}
+                    onChange={setPackageItems}
+                    excludeProductId={editingId ?? undefined}
+                  />
+                </TabsContent>
+              )}
+              <TabsContent value="diger" className="space-y-4 mt-4 min-h-[55vh]">
+                <div className="space-y-2">
+                  <Label htmlFor="gtip_code">GTİP Kodu</Label>
+                  <Input
+                    id="gtip_code"
+                    value={form.gtip_code}
+                    onChange={(e) => setForm((f) => ({ ...f, gtip_code: e.target.value }))}
+                    placeholder="Gümrük tarife kodu"
+                  />
                 </div>
               </TabsContent>
             </Tabs>
-            <DialogFooter className="flex-row justify-end gap-2 pt-4 border-t">
-              <div className="flex items-center gap-1">
+            <DialogFooter className="flex-row justify-between sm:!justify-between gap-2 pt-4 border-t w-full">
+              <div className="flex items-center gap-4 shrink-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Input
+                        id="sort_order"
+                        type="number"
+                        value={form.sort_order}
+                        onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 0 }))}
+                        className="w-16 h-9"
+                      />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>Sıra</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Switch
+                        id="modal-status"
+                        checked={!!form.status}
+                        onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
+                      />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>Aktif</TooltipContent>
+                </Tooltip>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
                 {editingId && (
                   <Tooltip>
                     <TooltipTrigger asChild>
