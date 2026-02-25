@@ -14,6 +14,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { API_URL } from '@/lib/api'
+import { processToSquareWebP } from '@/lib/image-processor'
 
 const SLOT_SIZE = 64
 const ROWS = 5
@@ -23,42 +24,24 @@ const TOTAL_SLOTS = ROWS * COLS
 const TARGET_SIZE = 1000
 const GRID_HEIGHT = ROWS * SLOT_SIZE + (ROWS - 1) * GAP
 
-/** Görseli kare yap */
-async function processToSquare(img: HTMLImageElement, targetSize: number): Promise<Blob> {
-  const w = img.naturalWidth
-  const h = img.naturalHeight
-  const canvas = document.createElement('canvas')
-  canvas.width = targetSize
-  canvas.height = targetSize
-  const ctx = canvas.getContext('2d', { alpha: true })!
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.clearRect(0, 0, targetSize, targetSize)
-  const scale = Math.min(targetSize / w, targetSize / h)
-  const dw = w * scale
-  const dh = h * scale
-  const dx = (targetSize - dw) / 2
-  const dy = (targetSize - dh) / 2
-  ctx.drawImage(img, 0, 0, w, h, dx, dy, dw, dh)
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('Blob oluşturulamadı'))),
-      'image/png',
-      0.92
-    )
-  })
+function getImageExtension(blob: Blob): string {
+  if (blob.type === 'image/webp') return 'webp'
+  if (blob.type === 'image/svg+xml') return 'svg'
+  if (blob.type === 'image/jpeg' || blob.type === 'image/jpg') return 'jpg'
+  if (blob.type === 'image/gif') return 'gif'
+  return 'png'
 }
 
 export interface ProductImagesGridProps {
   images: string[]
   onChange: (images: string[]) => void
-  folderStorageKey: string
+  /** @deprecated Ürün görselleri her zaman images/products/ klasörüne kaydedilir */
+  folderStorageKey?: string
 }
 
 export function ProductImagesGrid({
   images,
   onChange,
-  folderStorageKey,
 }: ProductImagesGridProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [modalOpen, setModalOpen] = useState(false)
@@ -69,8 +52,11 @@ export function ProductImagesGrid({
   const [error, setError] = useState<string | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
 
-  const defaultFolder = 'images/'
-  const folder = (typeof localStorage !== 'undefined' ? localStorage.getItem(folderStorageKey) : null) || defaultFolder
+  const PRODUCT_IMAGES_FOLDER = 'images/products/'
+
+  function getUploadFolder(): string {
+    return PRODUCT_IMAGES_FOLDER
+  }
 
   const paddedImages = [...images]
   while (paddedImages.length < TOTAL_SLOTS) paddedImages.push('')
@@ -79,6 +65,7 @@ export function ProductImagesGrid({
   const previewUrl = selectedImage ? getImageDisplayUrl(selectedImage) : ''
 
   async function uploadBlob(blob: Blob, filename: string): Promise<string> {
+    const folder = getUploadFolder()
     const formData = new FormData()
     formData.append('file', blob, filename)
     formData.append('folder', folder)
@@ -120,9 +107,10 @@ export function ProductImagesGrid({
     htmlImg.src = URL.createObjectURL(file)
     htmlImg.onload = async () => {
       try {
-        const blob = await processToSquare(htmlImg, TARGET_SIZE)
+        const blob = await processToSquareWebP(htmlImg, TARGET_SIZE)
         URL.revokeObjectURL(htmlImg.src)
-        const path = await uploadBlob(blob, file.name.replace(/\.[^.]+$/, '.png'))
+        const ext = getImageExtension(blob)
+        const path = await uploadBlob(blob, file.name.replace(/\.[^.]+$/, `.${ext}`))
         const oldPath = paddedImages[editingIndex]
         if (oldPath) await deleteOldImage(oldPath)
         const next = [...paddedImages]
@@ -178,11 +166,36 @@ export function ProductImagesGrid({
     setUploading(true)
     setError(null)
     try {
-      const img = new Image()
-      img.src = linkPreview
-      await new Promise<void>((r) => { img.onload = () => r() })
-      const processed = await processToSquare(img, TARGET_SIZE)
-      const path = await uploadBlob(processed, 'image.png')
+      const res = await fetch(linkPreview)
+      const blob = await res.blob()
+      if (!blob.type.startsWith('image/')) {
+        throw new Error('Geçersiz görsel formatı')
+      }
+      let toUpload: Blob
+      let ext: string
+      if (blob.type === 'image/svg+xml') {
+        toUpload = blob
+        ext = 'svg'
+      } else {
+        const img = new Image()
+        img.src = URL.createObjectURL(blob)
+        try {
+          await new Promise<void>((r, reject) => {
+            img.onload = () => r()
+            img.onerror = () => reject(new Error('Görsel yüklenemedi'))
+          })
+          try {
+            toUpload = await processToSquareWebP(img, TARGET_SIZE)
+            ext = getImageExtension(toUpload)
+          } catch {
+            toUpload = blob
+            ext = blob.type === 'image/jpeg' || blob.type === 'image/jpg' ? 'jpg' : blob.type === 'image/gif' ? 'gif' : 'png'
+          }
+        } finally {
+          URL.revokeObjectURL(img.src)
+        }
+      }
+      const path = await uploadBlob(toUpload, `image.${ext}`)
       const oldPath = paddedImages[editingIndex]
       if (oldPath) await deleteOldImage(oldPath)
       const next = [...paddedImages]
@@ -331,26 +344,53 @@ export function ProductImagesGrid({
           </div>
           <DialogFooter>
             {paddedImages[editingIndex] && (
-              <Button
-                type="button"
-                variant="ghost"
-                className="mr-auto text-destructive hover:text-destructive"
-                onClick={async () => {
-                  const path = paddedImages[editingIndex]
-                  const next = [...paddedImages]
-                  next[editingIndex] = ''
-                  onChange(next)
-                  if (path && !path.startsWith('http')) {
-                    try {
-                      await fetch(`${API_URL}/storage/delete?key=${encodeURIComponent(path)}`, { method: 'DELETE' })
-                    } catch { /* ignore */ }
-                  }
-                  setModalOpen(false)
-                }}
-                disabled={uploading}
-              >
-                Sil
-              </Button>
+              <div className="flex gap-2 mr-auto">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        const next = [...paddedImages]
+                        next[editingIndex] = ''
+                        onChange(next)
+                        setModalOpen(false)
+                      }}
+                      disabled={uploading}
+                    >
+                      Kaldır
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Üründen kaldır (storage'da kalır)</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={async () => {
+                        const path = paddedImages[editingIndex]
+                        const next = [...paddedImages]
+                        next[editingIndex] = ''
+                        onChange(next)
+                        if (path && !path.startsWith('http')) {
+                          try {
+                            await fetch(`${API_URL}/storage/delete?key=${encodeURIComponent(path)}`, { method: 'DELETE' })
+                          } catch { /* ignore */ }
+                        }
+                        setModalOpen(false)
+                      }}
+                      disabled={uploading}
+                    >
+                      Sil
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Üründen kaldır ve storage'dan sil</TooltipContent>
+                </Tooltip>
+              </div>
             )}
             <Button variant="outline" onClick={() => setModalOpen(false)} disabled={uploading}>
               İptal

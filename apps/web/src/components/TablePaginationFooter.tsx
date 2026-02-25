@@ -13,12 +13,13 @@ const PAGE_SIZE_OPTIONS = [
 
 export type PageSizeValue = 10 | 25 | 50 | 100 | 'fit' | number
 
-const ROW_HEIGHT_PX = 44
-const TABLE_HEADER_PX = 44
-const CONTENT_PADDING_PX = 32
+const ROW_HEIGHT_PX = 56
+const TABLE_HEADER_PX = 52
+const CONTENT_PADDING_PX = 48
+const SAFETY_MARGIN_PX = 16
 
 function calcFitLimit(containerHeight: number): number {
-  const available = containerHeight - CONTENT_PADDING_PX - TABLE_HEADER_PX
+  const available = containerHeight - CONTENT_PADDING_PX - TABLE_HEADER_PX - SAFETY_MARGIN_PX
   return Math.max(1, Math.floor(available / ROW_HEIGHT_PX))
 }
 

@@ -14,12 +14,21 @@ import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 import { API_URL } from '@/lib/api'
+import { processToSquareWebP } from '@/lib/image-processor'
 
 /** Görsel path/URL'den görüntüleme URL'i oluştur */
 export function getImageDisplayUrl(pathOrUrl: string): string {
-  if (!pathOrUrl) return ''
-  if (pathOrUrl.startsWith('http')) return pathOrUrl
-  return `${API_URL}/storage/serve?key=${encodeURIComponent(pathOrUrl)}`
+  const trimmed = (pathOrUrl || '').trim()
+  if (!trimmed) return ''
+  if (trimmed.startsWith('http')) return trimmed
+  const base = `${API_URL}/storage/serve?key=${encodeURIComponent(trimmed)}`
+  if (import.meta.env.DEV) {
+    const existing = typeof window !== 'undefined' ? (window as { __imgBust?: number }).__imgBust : undefined
+    const bust: number = existing ?? Date.now()
+    if (typeof window !== 'undefined') (window as { __imgBust?: number }).__imgBust = bust
+    return `${base}&_=${bust}`
+  }
+  return base
 }
 
 export type ImageSize = 'brand' | 'product' | 'customer' | 'sidebar'
@@ -41,38 +50,12 @@ interface ImageInputProps {
   preserveFilename?: boolean
 }
 
-/** Görseli kare yap: kısa kenarı uzun kenara eşitle. Arkaplan şeffaflığı korunur. */
-async function processToSquare(
-  img: HTMLImageElement,
-  targetSize: number
-): Promise<Blob> {
-  const w = img.naturalWidth
-  const h = img.naturalHeight
-
-  const canvas = document.createElement('canvas')
-  canvas.width = targetSize
-  canvas.height = targetSize
-  const ctx = canvas.getContext('2d', { alpha: true })!
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-
-  // Şeffaf arkaplan - eklenen alanlar (letterbox) şeffaf kalır
-  ctx.clearRect(0, 0, targetSize, targetSize)
-
-  const scale = Math.min(targetSize / w, targetSize / h)
-  const dw = w * scale
-  const dh = h * scale
-  const dx = (targetSize - dw) / 2
-  const dy = (targetSize - dh) / 2
-  ctx.drawImage(img, 0, 0, w, h, dx, dy, dw, dh)
-
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('Blob oluşturulamadı'))),
-      'image/png',
-      0.92
-    )
-  })
+function getImageExtension(blob: Blob): string {
+  if (blob.type === 'image/webp') return 'webp'
+  if (blob.type === 'image/svg+xml') return 'svg'
+  if (blob.type === 'image/jpeg' || blob.type === 'image/jpg') return 'jpg'
+  if (blob.type === 'image/gif') return 'gif'
+  return 'png'
 }
 
 export function ImageInput({
@@ -92,9 +75,15 @@ export function ImageInput({
 
   const targetSize = SIZE_MAP[size]
   const defaultFolder = folderStorageKey === 'ikonlar-klasor' ? 'icons/' : 'images/'
-  const folder = (typeof localStorage !== 'undefined' ? localStorage.getItem(folderStorageKey) : null) || defaultFolder
+
+  function getUploadFolder(): string {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(folderStorageKey) : null
+    const raw = (saved || '').trim() || defaultFolder
+    return raw.endsWith('/') ? raw : `${raw}/`
+  }
 
   async function uploadBlob(blob: Blob, filename: string, keepName: boolean): Promise<string> {
+    const folder = getUploadFolder()
     const formData = new FormData()
     formData.append('file', blob, filename)
     formData.append('folder', folder)
@@ -127,12 +116,11 @@ export function ImageInput({
     setError(null)
     try {
       const isSvg = file.type === 'image/svg+xml'
-      const uploadFilename = preserveFilename ? file.name : file.name.replace(/\.[^.]+$/, '.png')
-
       let blob: Blob
+      let uploadFilename: string
       if (isSvg && preserveFilename) {
-        // SVG: işleme yapmadan orijinal olarak yükle
         blob = file
+        uploadFilename = file.name
       } else {
         const htmlImg = new Image()
         htmlImg.src = URL.createObjectURL(file)
@@ -140,8 +128,10 @@ export function ImageInput({
           htmlImg.onload = () => r()
           htmlImg.onerror = () => reject(new Error('Görsel yüklenemedi'))
         })
-        blob = await processToSquare(htmlImg, targetSize)
+        blob = await processToSquareWebP(htmlImg, targetSize)
         URL.revokeObjectURL(htmlImg.src)
+        const ext = getImageExtension(blob)
+        uploadFilename = preserveFilename ? file.name : file.name.replace(/\.[^.]+$/, `.${ext}`)
       }
 
       const path = await uploadBlob(blob, uploadFilename, preserveFilename)
@@ -191,12 +181,37 @@ export function ImageInput({
     setUploading(true)
     setError(null)
     try {
-      const img = new Image()
-      img.src = linkPreview
-      await new Promise<void>((r) => { img.onload = () => r() })
-      const processed = await processToSquare(img, targetSize)
-      const linkFilename = preserveFilename ? 'icon.png' : 'image.png'
-      const url = await uploadBlob(processed, linkFilename, preserveFilename)
+      const res = await fetch(linkPreview)
+      const blob = await res.blob()
+      if (!blob.type.startsWith('image/')) {
+        throw new Error('Geçersiz görsel formatı')
+      }
+      let toUpload: Blob
+      let ext: string
+      if (blob.type === 'image/svg+xml') {
+        toUpload = blob
+        ext = 'svg'
+      } else {
+        const img = new Image()
+        img.src = URL.createObjectURL(blob)
+        try {
+          await new Promise<void>((r, reject) => {
+            img.onload = () => r()
+            img.onerror = () => reject(new Error('Görsel yüklenemedi'))
+          })
+          try {
+            toUpload = await processToSquareWebP(img, targetSize)
+            ext = getImageExtension(toUpload)
+          } catch {
+            toUpload = blob
+            ext = blob.type === 'image/jpeg' || blob.type === 'image/jpg' ? 'jpg' : blob.type === 'image/gif' ? 'gif' : 'png'
+          }
+        } finally {
+          URL.revokeObjectURL(img.src)
+        }
+      }
+      const linkFilename = preserveFilename ? `icon.${ext}` : `image.${ext}`
+      const url = await uploadBlob(toUpload, linkFilename, preserveFilename)
       if (value) await deleteOldImage(value)
       onChange(url)
       setLinkModalOpen(false)

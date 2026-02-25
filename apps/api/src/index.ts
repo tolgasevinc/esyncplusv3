@@ -2,6 +2,26 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { createConnection } from 'mysql2/promise';
 
+/** Türkçe karakterleri arama için ASCII karşılıklarına çevirir (ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c, İ→i) */
+function normalizeForSearch(s: string): string {
+  return (s || '')
+    .toLowerCase()
+    .replace(/İ/g, 'i')
+    .replace(/ı/g, 'i')
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ö/g, 'o')
+    .replace(/ş/g, 's')
+    .replace(/ç/g, 'c');
+}
+
+/** SQLite'da sütun değerini normalize eden ifade (Türkçe karakter eşleşmesi için).
+ * SQLite LOWER() sadece ASCII dönüştürür, Ü/Ö/Ğ/Ş/Ç/İ değişmez - bu yüzden hepsini REPLACE ile yapıyoruz. */
+function sqlNormalizeCol(col: string): string {
+  return `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col}, ''), 'İ', 'i'), 'ı', 'i'), 'Ü', 'u'), 'ü', 'u'), 'Ö', 'o'), 'ö', 'o'), 'Ğ', 'g'), 'ğ', 'g'), 'Ş', 's'), 'ş', 's'), 'Ç', 'c'), 'ç', 'c'))`;
+}
+
+
 type Bindings = {
   DB: D1Database;
   STORAGE: R2Bucket;
@@ -138,31 +158,45 @@ app.post('/storage/folders', async (c) => {
   }
 });
 
-// R2 Storage - Klasör içeriği listele
+// R2 Storage - Klasör içeriği listele (cursor ile tüm dosyalar alınır)
 app.get('/storage/list', async (c) => {
   try {
     if (!c.env.STORAGE) {
       return c.json({ error: 'R2 Storage bağlantısı bulunamadı!' }, 500);
     }
 
-    const prefix = c.req.query('prefix') || '';
-    const { objects } = await c.env.STORAGE.list({ prefix, limit: 100 });
+    let prefix = (c.req.query('prefix') || '').trim();
+    if (prefix && !prefix.endsWith('/')) prefix = `${prefix}/`;
+    const allObjects: { key: string; size: number; uploaded?: string }[] = []
+    const LIST_PAGE_SIZE = 1000
+    const MAX_PAGES = 100
+    let cursor: string | undefined
+    let truncated = true
+    let pageCount = 0
+    while (truncated && pageCount < MAX_PAGES) {
+      pageCount++
+      const listOpts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: LIST_PAGE_SIZE }
+      if (cursor) listOpts.cursor = cursor
+      const listed = await c.env.STORAGE.list(listOpts)
 
-    return c.json(
-      objects.map((o) => ({
-        key: o.key,
-        size: o.size,
-        uploaded: o.uploaded,
-      }))
-    );
+      for (const o of listed.objects) {
+        const uploaded = o.uploaded instanceof Date ? o.uploaded.toISOString() : (o.uploaded as string | undefined)
+        allObjects.push({ key: o.key, size: o.size, uploaded })
+      }
+      truncated = !!listed.truncated
+      cursor = truncated && 'cursor' in listed ? (listed as { cursor: string }).cursor : undefined
+    }
+
+    return c.json(allObjects);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Bilinmeyen hata';
     return c.json({ error: message }, 500);
   }
 });
 
-// R2 Storage - Mevcut prefix'leri listele (klasör seçimi için)
-// prefix query param: belirtilirse sadece o prefix altındaki alt klasörleri döner
+// R2 Storage - Mevcut prefix'leri listele (klasör seçimi için, cursor ile tüm sonuçlar alınır)
+// prefix: belirtilirse sadece o prefix altındaki alt klasörleri döner
+// r2_only=1: sadece R2'de gerçekten var olan prefix'leri döner (storage_folders eklenmez)
 app.get('/storage/prefixes', async (c) => {
   try {
     if (!c.env.STORAGE) {
@@ -170,20 +204,34 @@ app.get('/storage/prefixes', async (c) => {
     }
 
     const basePrefix = (c.req.query('prefix') || '').replace(/\/+$/, '');
+    const r2Only = c.req.query('r2_only') === '1';
     const searchPrefix = basePrefix ? `${basePrefix}/` : '';
-    const { objects } = await c.env.STORAGE.list({ prefix: searchPrefix, limit: 1000 });
+    const prefixes = new Set<string>()
+    const LIST_PAGE_SIZE = 1000
+    const MAX_PAGES = 100
+    let cursor: string | undefined
+    let truncated = true
+    let pageCount = 0
+    while (truncated && pageCount < MAX_PAGES) {
+      pageCount++
+      const listOpts: { prefix: string; limit: number; cursor?: string } = { prefix: searchPrefix, limit: LIST_PAGE_SIZE }
+      if (cursor) listOpts.cursor = cursor
+      const listed = await c.env.STORAGE.list(listOpts)
 
-    const prefixes = new Set<string>();
-    for (const o of objects) {
-      const rest = o.key.slice(searchPrefix.length);
-      const idx = rest.indexOf('/');
-      if (idx > 0) {
-        prefixes.add(searchPrefix + rest.slice(0, idx + 1));
-      } else if (rest && !rest.includes('/')) {
-        prefixes.add(searchPrefix);
+      for (const o of listed.objects) {
+        const rest = o.key.slice(searchPrefix.length)
+        const idx = rest.indexOf('/')
+        if (idx > 0) {
+          prefixes.add(searchPrefix + rest.slice(0, idx + 1))
+        } else if (rest && !rest.includes('/')) {
+          prefixes.add(searchPrefix)
+        }
       }
+      truncated = !!listed.truncated
+      cursor = truncated && 'cursor' in listed ? (listed as { cursor: string }).cursor : undefined
     }
-    if (!basePrefix && c.env.DB) {
+
+    if (!basePrefix && !r2Only && c.env.DB) {
       const { results } = await c.env.DB.prepare(
         `SELECT path FROM storage_folders WHERE is_deleted = 0 AND status = 1 ORDER BY sort_order`
       ).all();
@@ -195,6 +243,492 @@ app.get('/storage/prefixes', async (c) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Bilinmeyen hata';
     return c.json({ error: message }, 500);
+  }
+});
+
+// ========== E-DOCUMENTS (D1'den liste) ==========
+app.get('/api/e-documents', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ data: [], total: 0, total_amount_try: 0 });
+    const filter = (c.req.query('filter') || 'tumu').trim();
+    const search = (c.req.query('search') || '').trim();
+    const sortBy = (c.req.query('sort_by') || 'date').trim();
+    const sortOrder = (c.req.query('sort_order') || 'desc').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+
+    const validSort: Record<string, string> = {
+      date: 'date',
+      amount: 'total_price',
+      invoice_no: 'invoice_no',
+      description: 'file_name',
+    };
+    const orderCol = validSort[sortBy] || 'date';
+    const orderDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
+
+    let where = 'WHERE is_deleted = 0';
+    const params: (string | number)[] = [];
+    if (filter !== 'tumu') {
+      where += ' AND directory LIKE ?';
+      params.push(`e-documents/${filter}/%`);
+    }
+    if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
+      where += ` AND (${sqlNormalizeCol('invoice_no')} LIKE ? OR ${sqlNormalizeCol('seller_title')} LIKE ? OR ${sqlNormalizeCol('buyer_title')} LIKE ? OR ${sqlNormalizeCol('file_name')} LIKE ?)`;
+      params.push(pat, pat, pat, pat);
+    }
+
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM e_documents ${where}`
+    ).bind(...params).first<{ total: number }>();
+
+    let totalAmountTry = 0;
+    try {
+      const sumRes = await c.env.DB.prepare(
+        `SELECT COALESCE(SUM(total_price), 0) as sum_try FROM e_documents ${where}`
+      ).bind(...params).first<{ sum_try: number }>();
+      totalAmountTry = sumRes?.sum_try ?? 0;
+    } catch {
+      /* ignore */
+    }
+
+    const selectCols = 'id, date, uuid, invoice_no, seller_title, buyer_title, directory, file_name, total_price, tax_value, tax_rate, status, created_at';
+    const { results } = await c.env.DB.prepare(
+      `SELECT ${selectCols} FROM e_documents ${where}
+       ORDER BY ${orderCol} ${orderDir}, id DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+
+    const rows = results as { id: number; date: string | null; directory: string; file_name: string; seller_title: string | null; buyer_title: string | null; invoice_no: string | null; total_price: number | null; tax_value: number | null; tax_rate: number | null }[];
+    const data = rows.map((r) => {
+      const segs = r.directory.replace(/^e-documents\//, '').split('/');
+      const folder = segs[0] || 'giden';
+      const type = folder;
+      // Gelen: satıcı (gönderen) gösterilir. Giden/Arşiv: alıcı (müşteri) gösterilir.
+      const sender = r.seller_title ?? undefined;
+      const receiver = r.buyer_title ?? undefined;
+      return {
+        id: r.id,
+        type,
+        date: r.date || '—',
+        sender,
+        receiver,
+        amount: r.total_price ?? undefined,
+        currency: undefined,
+        description: r.file_name,
+        invoice_no: r.invoice_no ?? undefined,
+        status: r.status ?? 1,
+        directory: r.directory,
+        file_name: r.file_name,
+      };
+    });
+    return c.json({ data, total: countRes?.total ?? 0, total_amount_try: totalAmountTry });
+  } catch (err: unknown) {
+    return c.json({ data: [], total: 0, total_amount_try: 0 });
+  }
+});
+
+function extractXmlHeader(xml: string, fileName: string): Record<string, string> {
+  const getFirst = (localName: string) => {
+    const re = new RegExp(`<[^>]*:?${localName}[^>]*>([^<]*)<`, 'i');
+    const m = xml.match(re);
+    return m ? m[1].trim() : '';
+  };
+  const allRegNames = [...xml.matchAll(/<[^>]*:?RegistrationName[^>]*>([^<]*)</gi)];
+  const allNames = [...xml.matchAll(/<[^>]*:?Name[^>]*>([^<]*)</gi)];
+  const supplierName = allRegNames[0]?.[1]?.trim() || allNames[0]?.[1]?.trim() || '';
+  const customerName = allRegNames[1]?.[1]?.trim() || allNames[1]?.[1]?.trim() || '';
+  return {
+    invoiceId: getFirst('ID') || '',
+    issueDate: getFirst('IssueDate') || '',
+    currency: getFirst('DocumentCurrencyCode') || 'TRY',
+    payableAmount: getFirst('PayableAmount') || '',
+    supplierName,
+    customerName,
+    fileName: fileName || 'fatura.xml',
+  };
+}
+
+function buildServerFallbackHtml(h: Record<string, string>): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const rows: string[] = [];
+  if (h.invoiceId) rows.push(`<tr><th>Fatura No</th><td>${esc(h.invoiceId)}</td></tr>`);
+  if (h.issueDate) rows.push(`<tr><th>Tarih</th><td>${esc(h.issueDate)}</td></tr>`);
+  if (h.supplierName) rows.push(`<tr><th>Satıcı</th><td>${esc(h.supplierName)}</td></tr>`);
+  if (h.customerName) rows.push(`<tr><th>Alıcı</th><td>${esc(h.customerName)}</td></tr>`);
+  if (h.payableAmount) rows.push(`<tr><th>Toplam</th><td><strong>${esc(h.payableAmount)} ${esc(h.currency || 'TRY')}</strong></td></tr>`);
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(h.fileName)}</title>
+<style>body{font-family:system-ui,sans-serif;padding:24px;max-width:600px;margin:0 auto}
+table{width:100%;border-collapse:collapse}th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #eee}
+th{color:#666;font-weight:500;width:120px}</style></head><body>
+<h2 style="margin:0 0 24px">${esc(h.fileName)}</h2><table>${rows.join('')}</table></body></html>`;
+}
+
+async function transformXmlToHtml(
+  xml: string,
+  xslt: string,
+  fetchFn?: (uri: string) => Promise<string>
+): Promise<{ html?: string; error?: string }> {
+  try {
+    const { Xslt, XmlParser } = await import('xslt-processor');
+    const xmlParser = new XmlParser();
+    const xsltProc = new Xslt({
+      outputMethod: 'html',
+      fetchFunction: fetchFn ?? (async (uri: string) => {
+        if (uri.startsWith('http://') || uri.startsWith('https://')) {
+          const res = await fetch(uri);
+          if (!res.ok) throw new Error(`Fetch failed: ${uri}`);
+          return res.text();
+        }
+        throw new Error(`Harici yükleme desteklenmiyor: ${uri}`);
+      }),
+    });
+    const xmlDoc = xmlParser.xmlParse(xml);
+    const xsltDoc = xmlParser.xmlParse(xslt);
+    const html = await xsltProc.xsltProcess(xmlDoc, xsltDoc);
+    if (html && typeof html === 'string' && (html.trim().startsWith('<!DOCTYPE') || html.trim().toLowerCase().startsWith('<html'))) {
+      return { html };
+    }
+    return { error: 'XSLT çıktısı HTML değil' };
+  } catch (err: unknown) {
+    return { error: err instanceof Error ? err.message : 'XSLT hatası' };
+  }
+}
+
+/** XML dosyasını okurken encoding desteği (windows-1254 / ISO-8859-9 → UTF-8) + BOM temizleme */
+async function readXmlWithEncoding(obj: R2ObjectBody): Promise<string> {
+  const buf = await obj.arrayBuffer();
+  let bytes = new Uint8Array(buf);
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    bytes = bytes.subarray(3);
+  }
+  const declMatch = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 200)).match(/encoding\s*=\s*["']([^"']+)["']/i);
+  const enc = declMatch?.[1]?.toLowerCase();
+  if (enc === 'iso-8859-9' || enc === 'windows-1254') {
+    return new TextDecoder('iso-8859-9').decode(bytes);
+  }
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+/** UBL EmbeddedDocumentBinaryObject içindeki base64 XSLT'yi çıkarır */
+function extractXsltFromEmbeddedBinaryObject(xml: string): string | undefined {
+  const regex = /<[^>]*EmbeddedDocumentBinaryObject[^>]*>([\s\S]*?)<\/[^>]*EmbeddedDocumentBinaryObject>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(xml)) !== null) {
+    const b64 = (m[1] ?? '').replace(/\s/g, '').trim();
+    if (b64.length < 100) continue;
+    try {
+      const decoded = atob(b64);
+      const bytes = new Uint8Array(decoded.length);
+      for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+      const str = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      if (/<\?xml|<\s*xsl:stylesheet|<\s*xsl:transform/i.test(str)) return str;
+    } catch {
+      /* skip */
+    }
+  }
+  return undefined;
+}
+
+/** XSLT 2.0 elementlerini temizler; xsl:character-map tarayıcıyı ve xslt-processor'ı kırıyor */
+function normalizeXslt(xslt: string): string {
+  return xslt
+    .replace(/version\s*=\s*["']2\.0["']/gi, 'version="1.0"')
+    .replace(/version\s*=\s*["']4\.0["']/gi, 'version="1.0"')
+    .replace(/\s+use-character-maps\s*=\s*["'][^"']*["']/gi, '')
+    .replace(/<xsl:character-map\b[^>]*>[\s\S]*?<\/xsl:character-map>/gi, '');
+}
+
+/** XML'e data URI ile XSLT enjekte eder - tarayıcı otomatik render eder (Gemini önerisi) */
+function injectXsltAsDataUri(xml: string, xslt: string): string {
+  const bytes = new TextEncoder().encode(xslt);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  }
+  const xsltBase64 = btoa(binary);
+  const cleanXml = xml.replace(/<\?xml-stylesheet.*?\?>/g, '').trim();
+  const stylesheetTag = `<?xml-stylesheet type="text/xsl" href="data:text/xml;base64,${xsltBase64}"?>`;
+  const insertPos = cleanXml.indexOf('?>');
+  if (insertPos >= 0) {
+    return cleanXml.slice(0, insertPos + 2) + '\n' + stylesheetTag + cleanXml.slice(insertPos + 2);
+  }
+  return stylesheetTag + '\n' + cleanXml;
+}
+
+// E-Documents - XML + data URI XSLT döndür (tarayıcı native render - beyaz sayfa önlemi)
+app.get('/api/e-documents/preview-xml', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    const key = (c.req.query('key') || '').trim();
+    const baseUrl = (c.req.query('baseUrl') || '').trim();
+    if (!key || !key.startsWith('e-documents/') || !key.endsWith('.xml')) {
+      return c.json({ error: 'Geçersiz key' }, 400);
+    }
+    const xmlObj = await c.env.STORAGE.get(key);
+    if (!xmlObj) return c.json({ error: 'Dosya bulunamadı' }, 404);
+    const xml = await readXmlWithEncoding(xmlObj);
+
+    const dir = key.slice(0, key.lastIndexOf('/') + 1);
+    const fileBase = key.split('/').pop()?.replace(/\.xml$/i, '') || 'file';
+    let xslt: string | undefined;
+    for (const ext of ['.xslt', '.xsl']) {
+      const xsltKey = `${dir}${fileBase}${ext}`;
+      const xsltObj = await c.env.STORAGE.get(xsltKey);
+      if (xsltObj) {
+        xslt = await xsltObj.text();
+        break;
+      }
+    }
+    if (!xslt) {
+      const embeddedMatch = xml.match(/<xsl:(?:stylesheet|transform)[^>]*>[\s\S]*?<\/xsl:(?:stylesheet|transform)>/i);
+      if (embeddedMatch) xslt = embeddedMatch[0];
+    }
+    if (!xslt) xslt = extractXsltFromEmbeddedBinaryObject(xml);
+    if (!xslt) {
+      const isEarsiv = /ProfileID[^>]*>([^<]*)</i.exec(xml)?.[1]?.toUpperCase().includes('EARSIV');
+      if (isEarsiv && baseUrl) {
+        const gibUrl = baseUrl.replace(/\/$/, '') + '/earsiv/general.xslt';
+        const res = await fetch(gibUrl);
+        if (res.ok) xslt = await res.text();
+      }
+    }
+    if (!xslt) {
+      const header = extractXmlHeader(xml, fileBase + '.xml');
+      return c.html(buildServerFallbackHtml(header), 200, {
+        'Content-Type': 'text/html; charset=utf-8',
+      });
+    }
+    const xsltNorm = normalizeXslt(xslt);
+    const isEarsiv = /ProfileID[^>]*>([^<]*)</i.exec(xml)?.[1]?.toUpperCase().includes('EARSIV');
+    const isGiden = key.includes('/giden/');
+    // Giden ve e-arşiv: data URI bazen başarısız (xsl:include, XSLT deprecation). Önce sunucuda dene.
+    if (isEarsiv || isGiden) {
+      const fetchFn = async (uri: string) => {
+        if (uri.startsWith('http://') || uri.startsWith('https://')) {
+          const res = await fetch(uri);
+          if (!res.ok) throw new Error(`Fetch failed: ${uri}`);
+          return res.text();
+        }
+        const relKey = dir + uri.replace(/^\.\//, '');
+        const obj = await c.env.STORAGE.get(relKey);
+        if (!obj) throw new Error(`Dosya bulunamadı: ${uri}`);
+        return obj.text();
+      };
+      const result = await transformXmlToHtml(xml, xsltNorm, fetchFn);
+      if (result.html) {
+        return c.html(result.html, 200, { 'Content-Type': 'text/html; charset=utf-8' });
+      }
+    }
+    // Gelen veya sunucu dönüşüm başarısız: data URI ile tarayıcıya bırak
+    const finalXml = injectXsltAsDataUri(xml, xsltNorm);
+    return new Response(finalXml, {
+      headers: { 'Content-Type': 'application/xml; charset=utf-8' },
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// E-Documents - R2'den XML + XSLT getir. XSLT varsa { xml, xslt } döndür (client-side native XSLT için).
+// XSLT yoksa sunucuda fallback HTML üret. Gelen/giden native XSLTProcessor ile düzgün çalışır.
+app.get('/api/e-documents/content', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    const key = (c.req.query('key') || '').trim();
+    if (!key || !key.startsWith('e-documents/') || !key.endsWith('.xml')) {
+      return c.json({ error: 'Geçersiz key' }, 400);
+    }
+    const xmlObj = await c.env.STORAGE.get(key);
+    if (!xmlObj) return c.json({ error: 'Dosya bulunamadı' }, 404);
+    const xml = await readXmlWithEncoding(xmlObj);
+
+    const dir = key.slice(0, key.lastIndexOf('/') + 1);
+    const fileBase = key.split('/').pop()?.replace(/\.xml$/i, '') || 'file';
+    let xslt: string | undefined;
+    for (const ext of ['.xslt', '.xsl']) {
+      const xsltKey = `${dir}${fileBase}${ext}`;
+      const xsltObj = await c.env.STORAGE.get(xsltKey);
+      if (xsltObj) {
+        xslt = await xsltObj.text();
+        break;
+      }
+    }
+    if (!xslt) {
+      const embeddedMatch = xml.match(/<xsl:(?:stylesheet|transform)[^>]*>[\s\S]*?<\/xsl:(?:stylesheet|transform)>/i);
+      if (embeddedMatch) xslt = embeddedMatch[0];
+    }
+    if (!xslt) xslt = extractXsltFromEmbeddedBinaryObject(xml);
+    if (xslt) {
+      return c.json({ xml, xslt: normalizeXslt(xslt) }, 200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'private, max-age=60',
+      });
+    }
+    // E-arşiv (XSLT yok): GİB şablonu - frontend xsltUrl ile fetch eder
+    const isEarsiv = /ProfileID[^>]*>([^<]*)</i.exec(xml)?.[1]?.toUpperCase().includes('EARSIV');
+    if (isEarsiv) {
+      return c.json({ xml, gibTemplate: true, xsltUrl: '/earsiv/general.xslt' }, 200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'private, max-age=60',
+      });
+    }
+    const header = extractXmlHeader(xml, fileBase + '.xml');
+    const fallbackHtml = buildServerFallbackHtml(header);
+    return c.json({ html: fallbackHtml }, 200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'private, max-age=60',
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// E-Documents - Yükleme önizlemesi (sunucuda XSLT)
+app.post('/api/e-documents/preview', async (c) => {
+  try {
+    const body = await c.req.parseBody();
+    const file = body.file;
+    const xsltFile = body.xsltFile;
+    if (!file || typeof file === 'string') return c.json({ error: 'XML dosyası gerekli' }, 400);
+    const f = file as File;
+    const xml = await f.text();
+    let xslt: string | undefined;
+    if (xsltFile && typeof xsltFile !== 'string') {
+      xslt = await (xsltFile as File).text();
+    } else {
+      const embeddedMatch = xml.match(/<xsl:(?:stylesheet|transform)[^>]*>[\s\S]*?<\/xsl:(?:stylesheet|transform)>/i);
+      if (embeddedMatch) xslt = embeddedMatch[0];
+    }
+    if (xslt) {
+      const result = await transformXmlToHtml(xml, xslt);
+      if (result.html) return c.json({ html: result.html });
+    }
+    const header = extractXmlHeader(xml, f.name);
+    const fallbackHtml = buildServerFallbackHtml(header);
+    return c.json({ html: fallbackHtml });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Önizleme hatası' }, 500);
+  }
+});
+
+/** e-documents directory path: e-documents/{gelen|giden|arsiv}/{YYYY}/{MM}/ */
+function getEdocumentDirectory(invoiceType: string | undefined, issueDate?: string): string {
+  const folder = invoiceType === 'earsiv' ? 'arsiv' : invoiceType === 'gelen' ? 'gelen' : 'giden';
+  let year = new Date().getFullYear();
+  let month = String(new Date().getMonth() + 1).padStart(2, '0');
+  if (issueDate) {
+    const d = (issueDate || '').trim();
+    const isoMatch = d.match(/^(\d{4})-(\d{1,2})/);
+    const trMatch = d.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+    if (isoMatch) {
+      year = parseInt(isoMatch[1], 10);
+      month = String(parseInt(isoMatch[2], 10)).padStart(2, '0');
+    } else if (trMatch) {
+      year = parseInt(trMatch[3], 10);
+      month = String(parseInt(trMatch[2], 10)).padStart(2, '0');
+    }
+  }
+  return `e-documents/${folder}/${year}/${month}/`;
+}
+
+// ========== E-DOCUMENTS UPLOAD (R2 + D1) ==========
+app.post('/api/e-documents/upload', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    if (!c.env.DB) return c.json({ error: 'Veritabanı bulunamadı' }, 500);
+    const body = await c.req.parseBody();
+    const file = body.file;
+    const xsltFile = body.xsltFile;
+    const metadataStr = body.metadata as string | undefined;
+    if (!file || typeof file === 'string') return c.json({ error: 'Dosya gerekli' }, 400);
+
+    const meta = metadataStr ? (JSON.parse(metadataStr) as Record<string, unknown>) : {};
+    const invoiceType = meta.invoiceType as string | undefined;
+    const issueDate = meta.issueDate as string | undefined;
+    const directory = getEdocumentDirectory(invoiceType, issueDate);
+
+    const f = file as File;
+    const baseName = f.name.replace(/\.[^.]+$/, '');
+    const ext = f.name.split('.').pop()?.toLowerCase() || 'xml';
+    const safeName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100) || 'file';
+    const fileName = `${safeName}.${ext}`;
+    const key = `${directory}${fileName}`;
+
+    const buf = await f.arrayBuffer();
+    await c.env.STORAGE.put(key, buf, {
+      httpMetadata: { contentType: f.type || 'application/xml' },
+    });
+
+    if (xsltFile && typeof xsltFile !== 'string') {
+      const xf = xsltFile as File;
+      const xsltExt = xf.name.split('.').pop()?.toLowerCase() || 'xslt';
+      const xsltFileName = `${safeName}.${xsltExt}`;
+      const xsltKey = `${directory}${xsltFileName}`;
+      const xsltBuf = await xf.arrayBuffer();
+      await c.env.STORAGE.put(xsltKey, xsltBuf, {
+        httpMetadata: { contentType: xf.type || 'application/xml' },
+      });
+    }
+
+    const totalPrice = meta.payableAmount != null ? parseFloat(String(meta.payableAmount)) : null;
+    const taxValue = meta.taxValue != null ? parseFloat(String(meta.taxValue)) : null;
+    const taxRate = meta.taxRate != null ? parseFloat(String(meta.taxRate)) : null;
+    const dateNorm = issueDate ? (issueDate.includes('.') ? issueDate.split('.').reverse().join('-') : issueDate) : null;
+
+    const currency = (meta.currency as string) || 'TRY';
+    await c.env.DB.prepare(
+      `INSERT OR REPLACE INTO e_documents (date, uuid, invoice_no, seller_title, buyer_title, directory, file_name, total_price, tax_value, tax_rate, currency, status, is_deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, datetime('now'))`
+    ).bind(
+      dateNorm ?? null,
+      (meta.uuid as string) ?? null,
+      (meta.invoiceId as string) ?? null,
+      (meta.supplierName as string) ?? null,
+      (meta.customerName as string) ?? null,
+      directory,
+      fileName,
+      totalPrice,
+      taxValue,
+      taxRate,
+      currency
+    ).run();
+
+    return c.json({ path: key });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Yükleme hatası' }, 500);
+  }
+});
+
+// E-Documents - Toplu silme (D1 soft delete + R2 dosya silme)
+app.delete('/api/e-documents', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'Veritabanı bulunamadı' }, 500);
+    const body = await c.req.json<{ ids?: number[] }>().catch(() => ({}));
+    const ids = Array.isArray(body?.ids) ? body.ids.filter((id) => typeof id === 'number' && id > 0) : [];
+    if (ids.length === 0) return c.json({ error: 'Geçerli id gerekli' }, 400);
+    const placeholders = ids.map(() => '?').join(',');
+    const { results } = await c.env.DB.prepare(
+      `SELECT directory, file_name FROM e_documents WHERE id IN (${placeholders}) AND is_deleted = 0`
+    ).bind(...ids).all();
+    const rows = results as { directory: string; file_name: string }[];
+    if (c.env.STORAGE && rows.length > 0) {
+      for (const r of rows) {
+        const dir = (r.directory || '').replace(/\/+$/, '') + '/';
+        const xmlKey = dir + r.file_name;
+        await c.env.STORAGE.delete(xmlKey);
+        const baseName = r.file_name.replace(/\.xml$/i, '');
+        await c.env.STORAGE.delete(dir + baseName + '.xslt');
+        await c.env.STORAGE.delete(dir + baseName + '.xsl');
+      }
+    }
+    const res = await c.env.DB.prepare(
+      `UPDATE e_documents SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id IN (${placeholders}) AND is_deleted = 0`
+    ).bind(...ids).run();
+    return c.json({ deleted: res.meta.changes });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Silme hatası' }, 500);
   }
 });
 
@@ -210,8 +744,10 @@ app.get('/api/product-brands', async (c) => {
     let where = 'WHERE is_deleted = 0';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      params.push(pat, pat);
     }
 
     const countRes = await c.env.DB.prepare(
@@ -371,30 +907,79 @@ app.get('/api/products', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const search = (c.req.query('search') || '').trim();
+    const filter_name = (c.req.query('filter_name') || '').trim();
+    const filter_sku = (c.req.query('filter_sku') || '').trim();
+    const filter_brand_id = c.req.query('filter_brand_id');
+    const filter_category_id = c.req.query('filter_category_id');
+    const filter_no_image = c.req.query('filter_no_image') === '1';
+    const sort_by = (c.req.query('sort_by') || 'sort_order').trim();
+    const sort_order = (c.req.query('sort_order') || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
     const offset = (page - 1) * limit;
     let where = 'WHERE p.is_deleted = 0';
     const params: (string | number)[] = [];
     if (search) {
-      where += ' AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
+      const normName = sqlNormalizeCol('p.name');
+      const normSku = sqlNormalizeCol('p.sku');
+      const normBarcode = sqlNormalizeCol('p.barcode');
+      where += ` AND (${normName} LIKE ? OR ${normSku} LIKE ? OR ${normBarcode} LIKE ?)`;
+      params.push(pat, pat, pat);
     }
+    if (filter_name) {
+      where += ` AND ${sqlNormalizeCol('p.name')} LIKE ?`;
+      params.push(`%${normalizeForSearch(filter_name)}%`);
+    }
+    if (filter_sku) {
+      where += ` AND ${sqlNormalizeCol('p.sku')} LIKE ?`;
+      params.push(`%${normalizeForSearch(filter_sku)}%`);
+    }
+    if (filter_brand_id) {
+      where += ' AND p.brand_id = ?';
+      params.push(Number(filter_brand_id));
+    }
+    if (filter_category_id) {
+      where += ' AND p.category_id = ?';
+      params.push(Number(filter_category_id));
+    }
+    if (filter_no_image) {
+      where += " AND (COALESCE(TRIM(p.image), '') = '' OR TRIM(p.image) = '[]')";
+    }
+    const validSortColumns: Record<string, string> = {
+      name: 'p.name',
+      sku: 'p.sku',
+      brand_name: 'b.name',
+      category_name: 'sub.name',
+      price: 'p.price',
+      sort_order: 'p.sort_order',
+    };
+    const orderCol = validSortColumns[sort_by] || 'p.sort_order';
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM products p ${where}`
     ).bind(...params).first<{ total: number }>();
     const { results } = await c.env.DB.prepare(
       `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.unit_id, p.currency_id,
-       p.price, p.quantity, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
+       p.price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
        p.created_at, p.updated_at,
-       b.name as brand_name, c.name as category_name, c.color as category_color, t.name as type_name, t.color as type_color, u.name as unit_name, cur.symbol as currency_symbol
+       b.name as brand_name, b.code as brand_code, b.image as brand_image,
+       grp.code as group_code, grp.name as group_name, grp.color as group_color,
+       cat.code as category_code, cat.name as category_name, cat.color as category_color,
+       CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.code END as subcategory_code,
+       CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.name END as subcategory_name,
+       CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.color END as subcategory_color,
+       t.name as type_name, t.color as type_color, u.name as unit_name, cur.symbol as currency_symbol
        FROM products p
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
-       LEFT JOIN product_categories c ON p.category_id = c.id AND c.is_deleted = 0
+       LEFT JOIN product_categories sub ON p.category_id = sub.id AND sub.is_deleted = 0
+       LEFT JOIN product_categories cat ON cat.id = COALESCE(sub.category_id, CASE WHEN sub.group_id IS NOT NULL AND sub.group_id > 0 THEN sub.id END) AND cat.is_deleted = 0
+       LEFT JOIN product_categories grp ON grp.id = COALESCE(cat.group_id, sub.group_id, sub.id) AND grp.is_deleted = 0
        LEFT JOIN product_types t ON p.type_id = t.id AND t.is_deleted = 0
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
-       ${where} ORDER BY p.sort_order, p.name LIMIT ? OFFSET ?`
+       LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
+       ${where} ORDER BY ${orderCol} ${sort_order}, p.id LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
   } catch (err: unknown) {
@@ -414,22 +999,76 @@ app.get('/api/products/next-sort-order', async (c) => {
   }
 });
 
+// Marka + tedarikçi koduna göre ürün ara (fiyat/para birimi otomatik doldurma için)
+app.get('/api/products/lookup', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const brand_id = c.req.query('brand_id');
+    const supplier_code = (c.req.query('supplier_code') || '').trim();
+    if (!brand_id || !supplier_code) return c.json(null);
+    const row = await c.env.DB.prepare(
+      `SELECT id, price, currency_id FROM products WHERE is_deleted = 0 AND brand_id = ? AND TRIM(supplier_code) = ? LIMIT 1`
+    ).bind(Number(brand_id), supplier_code).first<{ id: number; price: unknown; currency_id: unknown }>();
+    if (!row) return c.json(null);
+    const price = typeof row.price === 'number' ? row.price : parseFloat(String(row.price || 0)) || 0;
+    const currency_id = row.currency_id != null ? Number(row.currency_id) : null;
+    return c.json({ id: row.id, price, currency_id });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// Marka için products tablosundaki tedarikçi kodlarını döndür (eşleşme kontrolü için)
+app.get('/api/products/supplier-codes', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const brand_id = c.req.query('brand_id');
+    if (!brand_id) return c.json({ codes: [] });
+    const { results } = await c.env.DB.prepare(
+      `SELECT DISTINCT TRIM(supplier_code) as code FROM products WHERE is_deleted = 0 AND brand_id = ? AND supplier_code IS NOT NULL AND TRIM(supplier_code) != ''`
+    ).bind(Number(brand_id)).all<{ code: string }>();
+    const codes = (results || []).map((r) => String(r.code ?? '').trim()).filter(Boolean);
+    return c.json({ codes });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 app.get('/api/products/:id', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const id = c.req.param('id');
     const row = await c.env.DB.prepare(
-      `SELECT p.*, b.name as brand_name, c.name as category_name, c.color as category_color, t.name as type_name, t.color as type_color, u.name as unit_name, cur.name as currency_name, cur.symbol as currency_symbol
+      `SELECT p.*, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id,
+       b.name as brand_name, b.code as brand_code, b.image as brand_image,
+       grp.code as group_code, grp.name as group_name, grp.color as group_color,
+       cat.code as category_code, cat.name as category_name, cat.color as category_color,
+       CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.code END as subcategory_code,
+       CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.name END as subcategory_name,
+       CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.color END as subcategory_color,
+       t.name as type_name, t.color as type_color, u.name as unit_name, cur.name as currency_name, cur.symbol as currency_symbol
        FROM products p
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
-       LEFT JOIN product_categories c ON p.category_id = c.id AND c.is_deleted = 0
+       LEFT JOIN product_categories sub ON p.category_id = sub.id AND sub.is_deleted = 0
+       LEFT JOIN product_categories cat ON cat.id = COALESCE(sub.category_id, CASE WHEN sub.group_id IS NOT NULL AND sub.group_id > 0 THEN sub.id END) AND cat.is_deleted = 0
+       LEFT JOIN product_categories grp ON grp.id = COALESCE(cat.group_id, sub.group_id, sub.id) AND grp.is_deleted = 0
        LEFT JOIN product_types t ON p.type_id = t.id AND t.is_deleted = 0
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`
     ).bind(id).first();
     if (!row) return c.json({ error: 'Ürün bulunamadı' }, 404);
-    return c.json(row);
+    const { results: pricesRows } = await c.env.DB.prepare(
+      `SELECT price_type_id, price, currency_id, status FROM product_prices WHERE product_id = ? AND is_deleted = 0`
+    ).bind(id).all<{ price_type_id: number; price: number; currency_id: number | null; status: number }>();
+    const prices = (pricesRows ?? []).map((r) => ({
+      price_type_id: r.price_type_id,
+      price: r.price,
+      currency_id: r.currency_id,
+      status: r.status ?? 1,
+    }));
+    return c.json({ ...row, prices });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -441,6 +1080,8 @@ app.post('/api/products', async (c) => {
     const body = await c.req.json<{
       name: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
       type_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
+      ecommerce_price?: number; ecommerce_currency_id?: number;
+      prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
     }>();
@@ -469,9 +1110,27 @@ app.post('/api/products', async (c) => {
       sort_order,
       status
     ).run();
+    const productId = (await c.env.DB.prepare(`SELECT last_insert_rowid() as id`).first<{ id: number }>())?.id ?? 0;
+    if (productId && body.prices && Array.isArray(body.prices) && body.prices.length > 0) {
+      for (const p of body.prices) {
+        if (!p.price_type_id) continue;
+        const price = p.price ?? 0;
+        const currencyId = p.currency_id ?? null;
+        const status = p.status !== undefined ? (p.status ? 1 : 0) : 1;
+        await c.env.DB.prepare(
+          `INSERT INTO product_prices (product_id, price_type_id, price, currency_id, status) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(product_id, price_type_id) DO UPDATE SET price = excluded.price, currency_id = excluded.currency_id, status = excluded.status, updated_at = datetime('now')`
+        ).bind(productId, p.price_type_id, price, currencyId, status).run();
+      }
+    } else if (productId && (body.ecommerce_price != null || body.ecommerce_currency_id != null)) {
+      await c.env.DB.prepare(
+        `INSERT INTO product_prices (product_id, price_type_id, price, currency_id) VALUES (?, 1, ?, ?)
+         ON CONFLICT(product_id, price_type_id) DO UPDATE SET price = excluded.price, currency_id = excluded.currency_id, updated_at = datetime('now')`
+      ).bind(productId, body.ecommerce_price ?? 0, body.ecommerce_currency_id || null).run();
+    }
     const { results } = await c.env.DB.prepare(
-      `SELECT * FROM products WHERE id = last_insert_rowid()`
-    ).all();
+      `SELECT * FROM products WHERE id = ?`
+    ).bind(productId).all();
     return c.json(results![0], 201);
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
@@ -485,6 +1144,8 @@ app.put('/api/products/:id', async (c) => {
     const body = await c.req.json<{
       name?: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
       type_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
+      ecommerce_price?: number; ecommerce_currency_id?: number;
+      prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
     }>();
@@ -511,8 +1172,56 @@ app.put('/api/products/:id', async (c) => {
     if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
     updates.push("updated_at = datetime('now')");
     await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run();
-    const { results } = await c.env.DB.prepare(`SELECT * FROM products WHERE id = ?`).bind(id).all();
-    return c.json(results![0]);
+    if (body.prices && Array.isArray(body.prices) && body.prices.length > 0) {
+      for (const p of body.prices) {
+        const priceTypeId = p.price_type_id;
+        if (!priceTypeId) continue;
+        const existing = await c.env.DB.prepare(
+          `SELECT price, currency_id, status FROM product_prices WHERE product_id = ? AND price_type_id = ? AND is_deleted = 0`
+        ).bind(id, priceTypeId).first<{ price: number; currency_id: number | null; status: number }>();
+        const price = p.price !== undefined ? p.price : (existing?.price ?? 0);
+        const currencyId = p.currency_id !== undefined ? (p.currency_id || null) : (existing?.currency_id ?? null);
+        const status = p.status !== undefined ? (p.status ? 1 : 0) : (existing?.status ?? 1);
+        await c.env.DB.prepare(
+          `INSERT INTO product_prices (product_id, price_type_id, price, currency_id, status) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(product_id, price_type_id) DO UPDATE SET price = excluded.price, currency_id = excluded.currency_id, status = excluded.status, updated_at = datetime('now')`
+        ).bind(id, priceTypeId, price, currencyId, status).run();
+      }
+    } else if (body.ecommerce_price !== undefined || body.ecommerce_currency_id !== undefined) {
+      const existing = await c.env.DB.prepare(
+        `SELECT price, currency_id FROM product_prices WHERE product_id = ? AND price_type_id = 1 AND is_deleted = 0`
+      ).bind(id).first<{ price: number; currency_id: number | null }>();
+      const price = body.ecommerce_price !== undefined ? body.ecommerce_price : (existing?.price ?? 0);
+      const currencyId = body.ecommerce_currency_id !== undefined ? (body.ecommerce_currency_id || null) : (existing?.currency_id ?? null);
+      await c.env.DB.prepare(
+        `INSERT INTO product_prices (product_id, price_type_id, price, currency_id) VALUES (?, 1, ?, ?)
+         ON CONFLICT(product_id, price_type_id) DO UPDATE SET price = excluded.price, currency_id = excluded.currency_id, updated_at = datetime('now')`
+      ).bind(id, price, currencyId).run();
+    }
+    // Bu ürün bir paket içinde kullanılıyorsa, o paketlerin fiyatlarını yeniden hesapla
+    if (body.price !== undefined) {
+      const { results: pkgIds } = await c.env.DB.prepare(
+        `SELECT DISTINCT product_id FROM product_package_items WHERE item_product_id = ?`
+      ).bind(id).all<{ product_id: number }>();
+      for (const row of pkgIds ?? []) {
+        const pkgId = row.product_id;
+        const sumRow = await c.env.DB.prepare(
+          `SELECT COALESCE(SUM(p.price * pi.quantity), 0) as total
+           FROM product_package_items pi
+           JOIN products p ON pi.item_product_id = p.id AND p.is_deleted = 0
+           WHERE pi.product_id = ?`
+        ).bind(pkgId).first<{ total: number }>();
+        const totalPrice = typeof sumRow?.total === 'number' ? sumRow.total : 0;
+        await c.env.DB.prepare(`UPDATE products SET price = ? WHERE id = ?`).bind(totalPrice, pkgId).run();
+      }
+    }
+    const row = await c.env.DB.prepare(
+      `SELECT p.*, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id
+       FROM products p
+       LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
+       WHERE p.id = ?`
+    ).bind(id).first();
+    return c.json(row ?? {});
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -533,13 +1242,33 @@ app.delete('/api/products/:id', async (c) => {
 });
 
 // ========== PRODUCT PACKAGE ITEMS (Paket İçeriği) ==========
+app.post('/api/products/:id/recalculate-package-price', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const productExists = await c.env.DB.prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!productExists) return c.json({ error: 'Ürün bulunamadı' }, 404);
+    const sumRow = await c.env.DB.prepare(
+      `SELECT COALESCE(SUM(p.price * pi.quantity), 0) as total
+       FROM product_package_items pi
+       JOIN products p ON pi.item_product_id = p.id AND p.is_deleted = 0
+       WHERE pi.product_id = ?`
+    ).bind(id).first<{ total: number }>();
+    const totalPrice = typeof sumRow?.total === 'number' ? sumRow.total : 0;
+    await c.env.DB.prepare(`UPDATE products SET price = ? WHERE id = ?`).bind(totalPrice, id).run();
+    return c.json({ price: totalPrice });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 app.get('/api/products/:id/package-items', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const id = c.req.param('id');
     const { results } = await c.env.DB.prepare(
       `SELECT pi.id, pi.product_id, pi.item_product_id, pi.quantity, pi.sort_order,
-       p.name as item_name, p.sku as item_sku
+       p.name as item_name, p.sku as item_sku, p.price as item_price
        FROM product_package_items pi
        LEFT JOIN products p ON pi.item_product_id = p.id AND p.is_deleted = 0
        WHERE pi.product_id = ?
@@ -568,15 +1297,24 @@ app.put('/api/products/:id/package-items', async (c) => {
          VALUES (?, ?, ?, ?)`
       ).bind(id, it.item_product_id, it.quantity, i).run();
     }
+    // Paket fiyatı = içerikteki ürünlerin (fiyat * adet) toplamı
+    const sumRow = await c.env.DB.prepare(
+      `SELECT COALESCE(SUM(p.price * pi.quantity), 0) as total
+       FROM product_package_items pi
+       JOIN products p ON pi.item_product_id = p.id AND p.is_deleted = 0
+       WHERE pi.product_id = ?`
+    ).bind(id).first<{ total: number }>();
+    const totalPrice = typeof sumRow?.total === 'number' ? sumRow.total : 0;
+    await c.env.DB.prepare(`UPDATE products SET price = ? WHERE id = ?`).bind(totalPrice, id).run();
     const { results } = await c.env.DB.prepare(
       `SELECT pi.id, pi.product_id, pi.item_product_id, pi.quantity, pi.sort_order,
-       p.name as item_name, p.sku as item_sku
+       p.name as item_name, p.sku as item_sku, p.price as item_price
        FROM product_package_items pi
        LEFT JOIN products p ON pi.item_product_id = p.id AND p.is_deleted = 0
        WHERE pi.product_id = ?
        ORDER BY pi.sort_order, pi.id`
     ).bind(id).all();
-    return c.json({ data: results ?? [] });
+    return c.json({ data: results ?? [], calculatedPrice: totalPrice });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -593,8 +1331,10 @@ app.get('/api/product-units', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM product_unit ${where}`
@@ -699,8 +1439,10 @@ app.get('/api/product-types', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM product_types ${where}`
@@ -807,8 +1549,10 @@ app.get('/api/product-currencies', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ? OR symbol LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM product_currencies ${where}`
@@ -913,6 +1657,113 @@ app.delete('/api/product-currencies/:id', async (c) => {
   }
 });
 
+// ========== PRODUCT PRICE TYPES (Fiyat Tipleri) ==========
+app.get('/api/product-price-types', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE is_deleted = 0 AND status = 1';
+    const params: (string | number)[] = [];
+    if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
+      where += ' AND (name LIKE ? OR code LIKE ?)';
+      params.push(pat, pat);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM product_price_types ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, code, sort_order, status, created_at FROM product_price_types ${where}
+       ORDER BY sort_order, name LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/product-price-types/next-sort-order', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const row = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM product_price_types WHERE is_deleted = 0`
+    ).first<{ next: number }>();
+    return c.json({ next: row?.next ?? 1 });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/product-price-types', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ name: string; code?: string; sort_order?: number; status?: number }>();
+    const name = (body.name || '').trim();
+    if (!name) return c.json({ error: 'Fiyat tipi adı gerekli' }, 400);
+    const code = (body.code || name.slice(0, 2).toUpperCase()).trim();
+    const sort_order = body.sort_order ?? 0;
+    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM product_price_types WHERE code = ? AND is_deleted = 0`
+    ).bind(code).first();
+    if (existing) return c.json({ error: 'Bu kod zaten kullanılıyor' }, 409);
+    await c.env.DB.prepare(
+      `INSERT INTO product_price_types (name, code, sort_order, status) VALUES (?, ?, ?, ?)`
+    ).bind(name, code, sort_order, status).run();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, code, sort_order, status, created_at FROM product_price_types WHERE id = last_insert_rowid()`
+    ).all();
+    return c.json(results![0], 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/product-price-types/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ name?: string; code?: string; sort_order?: number; status?: number }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM product_price_types WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Fiyat tipi bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
+    if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code.trim()); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE product_price_types SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(
+      `SELECT id, name, code, sort_order, status, created_at, updated_at FROM product_price_types WHERE id = ?`
+    ).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/product-price-types/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    if (id === '1') return c.json({ error: 'Varsayılan E-Ticaret fiyat tipi silinemez' }, 400);
+    const res = await c.env.DB.prepare(
+      `UPDATE product_price_types SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Fiyat tipi bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 // ========== PRODUCT TAX RATES (Vergi Oranları) ==========
 app.get('/api/product-tax-rates', async (c) => {
   try {
@@ -924,8 +1775,10 @@ app.get('/api/product-tax-rates', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR description LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM product_tax_rates ${where}`
@@ -1026,8 +1879,10 @@ app.get('/api/customer-types', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ? OR description LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM customer_types ${where}`
@@ -1134,8 +1989,10 @@ app.get('/api/common-tax-offices', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ? OR city LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM common_tax_offices ${where}`
@@ -1244,8 +2101,10 @@ app.get('/api/product-categories', async (c) => {
     let where = 'WHERE is_deleted = 0 AND (status = 1 OR status IS NULL)';
     const params: (string | number)[] = [];
     if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
       where += ' AND (name LIKE ? OR code LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      params.push(pat, pat);
     }
     if (groupId !== undefined && groupId !== '') {
       const gid = parseInt(groupId);
@@ -1399,20 +2258,25 @@ app.get('/api/suppliers', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const search = (c.req.query('search') || '').trim();
+    const brand_id = c.req.query('brand_id');
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '100')));
     const offset = (page - 1) * limit;
     let where = 'WHERE s.is_deleted = 0 AND (s.status = 1 OR s.status IS NULL)';
     const params: (string | number)[] = [];
     if (search) {
-      where += ' AND (s.name LIKE ? OR s.table_name LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      where += ' AND s.name LIKE ?';
+      params.push(`%${normalizeForSearch(search)}%`);
+    }
+    if (brand_id) {
+      where += ' AND s.brand_id = ?';
+      params.push(Number(brand_id));
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM suppliers s ${where}`
     ).bind(...params).first<{ total: number }>();
     const { results } = await c.env.DB.prepare(
-      `SELECT s.id, s.name, s.brand_id, s.source_type, s.currency_id, s.source_file, s.table_name,
+      `SELECT s.id, s.name, s.brand_id, s.source_type, s.currency_id, s.source_file, s.header_row,
        s.record_count, s.column_mappings, s.column_types, s.sort_order, s.status, s.created_at,
        b.name as brand_name, cur.symbol as currency_symbol
        FROM suppliers s
@@ -1461,7 +2325,7 @@ app.post('/api/suppliers', async (c) => {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const body = await c.req.json<{
       name: string; brand_id?: number; source_type?: string; currency_id?: number;
-      source_file?: string; table_name?: string; record_count?: number;
+      source_file?: string; header_row?: number; record_count?: number;
       column_mappings?: string; column_types?: string; sort_order?: number; status?: number;
     }>();
     const name = (body.name || '').trim();
@@ -1470,16 +2334,16 @@ app.post('/api/suppliers', async (c) => {
     const source_type = (body.source_type || 'excel').trim();
     const currency_id = body.currency_id ?? null;
     const source_file = body.source_file?.trim() || null;
-    const table_name = body.table_name?.trim() || null;
+    const header_row = body.header_row != null ? Math.max(1, Number(body.header_row) || 1) : 1;
     const record_count = body.record_count ?? 0;
     const column_mappings = body.column_mappings?.trim() || null;
     const column_types = body.column_types?.trim() || null;
     const sort_order = body.sort_order ?? 0;
     const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
     await c.env.DB.prepare(
-      `INSERT INTO suppliers (name, brand_id, source_type, currency_id, source_file, table_name, record_count, column_mappings, column_types, sort_order, status)
+      `INSERT INTO suppliers (name, brand_id, source_type, currency_id, source_file, header_row, record_count, column_mappings, column_types, sort_order, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(name, brand_id, source_type, currency_id, source_file, table_name, record_count, column_mappings, column_types, sort_order, status).run();
+    ).bind(name, brand_id, source_type, currency_id, source_file, header_row, record_count, column_mappings, column_types, sort_order, status).run();
     const { results } = await c.env.DB.prepare(
       `SELECT * FROM suppliers WHERE id = last_insert_rowid()`
     ).all();
@@ -1495,7 +2359,7 @@ app.put('/api/suppliers/:id', async (c) => {
     const id = c.req.param('id');
     const body = await c.req.json<{
       name?: string; brand_id?: number; source_type?: string; currency_id?: number;
-      source_file?: string; table_name?: string; record_count?: number;
+      source_file?: string; header_row?: number; record_count?: number;
       column_mappings?: string; column_types?: string; sort_order?: number; status?: number;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM suppliers WHERE id = ? AND is_deleted = 0`).bind(id).first();
@@ -1507,7 +2371,7 @@ app.put('/api/suppliers/:id', async (c) => {
     if (body.source_type !== undefined) { updates.push('source_type = ?'); values.push(body.source_type?.trim() || 'excel'); }
     if (body.currency_id !== undefined) { updates.push('currency_id = ?'); values.push(body.currency_id ?? null); }
     if (body.source_file !== undefined) { updates.push('source_file = ?'); values.push(body.source_file?.trim() || null); }
-    if (body.table_name !== undefined) { updates.push('table_name = ?'); values.push(body.table_name?.trim() || null); }
+    if (body.header_row !== undefined) { updates.push('header_row = ?'); values.push(Math.max(1, Number(body.header_row) || 1)); }
     if (body.record_count !== undefined) { updates.push('record_count = ?'); values.push(body.record_count); }
     if (body.column_mappings !== undefined) { updates.push('column_mappings = ?'); values.push(body.column_mappings?.trim() || null); }
     if (body.column_types !== undefined) { updates.push('column_types = ?'); values.push(body.column_types?.trim() || null); }
@@ -1567,6 +2431,23 @@ app.put('/storage/folder', async (c) => {
   }
 });
 
+// R2 Storage - Verilen key'lerden hangileri mevcut kontrol et
+app.post('/storage/check-keys', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ existing: [] });
+    const body = await c.req.json<{ keys: string[] }>();
+    const keys = Array.isArray(body?.keys) ? body.keys.filter((k) => typeof k === 'string' && k.trim()) : [];
+    const existing: string[] = [];
+    for (const key of keys) {
+      const obj = await c.env.STORAGE.get(key.trim());
+      if (obj) existing.push(key.trim());
+    }
+    return c.json({ existing });
+  } catch {
+    return c.json({ existing: [] });
+  }
+});
+
 // R2 Storage - Dosya yükle
 // preserveFilename=true: İkonlar klasörü için - orijinal dosya adı korunur (boyut/format işlemleri client'ta uygulanır)
 app.post('/storage/upload', async (c) => {
@@ -1574,21 +2455,29 @@ app.post('/storage/upload', async (c) => {
     if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
     const body = await c.req.parseBody();
     const file = body.file;
-    const folder = (body.folder as string) || 'images/';
-    const preserveFilename = body.preserveFilename === 'true' || body.preserveFilename === true;
+    let folder = ((body.folder as string) || 'images/').trim() || 'images/';
+    if (!folder.endsWith('/')) folder = `${folder}/`;
+    const preserveFilename = body.preserveFilename === 'true';
     if (!file || typeof file === 'string') return c.json({ error: 'Dosya gerekli' }, 400);
 
     const f = file as File;
     const ext = f.name.split('.').pop()?.toLowerCase() || 'png';
-    const safeExt = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) ? ext : 'png';
+    const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
+    const docExts = ['xlsx', 'xls', 'xml', 'csv', 'xslt', 'xsl'];
+    const isSupplierFolder = (folder as string).startsWith('supplier-files');
+    const isEdocumentsFolder = (folder as string).startsWith('e-documents');
+    const safeExt = imageExts.includes(ext)
+      ? ext
+      : ((isSupplierFolder || isEdocumentsFolder) && docExts.includes(ext)
+        ? ext
+        : 'png');
 
     let key: string;
-    if (preserveFilename) {
-      // Orijinal dosya adını koru (güvenli karakterlere çevir)
+    if (preserveFilename || isSupplierFolder) {
       const baseName = f.name.replace(/\.[^.]+$/, '');
-      const safeName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100) || 'icon';
+      const safeName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100) || 'file';
       const finalName = `${safeName}.${safeExt}`;
-      key = `${folder.replace(/\/+$/, '')}/${finalName}`;
+      key = `${(folder as string).replace(/\/+$/, '')}/${finalName}`;
     } else {
       key = `${folder.replace(/\/+$/, '')}/${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
     }
@@ -1601,6 +2490,88 @@ app.post('/storage/upload', async (c) => {
     return c.json({ path: key });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Yükleme hatası' }, 500);
+  }
+});
+
+// R2 Storage - images/ altındaki PNG dosyalarını images/products/ altına taşı
+app.post('/storage/migrate-images-to-products', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    const moved: string[] = [];
+    const errors: { key: string; error: string }[] = [];
+    let cursor: string | undefined;
+    const rootPngPattern = /^images\/[^/]+\.png$/i;
+
+    do {
+      const listOpts: { prefix: string; limit: number; cursor?: string } = { prefix: 'images/', limit: 1000 };
+      if (cursor) listOpts.cursor = cursor;
+      const listed = await c.env.STORAGE.list(listOpts);
+
+      for (const obj of listed.objects) {
+        if (!rootPngPattern.test(obj.key)) continue;
+        try {
+          const data = await c.env.STORAGE.get(obj.key);
+          if (!data) {
+            errors.push({ key: obj.key, error: 'Dosya okunamadı' });
+            continue;
+          }
+          const buf = await data.arrayBuffer();
+          const newKey = `images/products/${obj.key.replace(/^images\//, '')}`;
+          await c.env.STORAGE.put(newKey, buf, {
+            httpMetadata: data.httpMetadata ? { contentType: data.httpMetadata.contentType } : undefined,
+          });
+          await c.env.STORAGE.delete(obj.key);
+          moved.push(`${obj.key} → ${newKey}`);
+        } catch (err) {
+          errors.push({ key: obj.key, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+
+    return c.json({ moved: moved.length, movedKeys: moved, errors });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Taşıma hatası' }, 500);
+  }
+});
+
+// R2 Storage - Dosya kopyala
+app.post('/storage/copy', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    const body = await c.req.json<{ from: string; to: string }>();
+    const { from, to } = body;
+    if (!from?.trim() || !to?.trim()) return c.json({ error: 'from ve to gerekli' }, 400);
+    const obj = await c.env.STORAGE.get(from.trim());
+    if (!obj) return c.json({ error: 'Kaynak dosya bulunamadı' }, 404);
+    const buf = await obj.arrayBuffer();
+    await c.env.STORAGE.put(to.trim(), buf, {
+      httpMetadata: obj.httpMetadata ? { contentType: obj.httpMetadata.contentType } : undefined,
+    });
+    return c.json({ ok: true, key: to.trim() });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kopyalama hatası' }, 500);
+  }
+});
+
+// R2 Storage - Dosya taşı (kopyala + sil)
+app.post('/storage/move', async (c) => {
+  try {
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+    const body = await c.req.json<{ from: string; to: string }>();
+    const { from, to } = body;
+    if (!from?.trim() || !to?.trim()) return c.json({ error: 'from ve to gerekli' }, 400);
+    const obj = await c.env.STORAGE.get(from.trim());
+    if (!obj) return c.json({ error: 'Kaynak dosya bulunamadı' }, 404);
+    const buf = await obj.arrayBuffer();
+    await c.env.STORAGE.put(to.trim(), buf, {
+      httpMetadata: obj.httpMetadata ? { contentType: obj.httpMetadata.contentType } : undefined,
+    });
+    await c.env.STORAGE.delete(from.trim());
+    return c.json({ ok: true, key: to.trim() });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Taşıma hatası' }, 500);
   }
 });
 
@@ -1621,17 +2592,22 @@ app.delete('/storage/delete', async (c) => {
 app.get('/storage/serve', async (c) => {
   try {
     if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
-    const key = c.req.query('key');
+    const key = (c.req.query('key') || '').trim();
     if (!key) return c.json({ error: 'key gerekli' }, 400);
 
     const obj = await c.env.STORAGE.get(key);
-    if (!obj) return c.json({ error: 'Dosya bulunamadı' }, 404);
+    if (!obj) {
+      return c.json({ error: 'Dosya bulunamadı' }, 404, {
+        'Cache-Control': 'no-store',
+      });
+    }
 
     const ct = obj.httpMetadata?.contentType || 'image/png';
     return new Response(obj.body, {
       headers: {
         'Content-Type': ct,
         'Cache-Control': 'public, max-age=86400',
+        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (err: unknown) {
@@ -2213,7 +3189,10 @@ app.post('/api/transfer/execute', async (c) => {
 // ========== SIDEBAR MENU ITEMS ==========
 app.get('/api/sidebar-menu-items', async (c) => {
   try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    if (!c.env.DB) {
+      console.error('[Sidebar API] DB bulunamadı (c.env.DB yok)');
+      return c.json({ error: 'DB bulunamadı' }, 500);
+    }
     const { results } = await c.env.DB.prepare(
       `SELECT item_id as id, type, label, link, module_id as moduleId, icon_path as iconPath,
               separator_color as separatorColor, separator_thickness as separatorThickness
@@ -2232,6 +3211,7 @@ app.get('/api/sidebar-menu-items', async (c) => {
     return c.json(items);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error('[Sidebar API] sidebar-menu-items hatası:', { msg, err });
     if (msg.includes('no such table') || msg.includes('does not exist')) {
       return c.json([]);
     }
@@ -2298,7 +3278,10 @@ app.put('/api/sidebar-menu-items', async (c) => {
 // ========== APP SETTINGS ==========
 app.get('/api/app-settings', async (c) => {
   try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    if (!c.env.DB) {
+      console.error('[AppSettings API] DB bulunamadı (c.env.DB yok)');
+      return c.json({ error: 'DB bulunamadı' }, 500);
+    }
     const category = c.req.query('category');
     if (!category) return c.json({ error: 'category gerekli' }, 400);
 
@@ -2312,7 +3295,9 @@ app.get('/api/app-settings', async (c) => {
     }
     return c.json(settings);
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[AppSettings API] app-settings hatası:', { msg, err });
+    return c.json({ error: msg }, 500);
   }
 });
 
@@ -2363,9 +3348,16 @@ app.get('/storage/proxy-image', async (c) => {
   try {
     const url = c.req.query('url');
     if (!url || !url.startsWith('http')) return c.json({ error: 'Geçerli URL gerekli' }, 400);
-    const res = await fetch(url, { headers: { 'User-Agent': 'eSync+/1.0' } });
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; eSync+/1.0)',
+        'Accept': 'image/*,*/*',
+      },
+    });
     if (!res.ok) return c.json({ error: 'Görsel alınamadı' }, 400);
     const ct = res.headers.get('content-type') || 'image/png';
+    const isImage = ct.split(';')[0].trim().toLowerCase().startsWith('image/');
+    if (!isImage) return c.json({ error: 'Geçerli görsel formatı değil' }, 400);
     const buf = await res.arrayBuffer();
     return new Response(buf, {
       headers: { 'Content-Type': ct, 'Access-Control-Allow-Origin': '*' },

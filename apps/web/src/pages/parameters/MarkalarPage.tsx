@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { usePersistedListState } from '@/hooks/usePersistedListState'
 import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -47,9 +48,11 @@ const emptyForm = {
   status: 1,
 }
 
+const markalarListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
+
 export function MarkalarPage() {
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
+  const [listState, setListState] = usePersistedListState('markalar', markalarListDefaults)
+  const { search, page, pageSize, fitLimit } = listState
   const [data, setData] = useState<ProductBrand[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -58,9 +61,6 @@ export function MarkalarPage() {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const [pageSize, setPageSize] = useState<PageSizeValue>('fit')
-  const [fitLimit, setFitLimit] = useState(10)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
   const limit = pageSize === 'fit' ? fitLimit : pageSize
@@ -90,14 +90,12 @@ export function MarkalarPage() {
   }, [fetchData])
 
   const handleRefresh = () => {
-    setSearch('')
-    setPage(1)
+    setListState({ search: '', page: 1 })
     fetchData()
   }
 
   const handleReset = () => {
-    setSearch('')
-    setPage(1)
+    setListState({ search: '', page: 1 })
   }
 
   async function openNew() {
@@ -199,7 +197,7 @@ export function MarkalarPage() {
             <Input
               placeholder="Ara..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => setListState({ search: e.target.value })}
               className="pl-8 w-48 h-9"
             />
           </div>
@@ -229,12 +227,9 @@ export function MarkalarPage() {
           page={page}
           pageSize={pageSize}
           fitLimit={fitLimit}
-          onPageChange={setPage}
-          onPageSizeChange={(s) => {
-            setPageSize(s)
-            setPage(1)
-          }}
-          onFitLimitChange={setFitLimit}
+          onPageChange={(p) => setListState({ page: p })}
+          onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
+          onFitLimitChange={(v) => setListState({ fitLimit: v })}
           tableContainerRef={contentRef}
           hasFilter={hasFilter}
         />

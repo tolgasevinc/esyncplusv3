@@ -13,7 +13,8 @@
     "dev:api:remote": "npm run dev:remote -w api",
     "build": "npm run build -w api && npm run build -w web",
     "deploy:api": "npm run deploy -w api",
-    "deploy:web": "npm run deploy -w web"
+    "deploy:web": "npm run deploy -w web",
+    "deploy": "npm run deploy:api && npm run deploy:web"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

@@ -21,7 +21,7 @@ export interface ColorPresetPickerProps {
 export function ColorPresetPicker({
   value,
   onChange,
-  id,
+  id: _id,
   label = 'Renk',
   className,
 }: ColorPresetPickerProps) {

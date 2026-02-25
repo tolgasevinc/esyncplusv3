@@ -1,3 +1,49 @@
+/** WebP kalite: 0.87 - iyi sıkıştırma, görsel kaliteden ödün vermez */
+const WEBP_QUALITY = 0.87
+
+/**
+ * Görseli belirlenen ebatta kare yapar ve WebP formatında döndürür.
+ * En az yer kaplar, kaliteden ödün vermez.
+ */
+export async function processToSquareWebP(
+  img: HTMLImageElement,
+  targetSize: number
+): Promise<Blob> {
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  const canvas = document.createElement('canvas')
+  canvas.width = targetSize
+  canvas.height = targetSize
+  const ctx = canvas.getContext('2d', { alpha: true })!
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.clearRect(0, 0, targetSize, targetSize)
+  const scale = Math.min(targetSize / w, targetSize / h)
+  const dw = w * scale
+  const dh = h * scale
+  const dx = (targetSize - dw) / 2
+  const dy = (targetSize - dh) / 2
+  ctx.drawImage(img, 0, 0, w, h, dx, dy, dw, dh)
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob)
+        } else {
+          canvas.toBlob(
+            (fallback) => (fallback ? resolve(fallback) : reject(new Error('Blob oluşturulamadı'))),
+            'image/png',
+            0.92
+          )
+        }
+      },
+      'image/webp',
+      WEBP_QUALITY
+    )
+  })
+}
+
 /** Kenar rengini al (köşe piksellerinin ortalaması). Şeffaf köşelerde beyaz döner. */
 function getEdgeColor(ctx: CanvasRenderingContext2D, w: number, h: number): string {
   try {

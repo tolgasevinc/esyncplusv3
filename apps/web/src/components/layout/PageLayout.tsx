@@ -7,6 +7,8 @@ import { ReactNode } from 'react'
 interface PageLayoutProps {
   title: string
   description?: string
+  /** Header sol tarafında logo (img veya icon) */
+  logo?: ReactNode
   backTo?: string
   onRefresh?: () => void
   showRefresh?: boolean
@@ -22,6 +24,7 @@ interface PageLayoutProps {
 export function PageLayout({
   title,
   description,
+  logo,
   backTo,
   onRefresh,
   showRefresh = false,
@@ -35,6 +38,11 @@ export function PageLayout({
       {/* Sabit Header */}
       <header className="shrink-0 flex items-start justify-between gap-4 p-4 border-b bg-background">
         <div className="flex items-center gap-4 min-w-0">
+          {logo && (
+            <div className="shrink-0 w-9 h-9 flex items-center justify-center overflow-hidden rounded-lg bg-muted">
+              {logo}
+            </div>
+          )}
           {backTo && (
             <Link to={backTo}>
               <Button variant="outline" size="icon">

@@ -17,30 +17,27 @@ import {
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { ColorPresetPicker } from '@/components/ColorPresetPicker'
 import { toastSuccess, toastError } from '@/lib/toast'
 
 import { API_URL } from '@/lib/api'
 
-interface CustomerType {
+interface ProductPriceType {
   id: number
   name: string
   code: string
-  description?: string
-  color?: string
   sort_order: number
   status?: number
   created_at?: string
 }
 
-const emptyForm = { name: '', code: '', description: '', color: '', sort_order: 0, status: 1 }
+const emptyForm = { name: '', code: '', sort_order: 0, status: 1 }
 
-const musteriTipleriListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
+const fiyatTipleriListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
 
-export function MusteriTipleriPage() {
-  const [listState, setListState] = usePersistedListState('musteri-tipleri', musteriTipleriListDefaults)
+export function FiyatTipleriPage() {
+  const [listState, setListState] = usePersistedListState('fiyat-tipleri', fiyatTipleriListDefaults)
   const { search, page, pageSize, fitLimit } = listState
-  const [data, setData] = useState<CustomerType[]>([])
+  const [data, setData] = useState<ProductPriceType[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
@@ -57,7 +54,7 @@ export function MusteriTipleriPage() {
     try {
       const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
-      const res = await fetch(`${API_URL}/api/customer-types?${params}`)
+      const res = await fetch(`${API_URL}/api/product-price-types?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
       setData(json.data || [])
@@ -81,19 +78,17 @@ export function MusteriTipleriPage() {
     setForm(emptyForm)
     setModalOpen(true)
     try {
-      const res = await fetch(`${API_URL}/api/customer-types/next-sort-order`)
+      const res = await fetch(`${API_URL}/api/product-price-types/next-sort-order`)
       const json = await res.json()
       if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
     } catch { /* ignore */ }
   }
 
-  const openEdit = (item: CustomerType) => {
+  const openEdit = (item: ProductPriceType) => {
     setEditingId(item.id)
     setForm({
       name: item.name,
       code: item.code,
-      description: item.description || '',
-      color: item.color || '',
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
     })
@@ -117,18 +112,21 @@ export function MusteriTipleriPage() {
     setSaving(true)
     setError(null)
     try {
-      const url = editingId ? `${API_URL}/api/customer-types/${editingId}` : `${API_URL}/api/customer-types`
-      const method = editingId ? 'PUT' : 'POST'
+      const url = editingId ? `${API_URL}/api/product-price-types/${editingId}` : `${API_URL}/api/product-price-types`
       const res = await fetch(url, {
-        method,
+        method: editingId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), color: form.color || undefined, status: form.status }),
+        body: JSON.stringify({
+          ...form,
+          code: form.code || form.name.slice(0, 2).toUpperCase(),
+          status: form.status,
+        }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       closeModal()
       fetchData()
-      toastSuccess(editingId ? 'Müşteri tipi güncellendi' : 'Müşteri tipi eklendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess(editingId ? 'Fiyat tipi güncellendi' : 'Fiyat tipi eklendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -139,13 +137,13 @@ export function MusteriTipleriPage() {
   }
 
   async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu müşteri tipini silmek istediğinize emin misiniz?')) return
+    if (!confirm('Bu fiyat tipini silmek istediğinize emin misiniz?')) return
     try {
-      const res = await fetch(`${API_URL}/api/customer-types/${id}`, { method: 'DELETE' })
+      const res = await fetch(`${API_URL}/api/product-price-types/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
-      toastSuccess('Müşteri tipi silindi', 'Müşteri tipi başarıyla silindi.')
+      toastSuccess('Fiyat tipi silindi', 'Fiyat tipi başarıyla silindi.')
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
@@ -154,8 +152,8 @@ export function MusteriTipleriPage() {
 
   return (
     <PageLayout
-      title="Müşteri Tipleri"
-      description="Müşteri tiplerini yönetin"
+      title="Fiyat Tipleri"
+      description="Fiyat tiplerini yönetin (Genel, E-Ticaret vb.)"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -180,7 +178,7 @@ export function MusteriTipleriPage() {
                 <Plus className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Yeni müşteri tipi</TooltipContent>
+            <TooltipContent>Yeni fiyat tipi</TooltipContent>
           </Tooltip>
           {hasFilter && (
             <Tooltip>
@@ -214,17 +212,16 @@ export function MusteriTipleriPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium w-12">Renk</th>
-                  <th className="text-left p-3 font-medium">Müşteri Tipi Adı</th>
+                  <th className="text-left p-3 font-medium">Fiyat Tipi Adı</th>
                   <th className="text-left p-3 font-medium">Kod</th>
-                  <th className="text-left p-3 font-medium">Açıklama</th>
+                  <th className="text-left p-3 font-medium">Sıra</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz müşteri tipi kaydı yok.'}</td></tr>
+                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz fiyat tipi kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
                     <tr
@@ -232,16 +229,9 @@ export function MusteriTipleriPage() {
                       className="border-b hover:bg-muted/30 cursor-pointer"
                       onClick={() => openEdit(item)}
                     >
-                      <td className="p-3">
-                        {item.color ? (
-                          <span className="inline-block w-6 h-6 rounded border" style={{ backgroundColor: item.color }} />
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{item.code}</td>
-                      <td className="p-3">{item.description || '—'}</td>
+                      <td className="p-3">{item.sort_order}</td>
                     </tr>
                   ))
                 )}
@@ -254,30 +244,21 @@ export function MusteriTipleriPage() {
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingId ? 'Müşteri Tipi Düzenle' : 'Yeni Müşteri Tipi'}</DialogTitle>
-            <DialogDescription>Müşteri tipi bilgilerini girin.</DialogDescription>
+            <DialogTitle>{editingId ? 'Fiyat Tipi Düzenle' : 'Yeni Fiyat Tipi'}</DialogTitle>
+            <DialogDescription>Fiyat tipi bilgilerini girin.</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="grid grid-cols-12 gap-4">
               <div className="col-span-9 space-y-2">
-                <Label htmlFor="name">Müşteri Tipi Adı *</Label>
-                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Bireysel" required />
+                <Label htmlFor="name">Fiyat Tipi Adı *</Label>
+                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: E-Ticaret Fiyatı" required />
               </div>
               <div className="col-span-3 space-y-2">
                 <Label htmlFor="code">Kod</Label>
-                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: BR" />
+                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: EC" />
               </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="description">Açıklama</Label>
-              <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
-            </div>
-            <ColorPresetPicker
-              value={form.color}
-              onChange={(color) => setForm((f) => ({ ...f, color }))}
-              label="Renk"
-            />
             <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">
@@ -300,7 +281,7 @@ export function MusteriTipleriPage() {
                 </div>
               </div>
               <div className="flex items-center gap-1">
-                {editingId && (
+                {editingId && editingId !== 1 && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-block">

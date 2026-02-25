@@ -8,6 +8,7 @@ export interface AppModule {
 export const APP_MODULES: AppModule[] = [
   { id: 'home', label: 'home', path: '/' },
   { id: 'products', label: 'products', path: '/products' },
+  { id: 'e-documents', label: 'e-documents', path: '/e-documents' },
   { id: 'suppliers', label: 'suppliers', path: '/parametreler/tedarikciler' },
   { id: 'parametreler', label: 'parameters', path: '/parametreler' },
   { id: 'parametreler-markalar', label: 'parameters › brands', path: '/parametreler/markalar' },
@@ -16,6 +17,7 @@ export const APP_MODULES: AppModule[] = [
   { id: 'parametreler-kategoriler', label: 'parameters › categories', path: '/parametreler/kategoriler' },
   { id: 'parametreler-urun-tipleri', label: 'parameters › product-types', path: '/parametreler/urun-tipleri' },
   { id: 'parametreler-para-birimleri', label: 'parameters › currencies', path: '/parametreler/para-birimleri' },
+  { id: 'parametreler-fiyat-tipleri', label: 'parameters › price-types', path: '/parametreler/fiyat-tipleri' },
   { id: 'parametreler-vergi-oranlari', label: 'parameters › tax-rates', path: '/parametreler/vergi-oranlari' },
   { id: 'parametreler-musteri-tipleri', label: 'parameters › customer-types', path: '/parametreler/musteri-tipleri' },
   { id: 'parametreler-tedarikciler', label: 'parameters › suppliers', path: '/parametreler/tedarikciler' },

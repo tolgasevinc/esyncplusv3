@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Pencil } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -10,6 +11,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { buildProductCode, type CategoryPathItem } from '@/lib/productCode'
 
 export interface ProductCodeDisplayProps {
@@ -17,6 +19,10 @@ export interface ProductCodeDisplayProps {
   brandCode: string
   supplierCode: string
   onSupplierCodeChange: (value: string) => void
+  /** Paket/mamül/hizmet gibi tiplerde tedarikçi kodu düzenlenemez */
+  supplierCodeEditable?: boolean
+  /** Mevcut SKU (nokta ile ayrılmış). Verilirse son noktadan sonrası parse edilir */
+  sku?: string
   placeholder?: string
   id?: string
   className?: string
@@ -30,6 +36,8 @@ export function ProductCodeDisplay({
   brandCode,
   supplierCode,
   onSupplierCodeChange,
+  supplierCodeEditable = true,
+  sku: skuProp,
   placeholder = 'Kategori, marka ve tedarikçi kodu seçin',
   id,
   className,
@@ -37,13 +45,30 @@ export function ProductCodeDisplay({
   const [modalOpen, setModalOpen] = useState(false)
   const [editValue, setEditValue] = useState('')
 
-  const prefix = buildProductCode(categoryPath, brandCode, '')
-  const fullCode = buildProductCode(categoryPath, brandCode, supplierCode)
-  const hasCode = fullCode.length > 0
+  const builtPrefix = buildProductCode(categoryPath, brandCode, '')
+  const builtFullCode = buildProductCode(categoryPath, brandCode, supplierCode)
+
+  const { prefix, suffix, hasCode } =
+    skuProp && skuProp.trim().length > 0
+      ? (() => {
+          const s = skuProp.trim()
+          if (builtPrefix) {
+            if (s.startsWith(builtPrefix + '.')) {
+              return { prefix: builtPrefix, suffix: s.slice(builtPrefix.length + 1), hasCode: true }
+            }
+            if (s === builtPrefix) {
+              return { prefix: builtPrefix, suffix: '', hasCode: true }
+            }
+          }
+          return { prefix: builtPrefix, suffix: supplierCode, hasCode: true }
+        })()
+      : { prefix: builtPrefix, suffix: supplierCode, hasCode: builtFullCode.length > 0 }
+
+  const canEdit = supplierCodeEditable && builtPrefix.length > 0
 
   const handleOpen = () => {
-    if (!hasCode) return
-    setEditValue(supplierCode)
+    if (!canEdit) return
+    setEditValue(suffix)
     setModalOpen(true)
   }
 
@@ -53,29 +78,54 @@ export function ProductCodeDisplay({
   }
 
   const handleCancel = () => {
-    setEditValue(supplierCode)
+    setEditValue(suffix)
     setModalOpen(false)
   }
 
   return (
     <>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={hasCode ? handleOpen : undefined}
-        onKeyDown={(e) => hasCode && (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), handleOpen())}
-        id={id}
-        className={`flex h-10 w-full items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm ${
-          hasCode ? 'cursor-pointer hover:bg-muted hover:border-primary/50' : 'cursor-default text-muted-foreground'
-        } ${className ?? ''}`}
-      >
-        {hasCode ? (
-          <span className="truncate font-mono">
-            {prefix && <span className="text-muted-foreground">{prefix}.</span>}
-            <span className="text-foreground">{supplierCode || <span className="text-muted-foreground italic">(boş)</span>}</span>
-          </span>
-        ) : (
-          <span>{placeholder}</span>
+      <div className={`flex gap-0 ${className ?? ''}`}>
+        <div
+          role={canEdit ? 'button' : undefined}
+          tabIndex={canEdit ? 0 : undefined}
+          onClick={canEdit ? handleOpen : undefined}
+          onKeyDown={(e) => canEdit && (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), handleOpen())}
+          id={id}
+          className={`flex h-10 flex-1 min-w-0 items-center border border-input bg-muted/50 px-3 py-2 text-sm ${
+            canEdit
+              ? 'cursor-pointer rounded-l-md hover:bg-muted hover:border-primary/50'
+              : 'cursor-default rounded-md text-muted-foreground'
+          }`}
+        >
+          {hasCode ? (
+            <span className="truncate font-mono">
+              {prefix && <span className="text-muted-foreground">{prefix}</span>}
+              {supplierCodeEditable && (
+                <>
+                  {prefix && <span className="text-muted-foreground">.</span>}
+                  <span className="text-foreground">{suffix || <span className="text-muted-foreground italic">(boş)</span>}</span>
+                </>
+              )}
+            </span>
+          ) : (
+            <span>{placeholder}</span>
+          )}
+        </div>
+        {canEdit && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={handleOpen}
+                className="h-10 w-10 shrink-0 rounded-l-none rounded-r-md border-l-0"
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Marka kodundan sonrasını düzenle</TooltipContent>
+          </Tooltip>
         )}
       </div>
 
@@ -84,7 +134,7 @@ export function ProductCodeDisplay({
           <DialogHeader>
             <DialogTitle>Kod Düzenle</DialogTitle>
             <DialogDescription>
-              Sadece son kısım (tedarikçi kodu) değiştirilebilir.
+              Marka kodundan sonraki kısım (tedarikçi kodu) düzenlenebilir.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
@@ -97,7 +147,7 @@ export function ProductCodeDisplay({
               </div>
             )}
             <div className="space-y-2">
-              <Label htmlFor="product-code-editable">Tedarikçi kodu</Label>
+              <Label htmlFor="product-code-editable">Marka kodundan sonrası</Label>
               <Input
                 id="product-code-editable"
                 value={editValue}

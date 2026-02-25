@@ -288,9 +288,10 @@ export function SettingsStoragePage() {
               />
               <FolderPickerCard
                 title="Ürün Görselleri"
-                description="Ürün görsellerinin saklanacağı klasör"
+                description="Ürün görselleri bu klasöre kaydedilir."
                 icon={<Package className="h-5 w-5" />}
                 storageKey="urun-gorselleri-klasor"
+                fixedPath="images/products/"
               />
               <FolderPickerCard
                 title="Müşteri Logoları"

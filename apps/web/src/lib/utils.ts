@@ -5,6 +5,27 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Tarihi yerel formatta göster (tr-TR: gg.aa.yyyy) */
+export function formatDate(value: string | null | undefined): string {
+  if (!value || value === '—') return '—'
+  const d = new Date(value)
+  if (isNaN(d.getTime())) return value
+  return d.toLocaleDateString('tr-TR')
+}
+
+/** Para değerini Türkçe formatta render et: binlik ayırıcı (.) ve ondalık ayırıcı (,) */
+export function formatPrice(value: number | null | undefined): string {
+  if (value == null || isNaN(value)) return '—'
+  return value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+/** Fiyat + sembol (sağa yaslı gösterim için) */
+export function formatPriceWithSymbol(value: number | null | undefined, symbol?: string | null): string {
+  const formatted = formatPrice(value)
+  if (formatted === '—') return '—'
+  return symbol ? `${formatted} ${symbol}`.trim() : formatted
+}
+
 /** Hex rengi rgba'ya çevirir (alpha 0-1) */
 export function hexToRgba(hex: string, alpha: number): string {
   if (!hex || !/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(hex)) return ''

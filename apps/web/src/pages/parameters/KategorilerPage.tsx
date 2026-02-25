@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { usePersistedListState } from '@/hooks/usePersistedListState'
 import { Link } from 'react-router-dom'
 import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -60,11 +61,13 @@ const emptyForm = {
   status: 1,
 }
 
+const kategorilerListDefaults = { search: '', activeGroupId: '' as string }
+
 /** Gruplar = product_categories where group_id=0 veya null */
 export function KategorilerPage() {
+  const [listState, setListState] = usePersistedListState('kategoriler', kategorilerListDefaults)
+  const { search, activeGroupId } = listState
   const [groups, setGroups] = useState<ProductGroup[]>([])
-  const [activeGroupId, setActiveGroupId] = useState<string>('')
-  const [search, setSearch] = useState('')
   const [data, setData] = useState<ProductCategory[]>([])
   const [loading, setLoading] = useState(true)
   const [groupsLoading, setGroupsLoading] = useState(true)
@@ -86,7 +89,6 @@ export function KategorilerPage() {
       if (!res.ok) throw new Error(json.error || 'Gruplar yüklenemedi')
       const list = json.data || []
       setGroups(list)
-      setActiveGroupId((prev) => (list.length > 0 && !prev ? String(list[0].id) : prev))
     } catch {
       setGroups([])
     } finally {
@@ -96,7 +98,14 @@ export function KategorilerPage() {
 
   useEffect(() => {
     fetchGroups()
-  }, [])
+  }, [fetchGroups])
+
+  useEffect(() => {
+    if (groups.length > 0) {
+      const valid = groups.some((g) => String(g.id) === activeGroupId)
+      if (!valid) setListState({ activeGroupId: String(groups[0].id) })
+    }
+  }, [groups, activeGroupId, setListState])
 
   const fetchData = useCallback(async () => {
     if (!activeGroupId) return
@@ -252,7 +261,7 @@ export function KategorilerPage() {
       backTo="/parametreler"
       showRefresh
       onRefresh={() => {
-        setSearch('')
+        setListState({ search: '' })
         fetchGroups()
         fetchData()
       }}
@@ -265,7 +274,7 @@ export function KategorilerPage() {
                 <Input
                   placeholder="Ara..."
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={(e) => setListState({ search: e.target.value })}
                   className="pl-8 w-48 h-9"
                 />
               </div>
@@ -280,7 +289,7 @@ export function KategorilerPage() {
               {hasFilter && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon" onClick={() => setSearch('')}>
+                    <Button variant="ghost" size="icon" onClick={() => setListState({ search: '' })}>
                       <X className="h-4 w-4" />
                     </Button>
                   </TooltipTrigger>
@@ -304,7 +313,7 @@ export function KategorilerPage() {
           </CardContent>
         </Card>
       ) : (
-        <Tabs value={activeGroupId} onValueChange={setActiveGroupId} className="w-full">
+        <Tabs value={activeGroupId} onValueChange={(v) => setListState({ activeGroupId: v })} className="w-full">
           <div className="flex items-center mb-4">
             <TabsList className="flex-1">
               {groups.map((g) => (

@@ -21,16 +21,21 @@ export interface CategorySelectProps {
   className?: string
 }
 
-interface HierarchyItem {
+export interface CategoryPathItem {
+  name: string
+  code: string
+}
+
+export interface HierarchyItem {
   id: number
   label: string
-  path: { name: string; code: string }[]
+  path: CategoryPathItem[]
   level: 'group' | 'category' | 'subcategory'
   selectable: boolean
   color?: string
 }
 
-function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
+export function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
   const result: HierarchyItem[] = []
   const groups = categories.filter(
     (c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0)
@@ -298,7 +303,7 @@ export function CategorySelect({
                 : 'Sonuç bulunamadı'}
             </div>
           ) : (
-            filtered.map((item, idx) => {
+            filtered.map((item) => {
               const selIdx = selectableFiltered.indexOf(item)
               const isFocused = selIdx >= 0 && selIdx === focusedIndex
               const rowClass = cn(

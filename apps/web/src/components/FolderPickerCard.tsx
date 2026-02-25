@@ -22,6 +22,8 @@ interface FolderPickerCardProps {
   description?: string
   icon?: ReactNode
   storageKey: string
+  /** Sabit klasör - seçim devre dışı, her zaman bu değer kullanılır */
+  fixedPath?: string
 }
 
 export function FolderPickerCard({
@@ -29,8 +31,9 @@ export function FolderPickerCard({
   description,
   icon,
   storageKey,
+  fixedPath,
 }: FolderPickerCardProps) {
-  const [value, setValue] = useState('')
+  const [value, setValue] = useState(fixedPath ?? '')
   const [open, setOpen] = useState(false)
   const [prefixes, setPrefixes] = useState<string[]>([])
   const [currentPath, setCurrentPath] = useState('')
@@ -39,9 +42,13 @@ export function FolderPickerCard({
   const [creating, setCreating] = useState(false)
 
   useEffect(() => {
+    if (fixedPath) {
+      setValue(fixedPath)
+      return
+    }
     const saved = localStorage.getItem(storageKey)
     if (saved) setValue(saved)
-  }, [storageKey])
+  }, [storageKey, fixedPath])
 
   useEffect(() => {
     if (!open) return
@@ -118,21 +125,23 @@ export function FolderPickerCard({
           <Input
             value={value}
             readOnly
-            placeholder="Klasör seçilmedi"
+            placeholder={fixedPath ? fixedPath : 'Klasör seçilmedi'}
             className="flex-1 bg-muted/50"
           />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setOpen(true)}
-              >
-                <FolderOpen className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Klasör seç</TooltipContent>
-          </Tooltip>
+          {!fixedPath && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setOpen(true)}
+                >
+                  <FolderOpen className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Klasör seç</TooltipContent>
+            </Tooltip>
+          )}
         </div>
       </CardContent>
 

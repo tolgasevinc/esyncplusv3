@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
+  FileText,
 } from 'lucide-react'
 import { useTheme } from '@/contexts/ThemeContext'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -34,16 +35,24 @@ export function Sidebar() {
   const { toggle, isDark } = useTheme()
 
   useEffect(() => {
+    if (location.pathname === '/products') {
+      setCollapsed(true)
+    }
+  }, [location.pathname])
+
+  useEffect(() => {
     const loadFromStorage = () => {
       setMenus(getSidebarMenus())
       setHeader(getSidebarHeader())
     }
     loadFromStorage()
     const loadFromApi = async () => {
+      console.info('[Sidebar] API\'den menü ve header çekiliyor...')
       const [menusData, headerData] = await Promise.all([
         fetchSidebarMenus(),
         fetchSidebarHeader(),
       ])
+      console.info('[Sidebar] API yanıtı:', { menusCount: menusData?.length ?? 0, hasHeader: !!headerData?.title })
       setMenus(menusData)
       setHeader(headerData)
     }
@@ -88,6 +97,18 @@ export function Sidebar() {
       {/* Body - Scrollable */}
       <nav className="flex-1 overflow-y-auto py-4">
         <div className="space-y-1 px-3">
+          <Link
+            to="/e-documents"
+            className={cn(
+              buttonVariants({ variant: 'ghost' }),
+              'w-full justify-start gap-3',
+              collapsed && 'justify-center px-0',
+              location.pathname === '/e-documents' && 'bg-accent'
+            )}
+          >
+            <FileText className="w-10 h-10 shrink-0 opacity-50" />
+            {!collapsed && <span>E-Dökümanlar</span>}
+          </Link>
           {menus.map((item) => {
             if (item.type === 'separator') {
               const colorClass = SEPARATOR_COLORS.find((c) => c.id === item.separatorColor)?.class ?? 'border-border'
@@ -151,7 +172,21 @@ export function Sidebar() {
 
       {/* Footer */}
       <footer className={cn('shrink-0 p-3 space-y-3 border-t border-gray-200 dark:border-gray-600 w-full')}>
-        {/* 5 Butonlar */}
+        {/* Sidebar toggle - collapsed iken ayarlar üzerinde */}
+        {collapsed && (
+          <div className="flex justify-center">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={() => setCollapsed(false)}>
+                  <ChevronRight className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Sidebar Aç</TooltipContent>
+            </Tooltip>
+          </div>
+        )}
+
+        {/* Diğer butonlar */}
         {collapsed ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -179,10 +214,6 @@ export function Sidebar() {
                   <SlidersHorizontal className="w-4 h-4 mr-2" />
                   Parametreler
                 </Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setCollapsed(false)}>
-                <ChevronRight className="w-4 h-4 mr-2" />
-                Sidebar Aç
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -217,13 +248,19 @@ export function Sidebar() {
             >
               <SlidersHorizontal className="w-4 h-4" />
             </Link>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setCollapsed(true)}
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setCollapsed(true)}
+                  className="border-primary/40 bg-primary/10 hover:bg-primary/20 text-primary"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Sidebar Kapat</TooltipContent>
+            </Tooltip>
           </div>
         )}
 

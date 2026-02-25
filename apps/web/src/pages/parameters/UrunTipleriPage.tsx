@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { usePersistedListState } from '@/hooks/usePersistedListState'
 import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -34,9 +35,11 @@ interface ProductType {
 
 const emptyForm = { name: '', code: '', description: '', color: '', sort_order: 0, status: 1 }
 
+const urunTipleriListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
+
 export function UrunTipleriPage() {
-  const [search, setSearch] = useState('')
-  const [page, setPage] = useState(1)
+  const [listState, setListState] = usePersistedListState('urun-tipleri', urunTipleriListDefaults)
+  const { search, page, pageSize, fitLimit } = listState
   const [data, setData] = useState<ProductType[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -45,9 +48,6 @@ export function UrunTipleriPage() {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const [pageSize, setPageSize] = useState<PageSizeValue>('fit')
-  const [fitLimit, setFitLimit] = useState(10)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
   const limit = pageSize === 'fit' ? fitLimit : pageSize
@@ -160,8 +160,7 @@ export function UrunTipleriPage() {
       contentRef={contentRef}
       showRefresh
       onRefresh={() => {
-        setSearch('')
-        setPage(1)
+        setListState({ search: '', page: 1 })
         fetchData()
       }}
       headerActions={
@@ -171,7 +170,7 @@ export function UrunTipleriPage() {
             <Input
               placeholder="Ara..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => setListState({ search: e.target.value })}
               className="pl-8 w-48 h-9"
             />
           </div>
@@ -186,7 +185,7 @@ export function UrunTipleriPage() {
           {hasFilter && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" onClick={() => { setSearch(''); setPage(1) }}>
+                <Button variant="ghost" size="icon" onClick={() => setListState({ search: '', page: 1 })}>
                   <X className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
@@ -201,9 +200,9 @@ export function UrunTipleriPage() {
           page={page}
           pageSize={pageSize}
           fitLimit={fitLimit}
-          onPageChange={setPage}
-          onPageSizeChange={(s) => { setPageSize(s); setPage(1) }}
-          onFitLimitChange={setFitLimit}
+          onPageChange={(p) => setListState({ page: p })}
+          onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
+          onFitLimitChange={(v) => setListState({ fitLimit: v })}
           tableContainerRef={contentRef}
           hasFilter={hasFilter}
         />

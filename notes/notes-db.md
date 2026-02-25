@@ -8,6 +8,7 @@ created_at
 updated_at
 
 **product_marketplaces**
+
 - name
 - code
 - logo
@@ -43,12 +44,14 @@ updated_at
 - sort_order
 
 **product-types**
+
 - name
 - code
 - description
 - sort_order
 
 **product_currencies**
+
 - name
 - code
 - symbol
@@ -56,24 +59,28 @@ updated_at
 - sort_order
 
 **customer_types**
+
 - name
 - code
 - description
 - sort_order
 
 **product_tax_rates**
+
 - name
 - value
 - description
 - sort_order
 
 **app_settings**
+
 - category
 - key
 - value
 - description
 
 **sidebar_menu_items**
+
 - item_id (benzersiz, client id)
 - sort_order
 - type (menu | separator)
@@ -83,3 +90,15 @@ updated_at
 - icon_path
 - separator_color
 - separator_thickness
+
+**suppliers**
+
+- name
+- brand_id
+- soruce_type (excel, xml, cvs)
+- currency_id
+- source_file
+- table_name
+- record_count
+- column_mappings
+- column_types

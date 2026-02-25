@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck } from 'lucide-react'
+import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -11,6 +11,7 @@ const productTables = [
   { id: 'kategoriler', title: 'Kategoriler', icon: Layers, path: '/parametreler/kategoriler' },
   { id: 'urun-tipleri', title: 'Ürün Tipleri', icon: Type, path: '/parametreler/urun-tipleri' },
   { id: 'para-birimleri', title: 'Para Birimleri', icon: CircleDollarSign, path: '/parametreler/para-birimleri' },
+  { id: 'fiyat-tipleri', title: 'Fiyat Tipleri', icon: Receipt, path: '/parametreler/fiyat-tipleri' },
   { id: 'vergi-oranlari', title: 'Vergi Oranları', icon: Percent, path: '/parametreler/vergi-oranlari' },
   { id: 'tedarikciler', title: 'Tedarikçiler', icon: Truck, path: '/parametreler/tedarikciler' },
 ]
@@ -38,9 +39,9 @@ export function ParametersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-12 gap-4">
               {productTables.map((table) => (
-                <Link key={table.id} to={table.path}>
+                <Link key={table.id} to={table.path} className="col-span-4">
                   <div
                     className="flex items-center gap-3 rounded-lg border p-4 transition-colors hover:bg-accent/50 cursor-pointer"
                   >
@@ -72,9 +73,9 @@ export function ParametersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-12 gap-4">
               {customerTables.map((table) => (
-                <Link key={table.id} to={table.path}>
+                <Link key={table.id} to={table.path} className="col-span-4">
                   <div
                     className="flex items-center gap-3 rounded-lg border p-4 transition-colors hover:bg-accent/50 cursor-pointer"
                   >
