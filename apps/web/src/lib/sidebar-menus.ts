@@ -2,11 +2,6 @@ import { API_URL } from '@/lib/api'
 
 const STORAGE_KEY = 'esync-sidebar-menus'
 
-// Canlıda debug: API URL ve sidebar fetch başlangıcı
-if (typeof window !== 'undefined') {
-  console.info('[Sidebar] API_URL:', API_URL);
-}
-
 const HEADER_STORAGE_KEY = 'esync-sidebar-header'
 const API_CATEGORY = 'sidebar'
 
@@ -87,30 +82,19 @@ export async function fetchSidebarMenus(): Promise<SidebarMenuItem[]> {
   try {
     const res = await fetch(url, { cache: 'no-store' })
     const text = await res.text()
-    if (!res.ok) {
-      console.warn('[Sidebar] fetchSidebarMenus: API hatası', {
-        url,
-        status: res.status,
-        statusText: res.statusText,
-        body: text?.slice(0, 500),
-      })
-      return getSidebarMenus()
-    }
+    if (!res.ok) return getSidebarMenus()
     let items: SidebarMenuItem[]
     try {
       items = JSON.parse(text) as SidebarMenuItem[]
-    } catch (parseErr) {
-      console.warn('[Sidebar] fetchSidebarMenus: JSON parse hatası', { url, body: text?.slice(0, 200), parseErr })
+    } catch {
       return getSidebarMenus()
     }
     if (Array.isArray(items) && items.length > 0) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
       return items
     }
-    console.info('[Sidebar] fetchSidebarMenus: Boş veya geçersiz dizi', { url, items })
     return getSidebarMenus()
-  } catch (err) {
-    console.error('[Sidebar] fetchSidebarMenus: İstek hatası', { url, err })
+  } catch {
     return getSidebarMenus()
   }
 }
@@ -121,27 +105,15 @@ export async function fetchSidebarHeader(): Promise<SidebarHeaderConfig> {
   try {
     const res = await fetch(url)
     const text = await res.text()
-    if (!res.ok) {
-      console.warn('[Sidebar] fetchSidebarHeader: API hatası', {
-        url,
-        status: res.status,
-        statusText: res.statusText,
-        body: text?.slice(0, 500),
-      })
-      return getSidebarHeader()
-    }
+    if (!res.ok) return getSidebarHeader()
     let data: Record<string, string>
     try {
       data = JSON.parse(text) as Record<string, string>
-    } catch (parseErr) {
-      console.warn('[Sidebar] fetchSidebarHeader: JSON parse hatası', { url, body: text?.slice(0, 200), parseErr })
+    } catch {
       return getSidebarHeader()
     }
     const raw = data?.header
-    if (!raw) {
-      console.info('[Sidebar] fetchSidebarHeader: header yok', { url, data })
-      return getSidebarHeader()
-    }
+    if (!raw) return getSidebarHeader()
     const parsed = JSON.parse(raw) as SidebarHeaderConfig
     const config = {
       logoPath: parsed.logoPath,
@@ -149,8 +121,7 @@ export async function fetchSidebarHeader(): Promise<SidebarHeaderConfig> {
     }
     localStorage.setItem(HEADER_STORAGE_KEY, JSON.stringify(config))
     return config
-  } catch (err) {
-    console.error('[Sidebar] fetchSidebarHeader: İstek hatası', { url, err })
+  } catch {
     return getSidebarHeader()
   }
 }

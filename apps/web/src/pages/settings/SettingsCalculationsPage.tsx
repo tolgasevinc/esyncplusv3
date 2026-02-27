@@ -54,7 +54,7 @@ function OperationRow({
       </select>
       <Input
         type="number"
-        step="0.01"
+        step={1}
         value={op.value ?? ''}
         onChange={(e) => onChange({ ...op, value: parseFloat(e.target.value) || 0 })}
         className="w-24 text-right tabular-nums"

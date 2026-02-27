@@ -22,6 +22,7 @@ import { PackageContentsTab } from '@/components/PackageContentsTab'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { CategorySelect, getCategoryPath, buildHierarchy, type CategoryItem } from '@/components/CategorySelect'
 import { ProductCodeDisplay } from '@/components/ProductCodeDisplay'
+import { ProductPricePreview } from '@/components/ProductPricePreview'
 import { buildProductCode } from '@/lib/productCode'
 import { Switch } from '@/components/ui/switch'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -78,6 +79,7 @@ interface SelectOption {
 interface CurrencyOption extends SelectOption {
   is_default?: number
   symbol?: string
+  code?: string
 }
 
 interface BrandOption extends SelectOption {
@@ -105,7 +107,7 @@ function BrandLogoCell({
     setImgError(false)
   }, [src])
   const isSm = size === 'sm'
-  const sizeClass = isSm ? 'h-5 w-5' : 'h-8 w-8'
+  const maxSizeClass = isSm ? 'max-h-5 max-w-5' : 'max-h-8 max-w-8'
   const fallbackClass = isSm ? 'h-5 min-w-[1.25rem] px-1.5 text-[10px]' : 'h-8 min-w-[2rem] px-2 text-xs'
   if (imgError || !src) {
     return (
@@ -118,7 +120,7 @@ function BrandLogoCell({
     <img
       src={src}
       alt={brandName || 'Marka logosu'}
-      className={`${sizeClass} object-contain shrink-0`}
+      className={`${maxSizeClass} object-contain block shrink-0 bg-transparent`}
       onError={() => setImgError(true)}
     />
   )
@@ -283,6 +285,7 @@ export function ProductsPage() {
   const [currencies, setCurrencies] = useState<CurrencyOption[]>([])
   const [priceTypes, setPriceTypes] = useState<{ id: number; name: string; code?: string; sort_order: number }[]>([])
   const [calculationRules, setCalculationRules] = useState<CalculationRule[]>([])
+  const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
   const [packageItems, setPackageItems] = useState<PackageItem[]>([])
   const [supplierCodeMatch, setSupplierCodeMatch] = useState<boolean | null>(null)
   const [supplierCodeLookupLoading, setSupplierCodeLookupLoading] = useState(false)
@@ -533,9 +536,19 @@ export function ProductsPage() {
       )
       setTypes((t.data || []).map((x: { id: number; name: string; code?: string; color?: string }) => ({ id: x.id, name: x.name, code: x.code, color: x.color })))
       setUnits((u.data || []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name })))
-      setCurrencies((cur.data || []).map((x: { id: number; name: string; symbol?: string; is_default?: number }) => ({ id: x.id, name: x.name, symbol: x.symbol, is_default: x.is_default })))
+      setCurrencies((cur.data || []).map((x: { id: number; name: string; code?: string; symbol?: string; is_default?: number }) => ({ id: x.id, name: x.name, code: x.code, symbol: x.symbol, is_default: x.is_default })))
       setTaxRates((tax.data || []).map((x: { id: number; name: string; value: number }) => ({ id: x.id, name: x.name, value: x.value })))
       const settings = await settingsRes.json()
+      try {
+        const ratesRes = await fetch(`${API_URL}/api/app-settings?category=parabirimleri`)
+        const ratesData = await ratesRes.json()
+        if (ratesData?.exchange_rates) {
+          const parsed = JSON.parse(ratesData.exchange_rates) as Record<string, number>
+          setExchangeRates(typeof parsed === 'object' && parsed !== null ? parsed : {})
+        }
+      } catch {
+        setExchangeRates({})
+      }
       if (settings && typeof settings === 'object' && settings.calculations) {
         try {
           const calcs: CalculationRule[] = JSON.parse(settings.calculations)
@@ -1416,9 +1429,18 @@ export function ProductsPage() {
                         {item.unit_name ?? '—'}
                       </td>
                       <td className="p-3 text-right tabular-nums font-bold">
-                        {item.price != null
-                          ? `${formatPrice(item.price)} ${item.currency_symbol || ''}`.trim()
-                          : '—'}
+                        {item.price != null ? (
+                          <ProductPricePreview
+                            productId={item.id}
+                            displayPrice={`${formatPrice(item.price)} ${item.currency_symbol || ''}`.trim()}
+                            priceTypes={priceTypes}
+                            currencies={currencies}
+                            exchangeRates={exchangeRates}
+                            calculationRules={calculationRules}
+                          />
+                        ) : (
+                          '—'
+                        )}
                       </td>
                     </tr>
                   ))
@@ -1617,7 +1639,7 @@ export function ProductsPage() {
                   <Input
                     id="quantity"
                     type="number"
-                    step="0.01"
+                    step={1}
                     min="0"
                     value={form.quantity || ''}
                     onChange={(e) => setForm((f) => ({ ...f, quantity: parseFloat(e.target.value) || 0 }))}
@@ -1652,7 +1674,7 @@ export function ProductsPage() {
                         <Input
                           id="price"
                           type="number"
-                          step="0.01"
+                          step={1}
                           min="0"
                           value={form.price ?? ''}
                           onChange={(e) => handlePriceChange(parseFloat(e.target.value) || 0)}

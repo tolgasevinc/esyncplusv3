@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt } from 'lucide-react'
+import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt, UsersRound, Scale } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -17,7 +17,9 @@ const productTables = [
 ]
 
 const customerTables = [
+  { id: 'musteri-gruplari', title: 'Müşteri Grupları', icon: UsersRound, path: '/parametreler/musteri-gruplari' },
   { id: 'musteri-tipleri', title: 'Müşteri Tipleri', icon: UserCircle, path: '/parametreler/musteri-tipleri' },
+  { id: 'yasal-tipler', title: 'Yasal Tipler', icon: Scale, path: '/parametreler/yasal-tipler' },
 ]
 
 export function ParametersPage() {

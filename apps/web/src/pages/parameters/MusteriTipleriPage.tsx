@@ -28,12 +28,13 @@ interface CustomerType {
   code: string
   description?: string
   color?: string
+  type?: 'şahıs' | 'firma'
   sort_order: number
   status?: number
   created_at?: string
 }
 
-const emptyForm = { name: '', code: '', description: '', color: '', sort_order: 0, status: 1 }
+const emptyForm = { name: '', code: '', description: '', color: '', type: 'firma' as 'şahıs' | 'firma', sort_order: 0, status: 1 }
 
 const musteriTipleriListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
 
@@ -94,6 +95,7 @@ export function MusteriTipleriPage() {
       code: item.code,
       description: item.description || '',
       color: item.color || '',
+      type: (item.type === 'şahıs' ? 'şahıs' : 'firma') as 'şahıs' | 'firma',
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
     })
@@ -122,7 +124,7 @@ export function MusteriTipleriPage() {
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), color: form.color || undefined, status: form.status }),
+        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), color: form.color || undefined, type: form.type, status: form.status }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
@@ -272,6 +274,33 @@ export function MusteriTipleriPage() {
             <div className="space-y-2">
               <Label htmlFor="description">Açıklama</Label>
               <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
+            </div>
+            <div className="space-y-2">
+              <Label>Tip</Label>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="type"
+                    value="firma"
+                    checked={form.type === 'firma'}
+                    onChange={() => setForm((f) => ({ ...f, type: 'firma' }))}
+                    className="rounded-full"
+                  />
+                  <span>Şirket (VKN)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="type"
+                    value="şahıs"
+                    checked={form.type === 'şahıs'}
+                    onChange={() => setForm((f) => ({ ...f, type: 'şahıs' }))}
+                    className="rounded-full"
+                  />
+                  <span>Şahıs (TC Kimlik)</span>
+                </label>
+              </div>
             </div>
             <ColorPresetPicker
               value={form.color}

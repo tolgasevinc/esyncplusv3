@@ -13,7 +13,14 @@ import { ParaBirimleriPage } from '@/pages/parameters/ParaBirimleriPage'
 import { FiyatTipleriPage } from '@/pages/parameters/FiyatTipleriPage'
 import { VergiOranlariPage } from '@/pages/parameters/VergiOranlariPage'
 import { MusteriTipleriPage } from '@/pages/parameters/MusteriTipleriPage'
+import { MusteriGruplariPage } from '@/pages/parameters/MusteriGruplariPage'
+import { YasalTiplerPage } from '@/pages/parameters/YasalTiplerPage'
 import { SuppliersPage } from '@/pages/parameters/SuppliersPage'
+import { DiaPage } from '@/pages/DiaPage'
+import { DiaCariKartlarPage } from '@/pages/parameters/dia/DiaCariKartlarPage'
+import { DiaVergiDaireleriPage } from '@/pages/parameters/dia/DiaVergiDaireleriPage'
+import { CustomersPage } from '@/pages/customers/CustomersPage'
+import { TekliflerPage } from '@/pages/offers/TekliflerPage'
 import { ProductsPage } from '@/pages/products/ProductsPage'
 import { EDocumentsPage } from '@/pages/documents/EDocumentsPage'
 import { SettingsGeneralPage } from '@/pages/settings/SettingsGeneralPage'
@@ -29,7 +36,7 @@ import { SettingsFileManagerPage } from '@/pages/settings/SettingsFileManagerPag
 function App() {
   return (
     <>
-      <Toaster richColors position="top-right" />
+      <Toaster richColors position="top-center" />
       <AppLayout>
       <Routes>
         <Route path="/" element={<HomePage />} />
@@ -52,8 +59,19 @@ function App() {
         <Route path="/parametreler/para-birimleri" element={<ParaBirimleriPage />} />
         <Route path="/parametreler/fiyat-tipleri" element={<FiyatTipleriPage />} />
         <Route path="/parametreler/vergi-oranlari" element={<VergiOranlariPage />} />
+        <Route path="/parametreler/musteri-gruplari" element={<MusteriGruplariPage />} />
         <Route path="/parametreler/musteri-tipleri" element={<MusteriTipleriPage />} />
+        <Route path="/parametreler/yasal-tipler" element={<YasalTiplerPage />} />
         <Route path="/parametreler/tedarikciler" element={<SuppliersPage />} />
+        <Route path="/dia" element={<DiaPage />} />
+        <Route path="/dia/cari-kartlar" element={<DiaCariKartlarPage />} />
+        <Route path="/dia/vergi-daireleri" element={<DiaVergiDaireleriPage />} />
+        <Route path="/parametreler/dia" element={<Navigate to="/dia" replace />} />
+        <Route path="/parametreler/dia/cari-kartlar" element={<Navigate to="/dia/cari-kartlar" replace />} />
+        <Route path="/parametreler/dia/vergi-daireleri" element={<Navigate to="/dia/vergi-daireleri" replace />} />
+        <Route path="/customers" element={<CustomersPage />} />
+        <Route path="/musteriler" element={<Navigate to="/customers" replace />} />
+        <Route path="/teklifler" element={<TekliflerPage />} />
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/urunler" element={<Navigate to="/products" replace />} />
         <Route path="/e-documents" element={<EDocumentsPage />} />

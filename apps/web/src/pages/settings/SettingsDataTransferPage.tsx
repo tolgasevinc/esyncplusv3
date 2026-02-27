@@ -18,6 +18,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import {
   Collapsible,
   CollapsibleContent,
@@ -130,8 +131,10 @@ export function SettingsDataTransferPage() {
     totalBatches: number
     inserted: number
     updated: number
+    skipped: number
     error?: string
   } | null>(null)
+  const [skipExisting, setSkipExisting] = useState(false)
   const [imageFiles, setImageFiles] = useState<File[]>([])
   const [imageFolder, setImageFolder] = useState('images/')
   const [imageSize, setImageSize] = useState<'50' | '100' | '500' | '1000' | 'custom'>('100')
@@ -413,7 +416,7 @@ export function SettingsDataTransferPage() {
     if (!table) return
     updateCard(cardId, { loading: true })
     try {
-      const res = await fetch(`${API_URL}/api/mysql/table-data/${encodeURIComponent(table)}?limit=2000`)
+      const res = await fetch(`${API_URL}/api/mysql/table-data/${encodeURIComponent(table)}?limit=10000`)
       const json = await res.json()
       if (res.ok && json.rows) {
         const rows = json.rows as Record<string, unknown>[]
@@ -585,9 +588,11 @@ export function SettingsDataTransferPage() {
       totalBatches,
       inserted: 0,
       updated: 0,
+      skipped: 0,
     })
     let totalInserted = 0
     let totalUpdated = 0
+    let totalSkipped = 0
     try {
       for (let b = 0; b < totalBatches; b++) {
         const start = b * BATCH_SIZE
@@ -599,18 +604,24 @@ export function SettingsDataTransferPage() {
             targetTable: card.targetTable,
             columnMapping: mapping,
             rows: batch,
+            skipExisting,
           }),
         })
         const text = await res.text()
-        let json: { error?: string; inserted?: number; updated?: number; total?: number } = {}
+        let json: { error?: string; inserted?: number; updated?: number; skipped?: number; total?: number } = {}
         try {
           json = text ? JSON.parse(text) : {}
         } catch {
           throw new Error(res.ok ? 'Yanıt işlenemedi' : text || `HTTP ${res.status}`)
         }
-        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+        if (!res.ok) {
+          const errMsg = json.error || text || `HTTP ${res.status}`
+          console.error('[transfer] execute-batch hatası:', errMsg)
+          throw new Error(errMsg)
+        }
         totalInserted += json.inserted ?? 0
         totalUpdated += json.updated ?? 0
+        totalSkipped += json.skipped ?? 0
         setTransferProgress({
           phase: 'transferring',
           processedCount: start + batch.length,
@@ -619,12 +630,14 @@ export function SettingsDataTransferPage() {
           totalBatches,
           inserted: totalInserted,
           updated: totalUpdated,
+          skipped: totalSkipped,
         })
       }
       setTransferProgress((p) => p ? { ...p, phase: 'done' } : null)
-      const msg = totalUpdated
+      let msg = totalUpdated
         ? `${totalInserted} yeni eklendi, ${totalUpdated} mevcut güncellendi.`
         : `${totalInserted} kayıt D1'e aktarıldı.`
+      if (totalSkipped > 0) msg += ` ${totalSkipped} mevcut kayıt atlandı.`
       toastSuccess('Aktarım tamamlandı', msg)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Bilinmeyen hata'
@@ -638,6 +651,7 @@ export function SettingsDataTransferPage() {
   function closeTransferModal() {
     setTransferModal(null)
     setTransferProgress(null)
+    setSkipExisting(false)
   }
 
   const settingsContent = (
@@ -1100,6 +1114,16 @@ export function SettingsDataTransferPage() {
                       <>
                         <p>{transferModal.card.selectedIndices.size} kayıt aktarılacak.</p>
                         <p>Sütun eşleştirmesi: {Object.entries(filterExcludedMapping(transferModal.card.columnMapping, transferModal.card.enabledMappingKeys)).length} alan</p>
+                        <div className="flex items-center gap-2 pt-2">
+                          <Switch
+                            id="skip-existing"
+                            checked={skipExisting}
+                            onCheckedChange={setSkipExisting}
+                          />
+                          <Label htmlFor="skip-existing" className="cursor-pointer text-sm font-normal">
+                            Mevcut kayıtları atla (D1'de zaten varsa işleme)
+                          </Label>
+                        </div>
                       </>
                     ) : (
                       <div className="space-y-3 pt-2">
@@ -1123,7 +1147,7 @@ export function SettingsDataTransferPage() {
                           </div>
                         </div>
                         {/* Detaylar */}
-                        <div className="grid grid-cols-2 gap-2 text-sm rounded-lg bg-muted/50 p-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm rounded-lg bg-muted/50 p-3">
                           <div>
                             <span className="text-muted-foreground">Eklenen:</span>{' '}
                             <span className="font-medium">{transferProgress.inserted}</span>
@@ -1132,6 +1156,12 @@ export function SettingsDataTransferPage() {
                             <span className="text-muted-foreground">Güncellenen:</span>{' '}
                             <span className="font-medium">{transferProgress.updated}</span>
                           </div>
+                          {(transferProgress.skipped ?? 0) > 0 && (
+                            <div>
+                              <span className="text-muted-foreground">Atlanan:</span>{' '}
+                              <span className="font-medium">{transferProgress.skipped}</span>
+                            </div>
+                          )}
                         </div>
                         {transferProgress.phase === 'transferring' && (
                           <div className="flex items-center gap-2 text-sm text-muted-foreground">

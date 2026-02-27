@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { DollarSign } from 'lucide-react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
 import { Search, Plus, X, Trash2, Copy, Save } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -47,7 +48,10 @@ export function ParaBirimleriPage() {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
+  const [ratesSaving, setRatesSaving] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
+  const RATE_CODES = ['USD', 'EUR', 'GBP']
   const hasFilter = search.length > 0
   const limit = pageSize === 'fit' ? fitLimit : pageSize
 
@@ -74,6 +78,44 @@ export function ParaBirimleriPage() {
   useEffect(() => {
     fetchData()
   }, [fetchData])
+
+  const fetchRates = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/app-settings?category=parabirimleri`)
+      const data = await res.json()
+      if (data?.exchange_rates) {
+        const parsed = JSON.parse(data.exchange_rates) as Record<string, number>
+        setExchangeRates(typeof parsed === 'object' && parsed !== null ? parsed : {})
+      } else {
+        setExchangeRates({})
+      }
+    } catch {
+      setExchangeRates({})
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchRates()
+  }, [fetchRates])
+
+  const handleRatesSave = async () => {
+    setRatesSaving(true)
+    try {
+      await fetch(`${API_URL}/api/app-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: 'parabirimleri',
+          settings: { exchange_rates: JSON.stringify(exchangeRates) },
+        }),
+      })
+      toastSuccess('Kurlar kaydedildi', 'Döviz kurları güncellendi.')
+    } catch (err) {
+      toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Kurlar kaydedilemedi')
+    } finally {
+      setRatesSaving(false)
+    }
+  }
 
   const openNew = async () => {
     setEditingId(null)
@@ -247,6 +289,41 @@ export function ParaBirimleriPage() {
                 )}
               </tbody>
             </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-6">
+        <CardContent className="p-4">
+          <div className="flex items-center gap-2 mb-4">
+            <DollarSign className="h-5 w-5 text-primary" />
+            <h3 className="font-medium">Döviz Kurları (TL karşılığı)</h3>
+          </div>
+          <p className="text-sm text-muted-foreground mb-4">
+            Ürün listesinde fiyat önizlemesinde TL karşılıklarının gösterilmesi için kurları tanımlayın.
+          </p>
+          <div className="flex flex-wrap gap-4 items-end">
+            {RATE_CODES.map((code) => (
+              <div key={code} className="flex items-center gap-2">
+                <Label htmlFor={`rate-${code}`} className="text-sm whitespace-nowrap">{code} / TL</Label>
+                <Input
+                  id={`rate-${code}`}
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={exchangeRates[code] ?? ''}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value)
+                    setExchangeRates((prev) => ({ ...prev, [code]: isNaN(v) ? 0 : v }))
+                  }}
+                  placeholder="0"
+                  className="w-24"
+                />
+              </div>
+            ))}
+            <Button size="sm" onClick={handleRatesSave} disabled={ratesSaving}>
+              {ratesSaving ? 'Kaydediliyor...' : 'Kurları Kaydet'}
+            </Button>
           </div>
         </CardContent>
       </Card>

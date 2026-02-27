@@ -8,6 +8,9 @@ export interface AppModule {
 export const APP_MODULES: AppModule[] = [
   { id: 'home', label: 'home', path: '/' },
   { id: 'products', label: 'products', path: '/products' },
+  { id: 'customers', label: 'customers', path: '/customers' },
+  { id: 'teklifler', label: 'teklifler', path: '/teklifler' },
+  { id: 'dia', label: 'Dia', path: '/dia' },
   { id: 'e-documents', label: 'e-documents', path: '/e-documents' },
   { id: 'suppliers', label: 'suppliers', path: '/parametreler/tedarikciler' },
   { id: 'parametreler', label: 'parameters', path: '/parametreler' },

@@ -190,7 +190,7 @@ export function PackageContentsTab({
           <Input
             type="number"
             min="0.01"
-            step="0.01"
+            step={1}
             value={newQuantity}
             onChange={(e) => setNewQuantity(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAdd())}
@@ -221,7 +221,7 @@ export function PackageContentsTab({
                   <Input
                     type="number"
                     min="0.01"
-                    step="0.01"
+                    step={1}
                     value={item.quantity}
                     onChange={(e) => handleQuantityChange(idx, parseFloat(e.target.value) || 0)}
                     className="w-20 h-7 text-sm"

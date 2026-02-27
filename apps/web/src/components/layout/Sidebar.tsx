@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { API_URL } from '@/lib/api'
+
+const DIA_ICON_KEY = 'images/icons/1771670345789-yqkiwdl30bh.png'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { getSidebarMenus, getSidebarHeader, fetchSidebarMenus, fetchSidebarHeader, SEPARATOR_COLORS } from '@/lib/sidebar-menus'
 import { getModuleById } from '@/lib/app-modules'
@@ -13,7 +15,6 @@ import {
   SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
-  FileText,
 } from 'lucide-react'
 import { useTheme } from '@/contexts/ThemeContext'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -35,7 +36,8 @@ export function Sidebar() {
   const { toggle, isDark } = useTheme()
 
   useEffect(() => {
-    if (location.pathname === '/products') {
+    const collapsePaths = ['/products', '/customers', '/teklifler']
+    if (collapsePaths.includes(location.pathname)) {
       setCollapsed(true)
     }
   }, [location.pathname])
@@ -47,12 +49,10 @@ export function Sidebar() {
     }
     loadFromStorage()
     const loadFromApi = async () => {
-      console.info('[Sidebar] API\'den menü ve header çekiliyor...')
       const [menusData, headerData] = await Promise.all([
         fetchSidebarMenus(),
         fetchSidebarHeader(),
       ])
-      console.info('[Sidebar] API yanıtı:', { menusCount: menusData?.length ?? 0, hasHeader: !!headerData?.title })
       setMenus(menusData)
       setHeader(headerData)
     }
@@ -97,18 +97,6 @@ export function Sidebar() {
       {/* Body - Scrollable */}
       <nav className="flex-1 overflow-y-auto py-4">
         <div className="space-y-1 px-3">
-          <Link
-            to="/e-documents"
-            className={cn(
-              buttonVariants({ variant: 'ghost' }),
-              'w-full justify-start gap-3',
-              collapsed && 'justify-center px-0',
-              location.pathname === '/e-documents' && 'bg-accent'
-            )}
-          >
-            <FileText className="w-10 h-10 shrink-0 opacity-50" />
-            {!collapsed && <span>E-Dökümanlar</span>}
-          </Link>
           {menus.map((item) => {
             if (item.type === 'separator') {
               const colorClass = SEPARATOR_COLORS.find((c) => c.id === item.separatorColor)?.class ?? 'border-border'
@@ -215,6 +203,12 @@ export function Sidebar() {
                   Parametreler
                 </Link>
               </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/dia">
+                  <Package className="w-4 h-4 mr-2" />
+                  Dia
+                </Link>
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
@@ -248,6 +242,24 @@ export function Sidebar() {
             >
               <SlidersHorizontal className="w-4 h-4" />
             </Link>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  to="/dia"
+                  className={cn(
+                    buttonVariants({ variant: 'ghost', size: 'icon' }),
+                    location.pathname.startsWith('/dia') && 'bg-accent'
+                  )}
+                >
+                  <img
+                    src={`${API_URL}/storage/serve?key=${encodeURIComponent(DIA_ICON_KEY)}`}
+                    alt="Dia"
+                    className="w-4 h-4 object-contain"
+                  />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>Dia</TooltipContent>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button

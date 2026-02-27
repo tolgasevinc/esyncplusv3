@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Search, FileText, Inbox, Send, Archive, LayoutGrid, Upload, Loader2, Share2, FileDown, Printer, ArrowUp, ArrowDown, ArrowUpDown, Trash2 } from 'lucide-react'
+import { Search, FileText, Inbox, Send, Archive, LayoutGrid, Upload, Loader2, Share2, FileDown, Printer, ArrowUp, ArrowDown, ArrowUpDown, Trash2, SquarePen } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -18,16 +18,12 @@ import { API_URL } from '@/lib/api'
 import { toastSuccess, toastError } from '@/lib/toast'
 import {
   parseInvoiceHeader,
-  transformXmlWithXslt,
-  extractEmbeddedXslt,
-  isHtmlOutput,
   buildFallbackInvoiceHtml,
   getEdocumentStoragePath,
   type InvoiceHeaderInfo,
 } from '@/lib/ublInvoiceParser'
 import {
   renderXmlToHtml,
-  extractEmbeddedXsltFromBinaryObject,
   type ContentApiResponse,
 } from '@/lib/xsltClient'
 import { cn, formatDate, formatPrice } from '@/lib/utils'
@@ -75,27 +71,23 @@ function getBaseName(fileName: string): string {
   return fileName.replace(/\.(xml|xslt|xsl)$/i, '')
 }
 
-/** XSLT version 2.0 -> 1.0 (tarayıcı sadece 1.0 destekler) */
-function normalizeXsltVersion(xslt: string): string {
-  return xslt
-    .replace(/version\s*=\s*["']2\.0["']/gi, 'version="1.0"')
-    .replace(/version\s*=\s*["']4\.0["']/gi, 'version="1.0"')
-    .replace(/\s+use-character-maps\s*=\s*["'][^"']*["']/gi, '')
-    .replace(/<xsl:character-map\b[^>]*>[\s\S]*?<\/xsl:character-map>/gi, '')
-}
 
 /** HTML'in anlamlı içerik içerip içermediğini kontrol eder (boş/beyaz sayfa önlemi) */
 function hasMeaningfulContent(html: string): boolean {
+  if (!html || html.trim().length < 50) return false
+  // <body> varsa içeriğini al, yoksa tüm HTML'i kullan (DOMPurify body tagini kaldırabilir)
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
-  const bodyContent = (bodyMatch?.[1] ?? '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').trim()
+  const bodyContent = (bodyMatch?.[1] ?? html)
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .trim()
   return bodyContent.length > 50
 }
 
 /** XSLT çıktısındaki QRCode hatasını önlemek için fallback ekler (GİB şablonu makeCode kullanır) */
 function wrapInvoiceHtmlWithFallbacks(html: string): string {
   const qrFallback = `<script>
-(function(){if(typeof QRCode==='undefined'){window.QRCode=function(el,o){var r={makeCode:function(t){try{if(el&&el.appendChild){var d=document.createElement('div');d.style.cssText='width:80px;height:80px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;font-size:9px;color:#999';d.textContent='QR';el.innerHTML='';el.appendChild(d);}}catch(e){}}};r.CorrectLevel={L:1,M:0,Q:3,H:2};return r;}})();
-})();
+(function(){if(typeof QRCode==='undefined'){window.QRCode=function(el,o){var r={makeCode:function(t){try{if(el&&el.appendChild){var d=document.createElement('div');d.style.cssText='width:80px;height:80px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;font-size:9px;color:#999';d.textContent='QR';el.innerHTML='';el.appendChild(d);}}catch(e){}}};r.CorrectLevel={L:1,M:0,Q:3,H:2};return r;};}}());
 <\/script>`
   if (html.includes('<head>')) {
     return html.replace('<head>', '<head>' + qrFallback)
@@ -116,8 +108,22 @@ export function EDocumentsPage() {
   const [previewModalOpen, setPreviewModalOpen] = useState(false)
   const [logoError, setLogoError] = useState(false)
   const [previewItems, setPreviewItems] = useState<PreviewItem[]>([])
-  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<{
+    fileIndex: number
+    total: number
+    fileName: string
+    step: 'storage' | 'db' | 'done'
+    success: number
+    failed: number
+  } | null>(null)
+  const [uploadModalOpen, setUploadModalOpen] = useState(false)
+  const [uploadFileResults, setUploadFileResults] = useState<{
+    name: string
+    status: 'pending' | 'uploading' | 'done' | 'failed'
+    error?: string
+  }[]>([])
   const [overwriteModalOpen, setOverwriteModalOpen] = useState(false)
   const [existingFiles, setExistingFiles] = useState<string[]>([])
   const [viewModalOpen, setViewModalOpen] = useState(false)
@@ -127,9 +133,16 @@ export function EDocumentsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [editModalOpen, setEditModalOpen] = useState(false)
+  const [editDoc, setEditDoc] = useState<EDocument | null>(null)
+  const [editSender, setEditSender] = useState('')
+  const [editReceiver, setEditReceiver] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+  const [highlightedId, setHighlightedId] = useState<number | null>(null)
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const folderInputRef = useRef<HTMLInputElement>(null)
+  const [isDragOver, setIsDragOver] = useState(false)
   const hasFilter = search.length > 0 || filter !== 'tumu'
   const limit = pageSize === 'fit' ? fitLimit : pageSize
 
@@ -163,6 +176,10 @@ export function EDocumentsPage() {
     fetchData()
   }, [fetchData])
 
+  useEffect(() => () => {
+    highlightTimeoutRef.current && clearTimeout(highlightTimeoutRef.current)
+  }, [])
+
   const handleRefresh = () => {
     setListState({ search: '', filter: 'tumu', page: 1 })
     setSelectedIds(new Set())
@@ -177,6 +194,54 @@ export function EDocumentsPage() {
       else next.add(id)
       return next
     })
+  }
+
+  const openEditModal = (item: EDocument, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setEditDoc(item)
+    setEditSender(item.sender ?? '')
+    setEditReceiver(item.receiver ?? '')
+    setEditModalOpen(true)
+  }
+
+  const handleEditSave = async () => {
+    if (!editDoc) return
+    setEditSaving(true)
+    try {
+      const body: { seller_title?: string; buyer_title?: string } = {
+        seller_title: editSender,
+        buyer_title: editReceiver,
+      }
+      const res = await fetch(`${API_URL}/api/e-documents/${editDoc.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const json = await res.json()
+      if (res.ok) {
+        toastSuccess('Güncellendi', 'Gönderen/Alıcı bilgisi kaydedildi.')
+        setEditModalOpen(false)
+        const id = editDoc.id
+        setEditDoc(null)
+        setData((prev) =>
+          prev.map((d) =>
+            d.id === id ? { ...d, sender: editSender, receiver: editReceiver } : d
+          )
+        )
+        setHighlightedId(id)
+        highlightTimeoutRef.current && clearTimeout(highlightTimeoutRef.current)
+        highlightTimeoutRef.current = setTimeout(() => {
+          setHighlightedId(null)
+          highlightTimeoutRef.current = null
+        }, 2500)
+      } else {
+        toastError('Güncelleme hatası', json?.error || res.statusText)
+      }
+    } catch (err) {
+      toastError('Güncelleme hatası', err instanceof Error ? err.message : 'Bilinmeyen hata')
+    } finally {
+      setEditSaving(false)
+    }
   }
 
   const handleBatchDelete = async () => {
@@ -209,22 +274,40 @@ export function EDocumentsPage() {
     fileInputRef.current?.click()
   }
 
-  const handleFolderUploadClick = () => {
-    folderInputRef.current?.click()
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+    const files = e.dataTransfer?.files
+    if (files?.length) uploadFilesDirectly(files)
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(false)
   }
 
   const performUpload = async () => {
     if (previewItems.length === 0 || uploading) return
     setOverwriteModalOpen(false)
     setUploading(true)
+    const uploadItems = previewItems.filter((i) => !i.header.rawError)
+    const total = uploadItems.length
     let success = 0
     let failed = 0
     try {
-      for (const item of previewItems) {
-        if (item.header.rawError) {
-          failed++
-          continue
-        }
+      for (let idx = 0; idx < uploadItems.length; idx++) {
+        const item = uploadItems[idx]
+        const fileName = item.xmlFile.name
+
+        setUploadProgress({ fileIndex: idx, total, fileName, step: 'storage', success, failed })
+
         const h = item.header
         const metadata = {
           invoiceId: h.invoiceId,
@@ -242,17 +325,27 @@ export function EDocumentsPage() {
         formData.append('file', item.xmlFile)
         formData.append('metadata', JSON.stringify(metadata))
         if (item.xsltFile) formData.append('xsltFile', item.xsltFile)
+
         const res = await fetch(`${API_URL}/api/e-documents/upload`, {
           method: 'POST',
           body: formData,
         })
         const json = await res.json()
+
+        // Storage bitti, kısa süre DB adımını göster
+        setUploadProgress({ fileIndex: idx, total, fileName, step: 'db', success, failed })
+        await new Promise((r) => setTimeout(r, 250))
+
         if (res.ok && json.path) {
           success++
         } else {
           failed++
         }
       }
+
+      setUploadProgress({ fileIndex: total, total, fileName: '', step: 'done', success, failed })
+      await new Promise((r) => setTimeout(r, 800))
+
       if (success > 0) {
         toastSuccess('Yükleme tamamlandı', `${success} dosya e-documents klasörüne kaydedildi.${failed > 0 ? ` ${failed} başarısız.` : ''}`)
         setPreviewModalOpen(false)
@@ -266,6 +359,7 @@ export function EDocumentsPage() {
       toastError('Yükleme hatası', err instanceof Error ? err.message : 'Bilinmeyen hata')
     } finally {
       setUploading(false)
+      setUploadProgress(null)
     }
   }
 
@@ -308,79 +402,152 @@ export function EDocumentsPage() {
     await performUpload()
   }
 
-  const processFiles = async (files: FileList | File[]) => {
-    const fileArray = Array.from(files)
+  /** Önizleme göstermeden doğrudan yükler */
+  const uploadFilesDirectly = async (files: FileList | File[]) => {
+    const fileArray = Array.from(files).filter((f) => f.name.match(/\.(xml|xslt|xsl)$/i))
     if (!fileArray.length) return
-    setPreviewLoading(true)
-    setPreviewItems([])
-    setPreviewModalOpen(true)
+
+    // XML/XSLT'leri base isimle eşleştir
     const byBase = new Map<string, { xml?: File; xslt?: File }>()
-    const allXslt: File[] = []
     for (const f of fileArray) {
       const base = getBaseName(f.name)
       const ext = f.name.split('.').pop()?.toLowerCase()
       const entry = byBase.get(base) ?? {}
       if (ext === 'xml') entry.xml = f
-      else if (ext === 'xslt' || ext === 'xsl') {
-        entry.xslt = f
-        allXslt.push(f)
-      }
+      else if (ext === 'xslt' || ext === 'xsl') entry.xslt = f
       byBase.set(base, entry)
     }
-    const xmlEntries = Array.from(byBase.entries()).filter(([, v]) => v.xml)
-    const unpairedXslt = allXslt.filter((xf) => !xmlEntries.some(([, v]) => v.xslt === xf))
-    const sharedXslt = unpairedXslt[0]
-    const items: PreviewItem[] = []
-    for (const [, { xml, xslt }] of byBase) {
-      if (!xml) continue
-      const xmlText = await xml.text()
-      const header = parseInvoiceHeader(xmlText, xml.name)
-      let htmlPreview: string | undefined
-      let xsltError: string | undefined
-      const xsltFileToUse = xslt ?? sharedXslt
-      let xsltText = xsltFileToUse
-        ? await xsltFileToUse.text()
-        : extractEmbeddedXslt(xmlText) ?? extractEmbeddedXsltFromBinaryObject(xmlText)
-      if (xsltText) xsltText = normalizeXsltVersion(xsltText)
-      if (!xsltText && header.invoiceType === 'earsiv') {
-        try {
-          const res = await fetch('/earsiv/general.xslt')
-          if (res.ok) xsltText = await res.text()
-        } catch {
-          /* GİB şablonu yüklenemedi */
-        }
-      }
-      if (xsltText) {
-        try {
-          const result = await transformXmlWithXslt(xmlText, xsltText)
-          const useResult = isHtmlOutput(result) && hasMeaningfulContent(result)
-          htmlPreview = useResult ? result : buildFallbackInvoiceHtml(header)
-          if (!useResult) xsltError = 'XSLT çıktısı yetersiz veya HTML değil'
-        } catch (err) {
-          xsltError = err instanceof Error ? err.message : 'XSLT hatası'
-          htmlPreview = buildFallbackInvoiceHtml(header)
-        }
-      }
-      if (!htmlPreview && !header.rawError) {
-        htmlPreview = buildFallbackInvoiceHtml(header)
-      }
-      items.push({ header, htmlPreview, xsltError, xmlFile: xml, xsltFile: xsltFileToUse })
+    const xmlEntries = Array.from(byBase.values()).filter((v) => v.xml)
+    if (!xmlEntries.length) return
+
+    // Metadata parse (hızlı, HTML yok)
+    const queue: { header: ReturnType<typeof parseInvoiceHeader>; xmlFile: File; xsltFile?: File }[] = []
+    for (const entry of xmlEntries) {
+      if (!entry.xml) continue
+      const xmlText = await entry.xml.text()
+      const header = parseInvoiceHeader(xmlText, entry.xml.name)
+      queue.push({ header, xmlFile: entry.xml, xsltFile: entry.xslt })
     }
-    setPreviewItems(items)
-    setPreviewLoading(false)
+
+    const initialResults = queue.map((q) => ({ name: q.xmlFile.name, status: 'pending' as const }))
+    setUploadFileResults(initialResults)
+    setUploadModalOpen(true)
+
+    // Üzerine yazma kontrolü
+    const keysToCheck: string[] = []
+    for (const q of queue) {
+      if (q.header.rawError) continue
+      const folder = getEdocumentStoragePath(q.header.invoiceType, q.header.issueDate)
+      keysToCheck.push(getTargetKey(folder, q.xmlFile.name))
+      if (q.xsltFile) keysToCheck.push(getTargetKey(folder, q.xsltFile.name))
+    }
+    if (keysToCheck.length > 0) {
+      try {
+        const res = await fetch(`${API_URL}/storage/check-keys`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys: keysToCheck }),
+        })
+        const json = await res.json()
+        const existing: string[] = json?.existing ?? []
+        if (existing.length > 0) {
+          setExistingFiles(existing.map((k: string) => k.split('/').pop() ?? k))
+          setOverwriteModalOpen(true)
+          // Onay bekleniyor; overwrite modal onaylandığında performDirectUpload çağrılacak
+          // queue'yu ref'e al
+          pendingDirectUploadRef.current = queue
+          return
+        }
+      } catch { /* devam */ }
+    }
+
+    await performDirectUpload(queue)
+  }
+
+  const pendingDirectUploadRef = useRef<{ header: ReturnType<typeof parseInvoiceHeader>; xmlFile: File; xsltFile?: File }[]>([])
+
+  const performDirectUpload = async (
+    queue: { header: ReturnType<typeof parseInvoiceHeader>; xmlFile: File; xsltFile?: File }[]
+  ) => {
+    const validQueue = queue.filter((q) => !q.header.rawError)
+    const total = validQueue.length
+    let success = 0
+    let failed = 0
+    setUploading(true)
+
+    const results = queue.map((q) => ({
+      name: q.xmlFile.name,
+      status: (q.header.rawError ? 'failed' : 'pending') as 'pending' | 'uploading' | 'done' | 'failed',
+      error: q.header.rawError,
+    }))
+    setUploadFileResults([...results])
+
+    for (let idx = 0; idx < validQueue.length; idx++) {
+      const q = validQueue[idx]
+      const queueIdx = queue.findIndex((x) => x.xmlFile === q.xmlFile)
+
+      results[queueIdx] = { name: q.xmlFile.name, status: 'uploading', error: undefined }
+      setUploadFileResults([...results])
+      setUploadProgress({ fileIndex: idx, total, fileName: q.xmlFile.name, step: 'storage', success, failed })
+
+      try {
+        const h = q.header
+        const metadata = {
+          invoiceId: h.invoiceId,
+          issueDate: h.issueDate,
+          supplierName: h.supplierName,
+          customerName: h.customerName,
+          payableAmount: h.payableAmount,
+          taxValue: h.taxValue,
+          taxRate: h.taxRate,
+          invoiceType: h.invoiceType,
+          uuid: h.uuid,
+          currency: h.currency || 'TRY',
+        }
+        const formData = new FormData()
+        formData.append('file', q.xmlFile)
+        formData.append('metadata', JSON.stringify(metadata))
+        if (q.xsltFile) formData.append('xsltFile', q.xsltFile)
+
+        const res = await fetch(`${API_URL}/api/e-documents/upload`, { method: 'POST', body: formData })
+        const json = await res.json()
+
+        setUploadProgress({ fileIndex: idx, total, fileName: q.xmlFile.name, step: 'db', success, failed })
+        await new Promise((r) => setTimeout(r, 200))
+
+        if (res.ok && json.path) {
+          success++
+          results[queueIdx] = { name: q.xmlFile.name, status: 'done', error: undefined }
+        } else {
+          failed++
+          results[queueIdx] = { name: q.xmlFile.name, status: 'failed', error: json?.error || 'Hata' }
+        }
+      } catch (err) {
+        failed++
+        results[queueIdx] = { name: q.xmlFile.name, status: 'failed', error: err instanceof Error ? err.message : 'Hata' }
+      }
+      setUploadFileResults([...results])
+    }
+
+    setUploadProgress({ fileIndex: total, total, fileName: '', step: 'done', success, failed })
+    await new Promise((r) => setTimeout(r, 600))
+
+    setUploading(false)
+    setUploadProgress(null)
+
+    if (success > 0) {
+      toastSuccess('Yükleme tamamlandı', `${success} dosya kaydedildi.${failed > 0 ? ` ${failed} başarısız.` : ''}`)
+      fetchData()
+    }
+    if (failed > 0 && success === 0) {
+      toastError('Yükleme hatası', 'Hiçbir dosya yüklenemedi.')
+    }
   }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files?.length) return
-    await processFiles(files)
-    e.target.value = ''
-  }
-
-  const handleFolderChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files?.length) return
-    await processFiles(files)
+    await uploadFilesDirectly(files)
     e.target.value = ''
   }
 
@@ -416,7 +583,6 @@ export function EDocumentsPage() {
       if (error || !html || !hasMeaningfulContent(html)) {
         const header = parseInvoiceHeader(api.xml, item.file_name || 'fatura.xml')
         setViewHtml(buildFallbackInvoiceHtml(header))
-        if (error) console.warn('[E-Documents] XSLT:', error)
       } else {
         setViewHtml(wrapInvoiceHtmlWithFallbacks(html))
       }
@@ -528,28 +694,22 @@ export function EDocumentsPage() {
             className="hidden"
             onChange={handleFileChange}
           />
-          <input
-            ref={folderInputRef}
-            type="file"
-            accept=".xml,.xslt,.xsl"
-            {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
-            className="hidden"
-            onChange={handleFolderChange}
-          />
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={cn(
+              'flex items-center gap-2 rounded-lg border-2 border-dashed px-4 py-2 transition-colors cursor-pointer min-w-[140px] justify-center',
+              isDragOver ? 'border-primary bg-primary/5' : 'border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30'
+            )}
+            onClick={handleUploadClick}
+          >
+            <Upload className="h-4 w-4 shrink-0" />
+            <span className="text-sm font-medium">{isDragOver ? 'Bırakın...' : 'Sürükle bırak'}</span>
+          </div>
           <Button type="button" variant="default" size="sm" className="gap-2" onClick={handleUploadClick}>
             <Upload className="h-4 w-4" />
-            Dosya Seç
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="gap-2"
-            onClick={handleFolderUploadClick}
-            title="Klasör seç: Aynı isimde .xml ve .xslt dosyaları otomatik eşleşir"
-          >
-            <Upload className="h-4 w-4" />
-            Klasör Seç
+            Yükle
           </Button>
           <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
             {filterButtons.map(({ value, label, icon }) => (
@@ -608,11 +768,11 @@ export function EDocumentsPage() {
     >
       <Card>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
+          <div className="overflow-auto max-h-[calc(100vh-14rem)]">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="w-10 p-3">
+                  <th className="sticky top-0 z-10 bg-muted/95 backdrop-blur w-10 p-3">
                     <input
                       type="checkbox"
                       checked={data.length > 0 && data.every((d) => selectedIds.has(d.id))}
@@ -625,7 +785,7 @@ export function EDocumentsPage() {
                     />
                   </th>
                   <th
-                    className="text-left p-3 font-medium cursor-pointer hover:bg-muted/70 select-none"
+                    className="sticky top-0 z-10 bg-muted/95 backdrop-blur text-left p-3 font-medium cursor-pointer hover:bg-muted/70 select-none"
                     onClick={() => handleSort('date')}
                   >
                     <span className="inline-flex items-center gap-1">
@@ -633,10 +793,10 @@ export function EDocumentsPage() {
                       <SortIcon col="date" />
                     </span>
                   </th>
-                  <th className="text-left p-3 font-medium">Tür</th>
-                  <th className="text-left p-3 font-medium">Gönderen / Alıcı</th>
+                  <th className="sticky top-0 z-10 bg-muted/95 backdrop-blur text-left p-3 font-medium">Tür</th>
+                  <th className="sticky top-0 z-10 bg-muted/95 backdrop-blur text-left p-3 font-medium">Gönderen / Alıcı</th>
                   <th
-                    className="text-right p-3 font-medium cursor-pointer hover:bg-muted/70 select-none"
+                    className="sticky top-0 z-10 bg-muted/95 backdrop-blur text-right p-3 font-medium cursor-pointer hover:bg-muted/70 select-none"
                     onClick={() => handleSort('amount')}
                   >
                     <span className="inline-flex items-center gap-1 justify-end">
@@ -645,7 +805,7 @@ export function EDocumentsPage() {
                     </span>
                   </th>
                   <th
-                    className="text-left p-3 font-medium cursor-pointer hover:bg-muted/70 select-none"
+                    className="sticky top-0 z-10 bg-muted/95 backdrop-blur text-left p-3 font-medium cursor-pointer hover:bg-muted/70 select-none"
                     onClick={() => handleSort('description')}
                   >
                     <span className="inline-flex items-center gap-1">
@@ -665,14 +825,18 @@ export function EDocumentsPage() {
                 ) : data.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="p-8 text-center text-muted-foreground">
-                      Henüz e-döküman kaydı yok. Dosya Seç veya Klasör Seç ile fatura yükleyebilirsiniz.
+                      Henüz e-döküman kaydı yok. Sürükle bırak alanına dosya bırakın veya Yükle ile fatura yükleyebilirsiniz.
                     </td>
                   </tr>
                 ) : (
                   data.map((item) => (
                     <tr
                       key={item.id}
-                      className={cn('border-b hover:bg-muted/30 cursor-pointer', selectedIds.has(item.id) && 'bg-muted/50')}
+                      className={cn(
+                        'border-b hover:bg-muted/30 cursor-pointer',
+                        selectedIds.has(item.id) && 'bg-muted/50',
+                        highlightedId === item.id && 'animate-row-highlight'
+                      )}
                       onClick={() => handleRowClick(item)}
                     >
                       <td className="p-3" onClick={(e) => toggleSelection(item.id, e)}>
@@ -699,7 +863,21 @@ export function EDocumentsPage() {
                           {item.type === 'gelen' ? 'Gelen' : item.type === 'arsiv' ? 'Arşiv' : 'Giden'}
                         </span>
                       </td>
-                      <td className="p-3">{item.type === 'gelen' ? item.sender : item.receiver}</td>
+                      <td className="p-3">
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 shrink-0 text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 hover:bg-blue-500/15"
+                            onClick={(e) => openEditModal(item, e)}
+                            title="Gönderen/Alıcı düzenle"
+                          >
+                            <SquarePen className="h-4 w-4" />
+                          </Button>
+                          <span>{item.type === 'gelen' ? item.sender : item.receiver}</span>
+                        </div>
+                      </td>
                       <td className="p-3 text-right tabular-nums">
                         {item.amount != null ? `${item.amount.toLocaleString('tr-TR')} ${item.currency || 'TRY'}` : '—'}
                       </td>
@@ -725,6 +903,43 @@ export function EDocumentsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={editModalOpen} onOpenChange={(open) => { if (!open) setEditModalOpen(false); setEditDoc(null) }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Gönderen / Alıcı Düzenle</DialogTitle>
+            <DialogDescription>
+              {editDoc?.invoice_no && `Fatura No: ${editDoc.invoice_no}`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Gönderen (Satıcı)</label>
+              <Input
+                value={editSender}
+                onChange={(e) => setEditSender(e.target.value)}
+                placeholder="Satıcı adı"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Alıcı (Müşteri)</label>
+              <Input
+                value={editReceiver}
+                onChange={(e) => setEditReceiver(e.target.value)}
+                placeholder="Müşteri adı"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setEditModalOpen(false)} disabled={editSaving}>
+              İptal
+            </Button>
+            <Button type="button" onClick={handleEditSave} disabled={editSaving}>
+              {editSaving ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Kaydediliyor...</> : 'Kaydet'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={deleteModalOpen} onOpenChange={setDeleteModalOpen}>
         <DialogContent className="max-w-md">
@@ -847,7 +1062,7 @@ export function EDocumentsPage() {
                           <iframe
                             title={`Önizleme: ${h.fileName}`}
                             srcDoc={wrapInvoiceHtmlWithFallbacks(htmlPreview)}
-                            sandbox="allow-same-origin allow-scripts"
+                            sandbox="allow-scripts"
                             className="w-full min-h-[200px] border-0"
                             style={{ height: 'min(400px, 50vh)' }}
                           />
@@ -859,6 +1074,119 @@ export function EDocumentsPage() {
               </div>
             )}
           </div>
+          {uploadProgress && (
+            <div className="border-t pt-4 px-1 pb-1 space-y-4">
+              {/* Adım göstergesi */}
+              <div className="flex items-center justify-center gap-0">
+                {/* Adım 1: Storage */}
+                <div className="flex flex-col items-center gap-1">
+                  <div
+                    className={cn(
+                      'w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold border-2 transition-all duration-300',
+                      uploadProgress.step === 'storage'
+                        ? 'border-primary bg-primary text-primary-foreground animate-pulse'
+                        : uploadProgress.step === 'db' || uploadProgress.step === 'done'
+                          ? 'border-green-500 bg-green-500 text-white'
+                          : 'border-muted bg-muted text-muted-foreground'
+                    )}
+                  >
+                    {uploadProgress.step === 'db' || uploadProgress.step === 'done' ? (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    ) : '1'}
+                  </div>
+                  <span className={cn('text-[10px] font-medium whitespace-nowrap', uploadProgress.step === 'storage' ? 'text-primary' : 'text-muted-foreground')}>R2 Storage</span>
+                </div>
+
+                {/* Bağlayıcı çizgi */}
+                <div className="relative h-0.5 w-16 mx-1 bg-muted overflow-hidden mb-4">
+                  <div
+                    className={cn(
+                      'absolute inset-y-0 left-0 bg-green-500 transition-all duration-500',
+                      uploadProgress.step === 'storage' ? 'w-0' : 'w-full'
+                    )}
+                  />
+                </div>
+
+                {/* Adım 2: Veritabanı */}
+                <div className="flex flex-col items-center gap-1">
+                  <div
+                    className={cn(
+                      'w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold border-2 transition-all duration-300',
+                      uploadProgress.step === 'db'
+                        ? 'border-primary bg-primary text-primary-foreground animate-pulse'
+                        : uploadProgress.step === 'done'
+                          ? 'border-green-500 bg-green-500 text-white'
+                          : 'border-muted bg-muted text-muted-foreground'
+                    )}
+                  >
+                    {uploadProgress.step === 'done' ? (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    ) : '2'}
+                  </div>
+                  <span className={cn('text-[10px] font-medium whitespace-nowrap', uploadProgress.step === 'db' ? 'text-primary' : 'text-muted-foreground')}>D1 Veritabanı</span>
+                </div>
+
+                {/* Bağlayıcı çizgi */}
+                <div className="relative h-0.5 w-16 mx-1 bg-muted overflow-hidden mb-4">
+                  <div
+                    className={cn(
+                      'absolute inset-y-0 left-0 bg-green-500 transition-all duration-500',
+                      uploadProgress.step === 'done' ? 'w-full' : 'w-0'
+                    )}
+                  />
+                </div>
+
+                {/* Adım 3: Tamamlandı */}
+                <div className="flex flex-col items-center gap-1">
+                  <div
+                    className={cn(
+                      'w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold border-2 transition-all duration-300',
+                      uploadProgress.step === 'done'
+                        ? 'border-green-500 bg-green-500 text-white'
+                        : 'border-muted bg-muted text-muted-foreground'
+                    )}
+                  >
+                    {uploadProgress.step === 'done' ? (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    ) : '3'}
+                  </div>
+                  <span className={cn('text-[10px] font-medium whitespace-nowrap', uploadProgress.step === 'done' ? 'text-green-600' : 'text-muted-foreground')}>Tamamlandı</span>
+                </div>
+              </div>
+
+              {/* Genel ilerleme slider */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>
+                    {uploadProgress.step === 'done'
+                      ? `✓ ${uploadProgress.success} başarılı${uploadProgress.failed > 0 ? `, ${uploadProgress.failed} başarısız` : ''}`
+                      : uploadProgress.step === 'storage'
+                        ? `R2 Storage'a aktarılıyor…`
+                        : `D1 veritabanına kaydediliyor…`}
+                  </span>
+                  <span className="font-medium text-foreground">{Math.min(uploadProgress.fileIndex + 1, uploadProgress.total)}/{uploadProgress.total}</span>
+                </div>
+                <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500 bg-primary"
+                    style={{
+                      width: `${uploadProgress.total > 0
+                        ? Math.round(
+                            ((uploadProgress.fileIndex + (uploadProgress.step === 'db' ? 0.7 : uploadProgress.step === 'done' ? 1 : 0.3)) /
+                              uploadProgress.total) *
+                              100
+                          )
+                        : 0}%`,
+                    }}
+                  />
+                </div>
+                {uploadProgress.fileName && (
+                  <p className="text-xs text-muted-foreground truncate">{uploadProgress.fileName}</p>
+                )}
+              </div>
+            </div>
+          )}
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setPreviewModalOpen(false)} disabled={uploading}>
               Kapat
@@ -868,7 +1196,96 @@ export function EDocumentsPage() {
               onClick={handleDoUpload}
               disabled={uploading || previewItems.length === 0 || previewItems.some((i) => i.header.rawError)}
             >
-              {uploading ? 'Yükleniyor...' : 'R2\'ye Yükle'}
+              {uploading ? (
+                <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Yükleniyor…</>
+              ) : 'R2\'ye Yükle'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Doğrudan yükleme modalı */}
+      <Dialog open={uploadModalOpen} onOpenChange={(open) => { if (!open && !uploading) setUploadModalOpen(false) }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              {uploading ? 'Yükleniyor…' : uploadProgress?.step === 'done' ? 'Yükleme Tamamlandı' : `${uploadFileResults.length} Dosya Hazır`}
+            </DialogTitle>
+            <DialogDescription>
+              {uploading ? 'Dosyalar işleniyor, lütfen bekleyin.' : 'Dosyalar R2 Storage ve D1 veritabanına kaydedilecek.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-52 overflow-auto space-y-1 py-1">
+            {uploadFileResults.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 text-sm px-1 py-0.5 rounded">
+                <span className={cn(
+                  'shrink-0 w-5 h-5 rounded-full flex items-center justify-center',
+                  r.status === 'done' && 'bg-green-100 text-green-600',
+                  r.status === 'failed' && 'bg-red-100 text-red-500',
+                  r.status === 'uploading' && 'bg-primary/10 text-primary',
+                  r.status === 'pending' && 'bg-muted text-muted-foreground',
+                )}>
+                  {r.status === 'done' && <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>}
+                  {r.status === 'failed' && <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>}
+                  {r.status === 'uploading' && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {r.status === 'pending' && <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/40 block" />}
+                </span>
+                <span className={cn('truncate flex-1', r.status === 'failed' && 'text-destructive')}>{r.name}</span>
+                {r.error && <span className="text-xs text-destructive shrink-0 max-w-[130px] truncate">{r.error}</span>}
+              </div>
+            ))}
+          </div>
+
+          {uploading && uploadProgress && (
+            <div className="space-y-3 border-t pt-4">
+              <div className="flex items-center justify-center">
+                {(['storage', 'db', 'done'] as const).map((key, i, arr) => {
+                  const order = { storage: 0, db: 1, done: 2 }
+                  const cur = order[uploadProgress.step]
+                  const isActive = uploadProgress.step === key
+                  const isDone = cur > order[key]
+                  const labels = { storage: 'R2 Storage', db: 'D1 Veritabanı', done: 'Tamamlandı' }
+                  return (
+                    <div key={key} className="flex items-center">
+                      <div className="flex flex-col items-center gap-1">
+                        <div className={cn('w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all duration-300',
+                          isActive && 'border-primary bg-primary text-primary-foreground animate-pulse',
+                          isDone && 'border-green-500 bg-green-500 text-white',
+                          !isActive && !isDone && 'border-muted bg-muted text-muted-foreground',
+                        )}>
+                          {isDone
+                            ? <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                            : i + 1}
+                        </div>
+                        <span className={cn('text-[10px] font-medium whitespace-nowrap', isActive ? 'text-primary' : isDone ? 'text-green-600' : 'text-muted-foreground')}>{labels[key]}</span>
+                      </div>
+                      {i < arr.length - 1 && (
+                        <div className="relative h-0.5 w-12 mx-1 bg-muted overflow-hidden mb-4">
+                          <div className={cn('absolute inset-y-0 left-0 bg-green-500 transition-all duration-500', isDone ? 'w-full' : 'w-0')} />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>{uploadProgress.step === 'storage' ? "R2'ye aktarılıyor…" : uploadProgress.step === 'db' ? 'Veritabanına kaydediliyor…' : 'Tamamlandı'}</span>
+                  <span className="font-medium text-foreground">{Math.min(uploadProgress.fileIndex + 1, uploadProgress.total)}/{uploadProgress.total}</span>
+                </div>
+                <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-500 bg-primary"
+                    style={{ width: `${uploadProgress.total > 0 ? Math.round(((uploadProgress.fileIndex + (uploadProgress.step === 'db' ? 0.7 : uploadProgress.step === 'done' ? 1 : 0.3)) / uploadProgress.total) * 100) : 0}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button type="button" disabled={uploading} onClick={() => setUploadModalOpen(false)}>
+              {uploading ? 'Yükleniyor…' : 'Kapat'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -908,7 +1325,7 @@ export function EDocumentsPage() {
                 <iframe
                   title="Fatura önizleme"
                   srcDoc={viewHtml}
-                  sandbox="allow-same-origin allow-scripts"
+                  sandbox="allow-scripts"
                   className="w-full min-h-[200px] border-0"
                   style={{ height: 'min(500px, 60vh)' }}
                 />
@@ -977,7 +1394,18 @@ export function EDocumentsPage() {
             <Button type="button" variant="outline" onClick={() => setOverwriteModalOpen(false)}>
               İptal Et
             </Button>
-            <Button type="button" onClick={performUpload}>
+            <Button
+              type="button"
+              onClick={() => {
+                setOverwriteModalOpen(false)
+                if (pendingDirectUploadRef.current.length > 0) {
+                  performDirectUpload(pendingDirectUploadRef.current)
+                  pendingDirectUploadRef.current = []
+                } else {
+                  performUpload()
+                }
+              }}
+            >
               Üstüne Kaydet
             </Button>
           </DialogFooter>

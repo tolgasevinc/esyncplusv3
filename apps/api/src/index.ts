@@ -15,6 +15,14 @@ function normalizeForSearch(s: string): string {
     .replace(/ç/g, 'c');
 }
 
+/** LIKE pattern'da % ve _ literal olarak aranması için escape eder */
+function escapeLikePattern(s: string): string {
+  return (s || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+}
+
 /** SQLite'da sütun değerini normalize eden ifade (Türkçe karakter eşleşmesi için).
  * SQLite LOWER() sadece ASCII dönüştürür, Ü/Ö/Ğ/Ş/Ç/İ değişmez - bu yüzden hepsini REPLACE ile yapıyoruz. */
 function sqlNormalizeCol(col: string): string {
@@ -29,7 +37,17 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>();
 
-app.use('/*', cors());
+app.use('/*', cors({
+  origin: (origin) => {
+    if (!origin) return '*';
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) return origin;
+    return '*';
+  },
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  exposeHeaders: ['Content-Length'],
+  maxAge: 86400,
+}));
 
 app.get('/health', (c) => c.json({ status: 'ok' }));
 
@@ -729,6 +747,39 @@ app.delete('/api/e-documents', async (c) => {
     return c.json({ deleted: res.meta.changes });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Silme hatası' }, 500);
+  }
+});
+
+// E-Documents - Gönderen/Alıcı güncelleme
+app.patch('/api/e-documents/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'Veritabanı bulunamadı' }, 500);
+    const id = parseInt(c.req.param('id') || '0');
+    if (!id) return c.json({ error: 'Geçerli id gerekli' }, 400);
+    const body = await c.req.json<{ seller_title?: string; buyer_title?: string }>().catch(() => ({}));
+    const sellerTitle = typeof body?.seller_title === 'string' ? body.seller_title : undefined;
+    const buyerTitle = typeof body?.buyer_title === 'string' ? body.buyer_title : undefined;
+    if (sellerTitle === undefined && buyerTitle === undefined) {
+      return c.json({ error: 'seller_title veya buyer_title gerekli' }, 400);
+    }
+    const updates: string[] = [];
+    const params: (string | number)[] = [];
+    if (sellerTitle !== undefined) {
+      updates.push('seller_title = ?');
+      params.push(sellerTitle);
+    }
+    if (buyerTitle !== undefined) {
+      updates.push('buyer_title = ?');
+      params.push(buyerTitle);
+    }
+    params.push(id);
+    const res = await c.env.DB.prepare(
+      `UPDATE e_documents SET ${updates.join(', ')}, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(...params).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Kayıt bulunamadı' }, 404);
+    return c.json({ ok: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Güncelleme hatası' }, 500);
   }
 });
 
@@ -1888,7 +1939,7 @@ app.get('/api/customer-types', async (c) => {
       `SELECT COUNT(*) as total FROM customer_types ${where}`
     ).bind(...params).first<{ total: number }>();
     const { results } = await c.env.DB.prepare(
-      `SELECT id, name, code, description, color, sort_order, status, created_at FROM customer_types ${where}
+      `SELECT id, name, code, description, color, type, sort_order, status, created_at FROM customer_types ${where}
        ORDER BY sort_order, name LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
@@ -1912,23 +1963,24 @@ app.get('/api/customer-types/next-sort-order', async (c) => {
 app.post('/api/customer-types', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const body = await c.req.json<{ name: string; code?: string; description?: string; color?: string; sort_order?: number; status?: number }>();
+    const body = await c.req.json<{ name: string; code?: string; description?: string; color?: string; type?: string; sort_order?: number; status?: number }>();
     const name = (body.name || '').trim();
     if (!name) return c.json({ error: 'Müşteri tipi adı gerekli' }, 400);
     const code = (body.code || name.slice(0, 2).toUpperCase()).trim();
     const description = body.description?.trim() || null;
     const sort_order = body.sort_order ?? 0;
     const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    const typeVal = body.type === 'şahıs' ? 'şahıs' : 'firma';
     const existing = await c.env.DB.prepare(
       `SELECT id FROM customer_types WHERE code = ? AND is_deleted = 0`
     ).bind(code).first();
     if (existing) return c.json({ error: 'Bu kod zaten kullanılıyor' }, 409);
     const color = body.color?.trim() || null;
     await c.env.DB.prepare(
-      `INSERT INTO customer_types (name, code, description, color, sort_order, status) VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(name, code, description, color, sort_order, status).run();
+      `INSERT INTO customer_types (name, code, description, color, type, sort_order, status) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(name, code, description, color, typeVal, sort_order, status).run();
     const { results } = await c.env.DB.prepare(
-      `SELECT id, name, code, description, color, sort_order, status, created_at FROM customer_types WHERE id = last_insert_rowid()`
+      `SELECT id, name, code, description, color, type, sort_order, status, created_at FROM customer_types WHERE id = last_insert_rowid()`
     ).all();
     return c.json(results![0], 201);
   } catch (err: unknown) {
@@ -1940,7 +1992,7 @@ app.put('/api/customer-types/:id', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const id = c.req.param('id');
-    const body = await c.req.json<{ name?: string; code?: string; description?: string; color?: string; sort_order?: number; status?: number }>();
+    const body = await c.req.json<{ name?: string; code?: string; description?: string; color?: string; type?: string; sort_order?: number; status?: number }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM customer_types WHERE id = ? AND is_deleted = 0`).bind(id).first();
     if (!existing) return c.json({ error: 'Müşteri tipi bulunamadı' }, 404);
     const updates: string[] = [];
@@ -1949,6 +2001,7 @@ app.put('/api/customer-types/:id', async (c) => {
     if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code.trim()); }
     if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
     if (body.color !== undefined) { updates.push('color = ?'); values.push(body.color?.trim() || null); }
+    if (body.type !== undefined) { updates.push('type = ?'); values.push(body.type === 'şahıs' ? 'şahıs' : 'firma'); }
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
     if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
@@ -1956,7 +2009,7 @@ app.put('/api/customer-types/:id', async (c) => {
     values.push(id);
     await c.env.DB.prepare(`UPDATE customer_types SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
     const row = await c.env.DB.prepare(
-      `SELECT id, name, code, description, color, sort_order, status, created_at, updated_at FROM customer_types WHERE id = ?`
+      `SELECT id, name, code, description, color, type, sort_order, status, created_at, updated_at FROM customer_types WHERE id = ?`
     ).bind(id).first();
     return c.json(row);
   } catch (err: unknown) {
@@ -1972,6 +2025,791 @@ app.delete('/api/customer-types/:id', async (c) => {
       `UPDATE customer_types SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
     ).bind(id).run();
     if (res.meta.changes === 0) return c.json({ error: 'Müşteri tipi bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== CUSTOMER GROUPS (Müşteri Grupları) ==========
+app.get('/api/customer-groups', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE is_deleted = 0 AND status = 1';
+    const params: (string | number)[] = [];
+    if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
+      where += ' AND (name LIKE ? OR code LIKE ? OR description LIKE ?)';
+      params.push(pat, pat, pat);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM customer_groups ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, code, description, sort_order, status, color, created_at FROM customer_groups ${where}
+       ORDER BY sort_order, name LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/customer-groups/next-sort-order', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const row = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM customer_groups WHERE is_deleted = 0`
+    ).first<{ next: number }>();
+    return c.json({ next: row?.next ?? 1 });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/customer-groups', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ name: string; code?: string; description?: string; sort_order?: number; status?: number; color?: string }>();
+    const name = (body.name || '').trim();
+    if (!name) return c.json({ error: 'Grup adı gerekli' }, 400);
+    const code = (body.code || name.slice(0, 2).toUpperCase()).trim();
+    const description = body.description?.trim() || null;
+    const sort_order = body.sort_order ?? 0;
+    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    const color = body.color?.trim() || null;
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM customer_groups WHERE name = ? AND is_deleted = 0`
+    ).bind(name).first();
+    if (existing) return c.json({ error: 'Bu isim zaten kullanılıyor' }, 409);
+    await c.env.DB.prepare(
+      `INSERT INTO customer_groups (name, code, description, sort_order, status, color) VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(name, code, description, sort_order, status, color).run();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, code, description, sort_order, status, color, created_at FROM customer_groups WHERE id = last_insert_rowid()`
+    ).all();
+    return c.json(results![0], 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/customer-groups/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ name?: string; code?: string; description?: string; sort_order?: number; status?: number; color?: string }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM customer_groups WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Grup bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
+    if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code.trim()); }
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (body.color !== undefined) { updates.push('color = ?'); values.push(body.color?.trim() || null); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE customer_groups SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(
+      `SELECT id, name, code, description, sort_order, status, color, created_at, updated_at FROM customer_groups WHERE id = ?`
+    ).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/customer-groups/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const res = await c.env.DB.prepare(
+      `UPDATE customer_groups SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Grup bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== CUSTOMER LEGAL TYPES (Yasal Tipler) ==========
+app.get('/api/customer-legal-types', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE is_deleted = 0 AND status = 1';
+    const params: (string | number)[] = [];
+    if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
+      where += ' AND (name LIKE ? OR description LIKE ?)';
+      params.push(pat, pat);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM customer_legal_types ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, description, sort_order, status, created_at FROM customer_legal_types ${where}
+       ORDER BY sort_order, name LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/customer-legal-types/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ description?: string; sort_order?: number; status?: number }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM customer_legal_types WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Yasal tip bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE customer_legal_types SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(
+      `SELECT id, name, description, sort_order, status, created_at, updated_at FROM customer_legal_types WHERE id = ?`
+    ).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== CUSTOMERS (Müşteriler) ==========
+app.get('/api/customers', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim().slice(0, 200);
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE is_deleted = 0 AND status = 1';
+    const params: (string | number)[] = [];
+    if (search) {
+      const n = escapeLikePattern(normalizeForSearch(search));
+      const pat = `%${n}%`;
+      const escapeClause = /[%_]/.test(n) ? " ESCAPE '\\'" : '';
+      where += ` AND (title LIKE ?${escapeClause} OR code LIKE ?${escapeClause} OR tax_no LIKE ?${escapeClause} OR email LIKE ?${escapeClause})`;
+      params.push(pat, pat, pat, pat);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM customers ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, title, code, group_id, type_id, legal_type_id, tax_no, tax_office, email, phone, phone_mobile, status, created_at FROM customers ${where}
+       ORDER BY sort_order, title LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    console.error('[customers]', err);
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/customers/next-sort-order', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const row = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM customers WHERE is_deleted = 0`
+    ).first<{ next: number }>();
+    return c.json({ next: row?.next ?? 1 });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/customers/next-code', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const year = new Date().getFullYear();
+    const prefix = `${year}-`;
+    const { results } = await c.env.DB.prepare(
+      `SELECT code FROM customers WHERE is_deleted = 0 AND code LIKE ? ORDER BY CAST(SUBSTR(code, 6) AS INTEGER) DESC LIMIT 1`
+    ).bind(prefix + '%').all();
+    let nextNum = 1;
+    if (results && results.length > 0) {
+      const last = (results[0] as { code: string }).code || '';
+      const numPart = last.replace(prefix, '').replace(/\D/g, '');
+      const n = parseInt(numPart, 10);
+      if (!isNaN(n) && n >= 0) nextNum = n + 1;
+    }
+    const code = `${prefix}${String(nextNum).padStart(4, '0')}`;
+    return c.json({ code });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Benzer müşteri/cari kart arama - customers + dia_carikartlar, kelime kelime (tüm kelimeler eşleşmeli) */
+app.get('/api/customers/similar', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const q = (c.req.query('q') || '').trim().slice(0, 150);
+    if (!q || q.length < 2) return c.json({ data: [] });
+    const words = q.split(/\s+/).filter((w) => w.length >= 2).slice(0, 8);
+    if (words.length === 0) return c.json({ data: [] });
+    const limit = Math.min(20, Math.max(5, parseInt(c.req.query('limit') || '15')));
+    const escapeClause = /[%_]/.test(q) ? " ESCAPE '\\'" : '';
+    const likeConditions = words
+      .map((w) => {
+        const n = escapeLikePattern(normalizeForSearch(w));
+        return `${sqlNormalizeCol('title')} LIKE ?${escapeClause}`;
+      })
+      .join(' AND ');
+    const likeConditionsDia = words
+      .map((w) => {
+        const n = escapeLikePattern(normalizeForSearch(w));
+        return `${sqlNormalizeCol('unvan')} LIKE ?${escapeClause}`;
+      })
+      .join(' AND ');
+    const pats = words.map((w) => `%${escapeLikePattern(normalizeForSearch(w))}%`);
+    const customers: { source: string; id: number; title: string }[] = [];
+    const dia: { source: string; id: number; title: string }[] = [];
+    try {
+      const custWhere = `is_deleted = 0 AND status = 1 AND ${likeConditions}`;
+      const { results: custRes } = await c.env.DB.prepare(
+        `SELECT id, title FROM customers WHERE ${custWhere} ORDER BY title LIMIT ?`
+      ).bind(...pats, limit).all();
+      for (const r of (custRes || []) as { id: number; title: string }[]) {
+        customers.push({ source: 'customers', id: r.id, title: r.title || '' });
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const { results: diaRes } = await c.env.DB.prepare(
+        `SELECT id, unvan FROM dia_carikartlar WHERE ${likeConditionsDia} ORDER BY unvan LIMIT ?`
+      ).bind(...pats, limit).all();
+      for (const r of (diaRes || []) as { id: number; unvan: string | null }[]) {
+        dia.push({ source: 'dia_carikartlar', id: r.id, title: r.unvan || '' });
+      }
+    } catch {
+      /* ignore */
+    }
+    const data = [...customers, ...dia];
+    return c.json({ data });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/customers/check-tax-no', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ exists: false });
+    const taxNo = (c.req.query('tax_no') || '').replace(/\D/g, '');
+    if (!taxNo) return c.json({ exists: false });
+    if (taxNo === '11111111111') return c.json({ exists: false });
+    const excludeId = parseInt(c.req.query('exclude_id') || '0');
+    const params: (string | number)[] = [taxNo];
+    const excludeClause = excludeId > 0 ? ' AND id != ?' : '';
+    if (excludeId > 0) params.push(excludeId);
+    const row = await c.env.DB.prepare(
+      `SELECT id, title FROM customers WHERE is_deleted = 0 AND REPLACE(REPLACE(REPLACE(COALESCE(tax_no,''), ' ', ''), '-', ''), '.', '') = ?${excludeClause}`
+    ).bind(...params).first();
+    return c.json({ exists: !!row, customer: row ? { id: (row as { id: number }).id, title: (row as { title: string }).title } : null });
+  } catch (err: unknown) {
+    return c.json({ exists: false });
+  }
+});
+
+// Customer addresses - must be before /api/customers/:id
+app.get('/api/customers/:id/addresses', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const customer = await c.env.DB.prepare(`SELECT id FROM customers WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!customer) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, customer_id, type, title, contact_name, phone, email, phone_mobile, country_code, city, district, post_code, address_line_1, address_line_2, is_default, status, created_at
+       FROM customer_addresses WHERE customer_id = ? AND is_deleted = 0 ORDER BY is_default DESC, type, id`
+    ).bind(id).all();
+    return c.json({ data: results || [] });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/customers/:id/addresses', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const customer = await c.env.DB.prepare(`SELECT id FROM customers WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!customer) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    const body = await c.req.json<{
+      type?: string; title?: string; contact_name?: string; phone?: string; email?: string; phone_mobile?: string;
+      country_code?: string; city?: string; district?: string; post_code?: string; address_line_1?: string; address_line_2?: string;
+      is_default?: boolean;
+    }>();
+    const type = (body.type || 'Fatura').trim();
+    const validTypes = ['Fatura', 'Sevkiyat', 'Project', 'Other'];
+    const finalType = validTypes.includes(type) ? type : 'Fatura';
+    const title = body.title?.trim() || null;
+    const contact_name = body.contact_name?.trim() || null;
+    const phone = body.phone?.trim() || null;
+    const email = body.email?.trim() || null;
+    const phone_mobile = body.phone_mobile?.trim() || null;
+    const country_code = body.country_code?.trim() || 'TR';
+    const city = body.city?.trim() || null;
+    const district = body.district?.trim() || null;
+    const post_code = body.post_code?.trim() || null;
+    const address_line_1 = body.address_line_1?.trim() || null;
+    const address_line_2 = body.address_line_2?.trim() || null;
+    const is_default = body.is_default ? 1 : 0;
+    await c.env.DB.prepare(
+      `INSERT INTO customer_addresses (customer_id, type, title, contact_name, phone, email, phone_mobile, country_code, city, district, post_code, address_line_1, address_line_2, is_default, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(id, finalType, title, contact_name, phone, email, phone_mobile, country_code, city, district, post_code, address_line_1, address_line_2, is_default).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM customer_addresses WHERE id = last_insert_rowid()`).first();
+    return c.json(row, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/customers/:id/addresses/:addressId', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const addressId = c.req.param('addressId');
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM customer_addresses WHERE id = ? AND customer_id = ? AND is_deleted = 0`
+    ).bind(addressId, id).first();
+    if (!existing) return c.json({ error: 'Adres bulunamadı' }, 404);
+    const body = await c.req.json<{
+      type?: string; title?: string; contact_name?: string; phone?: string; email?: string; phone_mobile?: string;
+      country_code?: string; city?: string; district?: string; post_code?: string; address_line_1?: string; address_line_2?: string;
+      is_default?: boolean;
+    }>();
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.type !== undefined) {
+      const validTypes = ['Fatura', 'Sevkiyat', 'Project', 'Other'];
+      const finalType = validTypes.includes(body.type.trim()) ? body.type.trim() : 'Fatura';
+      updates.push('type = ?'); values.push(finalType);
+    }
+    if (body.title !== undefined) { updates.push('title = ?'); values.push(body.title?.trim() || null); }
+    if (body.contact_name !== undefined) { updates.push('contact_name = ?'); values.push(body.contact_name?.trim() || null); }
+    if (body.phone !== undefined) { updates.push('phone = ?'); values.push(body.phone?.trim() || null); }
+    if (body.email !== undefined) { updates.push('email = ?'); values.push(body.email?.trim() || null); }
+    if (body.phone_mobile !== undefined) { updates.push('phone_mobile = ?'); values.push(body.phone_mobile?.trim() || null); }
+    if (body.country_code !== undefined) { updates.push('country_code = ?'); values.push(body.country_code?.trim() || 'TR'); }
+    if (body.city !== undefined) { updates.push('city = ?'); values.push(body.city?.trim() || null); }
+    if (body.district !== undefined) { updates.push('district = ?'); values.push(body.district?.trim() || null); }
+    if (body.post_code !== undefined) { updates.push('post_code = ?'); values.push(body.post_code?.trim() || null); }
+    if (body.address_line_1 !== undefined) { updates.push('address_line_1 = ?'); values.push(body.address_line_1?.trim() || null); }
+    if (body.address_line_2 !== undefined) { updates.push('address_line_2 = ?'); values.push(body.address_line_2?.trim() || null); }
+    if (body.is_default !== undefined) { updates.push('is_default = ?'); values.push(body.is_default ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(addressId);
+    await c.env.DB.prepare(`UPDATE customer_addresses SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM customer_addresses WHERE id = ?`).bind(addressId).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/customers/:id/addresses/:addressId', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const addressId = c.req.param('addressId');
+    const res = await c.env.DB.prepare(
+      `UPDATE customer_addresses SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND customer_id = ? AND is_deleted = 0`
+    ).bind(addressId, id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Adres bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// Customer contacts - must be before /api/customers/:id
+app.get('/api/customers/:id/contacts', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const customer = await c.env.DB.prepare(`SELECT id FROM customers WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!customer) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, customer_id, full_name, role, phone, phone_mobile, email, is_primary, notes, sort_order, status, created_at
+       FROM customer_contacts WHERE customer_id = ? AND is_deleted = 0 ORDER BY is_primary DESC, sort_order, full_name`
+    ).bind(id).all();
+    return c.json({ data: results || [] });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/customers/:id/contacts', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const customer = await c.env.DB.prepare(`SELECT id FROM customers WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!customer) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    const body = await c.req.json<{ full_name: string; role?: string; phone?: string; phone_mobile?: string; email?: string; is_primary?: boolean; notes?: string }>();
+    const full_name = (body.full_name || '').trim();
+    if (!full_name) return c.json({ error: 'Ad soyad gerekli' }, 400);
+    const role = body.role?.trim() || null;
+    const phone = body.phone?.trim() || null;
+    const phone_mobile = body.phone_mobile?.trim() || null;
+    const email = body.email?.trim() || null;
+    const is_primary = body.is_primary ? 1 : 0;
+    const notes = body.notes?.trim() || null;
+    const { results: maxRes } = await c.env.DB.prepare(`SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM customer_contacts WHERE customer_id = ?`).bind(id).all();
+    const sort_order = (maxRes?.[0] as { next: number })?.next ?? 0;
+    await c.env.DB.prepare(
+      `INSERT INTO customer_contacts (customer_id, full_name, role, phone, phone_mobile, email, is_primary, notes, sort_order, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(id, full_name, role, phone, phone_mobile, email, is_primary, notes, sort_order).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM customer_contacts WHERE id = last_insert_rowid()`).first();
+    return c.json(row, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/customers/:id/contacts/:contactId', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const contactId = c.req.param('contactId');
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM customer_contacts WHERE id = ? AND customer_id = ? AND is_deleted = 0`
+    ).bind(contactId, id).first();
+    if (!existing) return c.json({ error: 'İletişim kişisi bulunamadı' }, 404);
+    const body = await c.req.json<{ full_name?: string; role?: string; phone?: string; phone_mobile?: string; email?: string; is_primary?: boolean; notes?: string }>();
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.full_name !== undefined) { updates.push('full_name = ?'); values.push(body.full_name?.trim() || ''); }
+    if (body.role !== undefined) { updates.push('role = ?'); values.push(body.role?.trim() || null); }
+    if (body.phone !== undefined) { updates.push('phone = ?'); values.push(body.phone?.trim() || null); }
+    if (body.phone_mobile !== undefined) { updates.push('phone_mobile = ?'); values.push(body.phone_mobile?.trim() || null); }
+    if (body.email !== undefined) { updates.push('email = ?'); values.push(body.email?.trim() || null); }
+    if (body.is_primary !== undefined) { updates.push('is_primary = ?'); values.push(body.is_primary ? 1 : 0); }
+    if (body.notes !== undefined) { updates.push('notes = ?'); values.push(body.notes?.trim() || null); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(contactId);
+    await c.env.DB.prepare(`UPDATE customer_contacts SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM customer_contacts WHERE id = ?`).bind(contactId).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/customers/:id/contacts/:contactId', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const contactId = c.req.param('contactId');
+    const res = await c.env.DB.prepare(
+      `UPDATE customer_contacts SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND customer_id = ? AND is_deleted = 0`
+    ).bind(contactId, id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'İletişim kişisi bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/customers/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const row = await c.env.DB.prepare(
+      `SELECT * FROM customers WHERE id = ? AND is_deleted = 0`
+    ).bind(id).first();
+    if (!row) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/customers', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      title: string; code?: string; group_id?: number | null; type_id?: number | null; legal_type_id?: number | null;
+      tags?: string; tax_no?: string; tax_office?: string; email?: string; phone?: string; phone_mobile?: string;
+      sort_order?: number; status?: number;
+    }>();
+    const title = (body.title || '').trim();
+    if (!title) return c.json({ error: 'Müşteri adı gerekli' }, 400);
+    const code = body.code?.trim() || null;
+    const group_id = body.group_id ?? null;
+    const type_id = body.type_id ?? null;
+    const legal_type_id = body.legal_type_id ?? null;
+    const tags = body.tags?.trim() || null;
+    const tax_no = body.tax_no?.trim() || null;
+    const tax_office = body.tax_office?.trim() || null;
+    const email = body.email?.trim() || null;
+    const phone = body.phone?.trim() || null;
+    const phone_mobile = body.phone_mobile?.trim() || null;
+    const sort_order = body.sort_order ?? 0;
+    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    await c.env.DB.prepare(
+      `INSERT INTO customers (title, code, group_id, type_id, legal_type_id, tags, tax_no, tax_office, email, phone, phone_mobile, sort_order, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(title, code, group_id, type_id, legal_type_id, tags, tax_no, tax_office, email, phone, phone_mobile, sort_order, status).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM customers WHERE id = last_insert_rowid()`).first();
+    return c.json(row, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/customers/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{
+      title?: string; code?: string; group_id?: number | null; type_id?: number | null; legal_type_id?: number | null;
+      tags?: string; tax_no?: string; tax_office?: string; email?: string; phone?: string; phone_mobile?: string;
+      sort_order?: number; status?: number;
+    }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM customers WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.title !== undefined) { updates.push('title = ?'); values.push(body.title.trim()); }
+    if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code?.trim() || null); }
+    if (body.group_id !== undefined) { updates.push('group_id = ?'); values.push(body.group_id); }
+    if (body.type_id !== undefined) { updates.push('type_id = ?'); values.push(body.type_id); }
+    if (body.legal_type_id !== undefined) { updates.push('legal_type_id = ?'); values.push(body.legal_type_id); }
+    if (body.tags !== undefined) { updates.push('tags = ?'); values.push(body.tags?.trim() || null); }
+    if (body.tax_no !== undefined) { updates.push('tax_no = ?'); values.push(body.tax_no?.trim() || null); }
+    if (body.tax_office !== undefined) { updates.push('tax_office = ?'); values.push(body.tax_office?.trim() || null); }
+    if (body.email !== undefined) { updates.push('email = ?'); values.push(body.email?.trim() || null); }
+    if (body.phone !== undefined) { updates.push('phone = ?'); values.push(body.phone?.trim() || null); }
+    if (body.phone_mobile !== undefined) { updates.push('phone_mobile = ?'); values.push(body.phone_mobile?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE customers SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM customers WHERE id = ?`).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/customers/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const res = await c.env.DB.prepare(
+      `UPDATE customers SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Müşteri bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== OFFERS (Teklifler) ==========
+app.get('/api/offers', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE o.is_deleted = 0';
+    const params: (string | number)[] = [];
+    if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${n}%`;
+      where += ' AND (o.order_no LIKE ? OR c.title LIKE ? OR o.description LIKE ?)';
+      params.push(pat, pat, pat);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM offers o LEFT JOIN customers c ON o.customer_id = c.id AND c.is_deleted = 0 ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT o.id, o.date, o.order_no, o.customer_id, o.contact_id, o.description, o.notes, o.discount_1, o.discount_2, o.discount_3, o.discount_4, o.status, o.created_at,
+       c.title as customer_title, c.code as customer_code
+       FROM offers o LEFT JOIN customers c ON o.customer_id = c.id AND c.is_deleted = 0
+       ${where} ORDER BY o.date DESC, o.id DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/offers/next-order-no', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const year = new Date().getFullYear();
+    const prefix = `OR-${year}-`;
+    const { results } = await c.env.DB.prepare(
+      `SELECT order_no FROM offers WHERE is_deleted = 0 AND order_no LIKE ? ORDER BY order_no DESC LIMIT 1`
+    ).bind(prefix + '%').all();
+    let nextNum = 1;
+    if (results && results.length > 0) {
+      const last = (results[0] as { order_no: string }).order_no || '';
+      const numPart = last.replace(prefix, '').replace(/\D/g, '');
+      const n = parseInt(numPart, 10);
+      if (!isNaN(n) && n >= 0) nextNum = n + 1;
+    }
+    const order_no = `${prefix}${String(nextNum).padStart(4, '0')}`;
+    return c.json({ order_no });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/offers/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const row = await c.env.DB.prepare(
+      `SELECT o.*, c.title as customer_title, c.code as customer_code
+       FROM offers o LEFT JOIN customers c ON o.customer_id = c.id AND c.is_deleted = 0
+       WHERE o.id = ? AND o.is_deleted = 0`
+    ).bind(id).first();
+    if (!row) return c.json({ error: 'Teklif bulunamadı' }, 404);
+    const { results: items } = await c.env.DB.prepare(
+      `SELECT oi.*, p.name as product_name, p.sku as product_sku, u.name as unit_name
+       FROM offer_items oi
+       LEFT JOIN products p ON oi.product_id = p.id AND p.is_deleted = 0
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       WHERE oi.offer_id = ? AND oi.is_deleted = 0 ORDER BY oi.sort_order, oi.id`
+    ).bind(id).all();
+    return c.json({ ...row, items: items || [] });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/offers', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      date?: string; order_no?: string; customer_id?: number | null; contact_id?: number | null;
+      description?: string; notes?: string; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number;
+      items?: Array<{ type?: string; product_id?: number | null; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number; discount_5?: number }>;
+    }>();
+    const date = body.date?.trim() || new Date().toISOString().slice(0, 10);
+    const order_no = body.order_no?.trim() || null;
+    const customer_id = body.customer_id ?? null;
+    const contact_id = body.contact_id ?? null;
+    const description = body.description?.trim() || null;
+    const notes = body.notes?.trim() || null;
+    const discount_1 = body.discount_1 ?? 0;
+    const discount_2 = body.discount_2 ?? 0;
+    const discount_3 = body.discount_3 ?? 0;
+    const discount_4 = body.discount_4 ?? 0;
+    const uuid = crypto.randomUUID();
+    await c.env.DB.prepare(
+      `INSERT INTO offers (date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4).run();
+    const offerId = (await c.env.DB.prepare(`SELECT last_insert_rowid() as id`).first()) as { id: number };
+    const id = offerId.id;
+    const items = body.items || [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const type = it.type === 'expense' ? 'expense' : 'product';
+      const desc = it.description?.trim() || null;
+      const d1 = it.discount_1 ?? 0, d2 = it.discount_2 ?? 0, d3 = it.discount_3 ?? 0, d4 = it.discount_4 ?? 0, d5 = it.discount_5 ?? 0;
+      const lineDisc = it.line_discount ?? (d1 + d2 + d3 + d4 + d5);
+      await c.env.DB.prepare(
+        `INSERT INTO offer_items (offer_id, product_id, amount, unit_price, line_discount, tax_rate, sort_order, type, description, discount_1, discount_2, discount_3, discount_4, discount_5)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(id, it.product_id ?? null, it.amount ?? 1, it.unit_price ?? 0, lineDisc, it.tax_rate ?? 0, i, type, desc, d1, d2, d3, d4, d5).run();
+    }
+    const row = await c.env.DB.prepare(`SELECT * FROM offers WHERE id = ?`).bind(id).first();
+    return c.json(row, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/offers/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{
+      date?: string; order_no?: string; customer_id?: number | null; contact_id?: number | null;
+      description?: string; notes?: string; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number;
+      items?: Array<{ type?: string; product_id?: number | null; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number; discount_5?: number }>;
+    }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM offers WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Teklif bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.date !== undefined) { updates.push('date = ?'); values.push(body.date?.trim() || new Date().toISOString().slice(0, 10)); }
+    if (body.order_no !== undefined) { updates.push('order_no = ?'); values.push(body.order_no?.trim() || null); }
+    if (body.customer_id !== undefined) { updates.push('customer_id = ?'); values.push(body.customer_id); }
+    if (body.contact_id !== undefined) { updates.push('contact_id = ?'); values.push(body.contact_id); }
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
+    if (body.notes !== undefined) { updates.push('notes = ?'); values.push(body.notes?.trim() || null); }
+    if (body.discount_1 !== undefined) { updates.push('discount_1 = ?'); values.push(body.discount_1); }
+    if (body.discount_2 !== undefined) { updates.push('discount_2 = ?'); values.push(body.discount_2); }
+    if (body.discount_3 !== undefined) { updates.push('discount_3 = ?'); values.push(body.discount_3); }
+    if (body.discount_4 !== undefined) { updates.push('discount_4 = ?'); values.push(body.discount_4); }
+    if (updates.length > 0) {
+      updates.push("updated_at = datetime('now')");
+      values.push(id);
+      await c.env.DB.prepare(`UPDATE offers SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    }
+    if (body.items !== undefined) {
+      await c.env.DB.prepare(`UPDATE offer_items SET is_deleted = 1, updated_at = datetime('now') WHERE offer_id = ?`).bind(id).run();
+      for (let i = 0; i < body.items.length; i++) {
+        const it = body.items[i];
+        const type = it.type === 'expense' ? 'expense' : 'product';
+        const desc = it.description?.trim() || null;
+        const d1 = it.discount_1 ?? 0, d2 = it.discount_2 ?? 0, d3 = it.discount_3 ?? 0, d4 = it.discount_4 ?? 0, d5 = it.discount_5 ?? 0;
+        const lineDisc = it.line_discount ?? (d1 + d2 + d3 + d4 + d5);
+        await c.env.DB.prepare(
+          `INSERT INTO offer_items (offer_id, product_id, amount, unit_price, line_discount, tax_rate, sort_order, type, description, discount_1, discount_2, discount_3, discount_4, discount_5)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(id, it.product_id ?? null, it.amount ?? 1, it.unit_price ?? 0, lineDisc, it.tax_rate ?? 0, i, type, desc, d1, d2, d3, d4, d5).run();
+      }
+    }
+    const row = await c.env.DB.prepare(`SELECT * FROM offers WHERE id = ?`).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/offers/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const res = await c.env.DB.prepare(
+      `UPDATE offers SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Teklif bulunamadı' }, 404);
     return c.json({ success: true });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
@@ -2731,7 +3569,7 @@ app.get('/api/mysql/columns/:table', async (c) => {
 app.get('/api/mysql/table-data/:table', async (c) => {
   try {
     const table = c.req.param('table');
-    const limit = Math.min(parseInt(c.req.query('limit') || '2000') || 2000, 5000);
+    const limit = Math.min(parseInt(c.req.query('limit') || '10000') || 10000, 20000);
     if (!table) return c.json({ error: 'Tablo gerekli' }, 400);
     const config = await getMysqlConfig(c);
     if (!config) return c.json({ error: 'MySQL bağlantı ayarları yapılandırılmalı' }, 400);
@@ -2768,6 +3606,66 @@ app.get('/api/d1/columns/:table', async (c) => {
     const { results } = await c.env.DB.prepare(`PRAGMA table_info("${table.replace(/"/g, '""')}")`).all();
     const cols = (results as { name: string; type: string }[]).map((r) => ({ name: r.name, type: r.type }));
     return c.json({ columns: cols });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/** dia_vergidaireleri - listeleme */
+app.get('/api/dia/vergidaireleri', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '50')));
+    const search = (c.req.query('search') || '').trim();
+    const offset = (page - 1) * limit;
+    let where = '1=1';
+    const params: unknown[] = [];
+    if (search) {
+      where += ` AND (vergidairesiadi LIKE ? OR sehir LIKE ? OR CAST(vdkod AS TEXT) LIKE ?)`;
+      const p = `%${escapeLikePattern(search)}%`;
+      params.push(p, p, p);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM dia_vergidaireleri WHERE ${where}`
+    ).bind(...params).first() as { total: number } | null;
+    const total = countRes?.total ?? 0;
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM dia_vergidaireleri WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/** dia_carikartlar - listeleme */
+app.get('/api/dia/cari-kartlar', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '50')));
+    const search = (c.req.query('search') || '').trim();
+    const offset = (page - 1) * limit;
+    let where = '1=1';
+    const params: unknown[] = [];
+    if (search) {
+      where += ` AND (unvan LIKE ? OR carikartkodu LIKE ? OR verginumarasi LIKE ? OR tckimlikno LIKE ? OR eposta LIKE ?)`;
+      const p = `%${escapeLikePattern(search)}%`;
+      params.push(p, p, p, p, p);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM dia_carikartlar WHERE ${where}`
+    ).bind(...params).first() as { total: number } | null;
+    const total = countRes?.total ?? 0;
+    const { results } = await c.env.DB.prepare(
+      `SELECT c.*, v.vergidairesiadi as vergidairesi_adi
+       FROM dia_carikartlar c
+       LEFT JOIN dia_vergidaireleri v ON c.vergidairesi = v.vdkod
+       WHERE ${where.replace(/unvan|carikartkodu|verginumarasi|tckimlikno|eposta/g, (m) => `c.${m}`)}
+       ORDER BY c.id DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total, page, limit });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -2879,8 +3777,9 @@ app.post('/api/transfer/execute-batch', async (c) => {
       targetTable: string;
       columnMapping: Record<string, string>;
       rows: Record<string, unknown>[];
+      skipExisting?: boolean;
     }>();
-    const { targetTable, columnMapping, rows } = body;
+    const { targetTable, columnMapping, rows, skipExisting } = body;
     if (!targetTable || !columnMapping || !Array.isArray(rows)) {
       return c.json({ error: 'targetTable, columnMapping, rows gerekli' }, 400);
     }
@@ -2935,6 +3834,7 @@ app.post('/api/transfer/execute-batch', async (c) => {
 
     let inserted = 0;
     let updated = 0;
+    let skipped = 0;
     const isAppSettings = targetTable === 'app_settings';
 
     for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
@@ -2984,6 +3884,10 @@ app.post('/api/transfer/execute-batch', async (c) => {
         const existing = await c.env.DB.prepare(
           `SELECT 1 FROM ${safeTableFinal} WHERE id = ?`
         ).bind(idVal).first();
+        if (skipExisting && existing) {
+          skipped++;
+          continue;
+        }
         const updateCols = allTargetCols.filter(
           (col) => { const l = String(col).toLowerCase(); return l !== 'id' && l !== 'updated_at'; }
         );
@@ -3008,6 +3912,10 @@ app.post('/api/transfer/execute-batch', async (c) => {
           ).bind(String(upsertVal).trim()).first() as { id: number } | null;
         }
         if (existing) {
+          if (skipExisting) {
+            skipped++;
+            continue;
+          }
           const updateCols = allTargetCols.filter(
             (col) => { const l = String(col).toLowerCase(); return l !== 'id' && l !== 'created_at'; }
           );
@@ -3025,9 +3933,12 @@ app.post('/api/transfer/execute-batch', async (c) => {
         }
       }
     }
-    return c.json({ ok: true, inserted, updated, total: rows.length });
+    return c.json({ ok: true, inserted, updated, skipped, total: rows.length });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    const msg = err instanceof Error ? err.message : String(err);
+    const d1Msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: string }).message) : null;
+    const finalMsg = d1Msg || msg;
+    return c.json({ error: finalMsg }, 500);
   }
 });
 

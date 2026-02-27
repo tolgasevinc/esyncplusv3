@@ -18,27 +18,28 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
-
 import { API_URL } from '@/lib/api'
+import { ColorPresetPicker } from '@/components/ColorPresetPicker'
 
-interface ProductTaxRate {
+interface CustomerGroup {
   id: number
   name: string
-  value: number
+  code: string
   description?: string
   sort_order: number
   status?: number
+  color?: string
   created_at?: string
 }
 
-const emptyForm = { name: '', value: 0, description: '', sort_order: 0, status: 1 }
+const emptyForm = { name: '', code: '', description: '', sort_order: 0, status: 1, color: '' }
 
-const vergiOranlariListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
+const musteriGruplariListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
 
-export function VergiOranlariPage() {
-  const [listState, setListState] = usePersistedListState('vergi-oranlari', vergiOranlariListDefaults)
+export function MusteriGruplariPage() {
+  const [listState, setListState] = usePersistedListState('musteri-gruplari', musteriGruplariListDefaults)
   const { search, page, pageSize, fitLimit } = listState
-  const [data, setData] = useState<ProductTaxRate[]>([])
+  const [data, setData] = useState<CustomerGroup[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
@@ -55,7 +56,7 @@ export function VergiOranlariPage() {
     try {
       const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
-      const res = await fetch(`${API_URL}/api/product-tax-rates?${params}`)
+      const res = await fetch(`${API_URL}/api/customer-groups?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
       setData(json.data || [])
@@ -79,20 +80,21 @@ export function VergiOranlariPage() {
     setForm(emptyForm)
     setModalOpen(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-tax-rates/next-sort-order`)
+      const res = await fetch(`${API_URL}/api/customer-groups/next-sort-order`)
       const json = await res.json()
       if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
     } catch { /* ignore */ }
   }
 
-  const openEdit = (item: ProductTaxRate) => {
+  const openEdit = (item: CustomerGroup) => {
     setEditingId(item.id)
     setForm({
       name: item.name,
-      value: item.value ?? 0,
+      code: item.code,
       description: item.description || '',
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
+      color: item.color || '',
     })
     setModalOpen(true)
   }
@@ -114,25 +116,18 @@ export function VergiOranlariPage() {
     setSaving(true)
     setError(null)
     try {
-      const url = editingId ? `${API_URL}/api/product-tax-rates/${editingId}` : `${API_URL}/api/product-tax-rates`
+      const url = editingId ? `${API_URL}/api/customer-groups/${editingId}` : `${API_URL}/api/customer-groups`
       const method = editingId ? 'PUT' : 'POST'
-      const payload = {
-        name: form.name.trim(),
-        value: form.value,
-        description: form.description.trim() || null,
-        sort_order: form.sort_order,
-        status: form.status,
-      }
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...form, code: form.code || form.name.slice(0, 2).toUpperCase(), status: form.status, color: form.color || null }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       closeModal()
       fetchData()
-      toastSuccess(editingId ? 'Vergi oranı güncellendi' : 'Vergi oranı eklendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess(editingId ? 'Grup güncellendi' : 'Grup eklendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -143,13 +138,13 @@ export function VergiOranlariPage() {
   }
 
   async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu vergi oranını silmek istediğinize emin misiniz?')) return
+    if (!confirm('Bu grubu silmek istediğinize emin misiniz?')) return
     try {
-      const res = await fetch(`${API_URL}/api/product-tax-rates/${id}`, { method: 'DELETE' })
+      const res = await fetch(`${API_URL}/api/customer-groups/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
-      toastSuccess('Vergi oranı silindi', 'Vergi oranı başarıyla silindi.')
+      toastSuccess('Grup silindi', 'Grup başarıyla silindi.')
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
@@ -158,8 +153,8 @@ export function VergiOranlariPage() {
 
   return (
     <PageLayout
-      title="Vergi Oranları"
-      description="Ürün vergi oranlarını yönetin"
+      title="Müşteri Grupları"
+      description="Müşteri gruplarını yönetin"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -184,7 +179,7 @@ export function VergiOranlariPage() {
                 <Plus className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Yeni vergi oranı</TooltipContent>
+            <TooltipContent>Yeni grup</TooltipContent>
           </Tooltip>
           {hasFilter && (
             <Tooltip>
@@ -218,16 +213,17 @@ export function VergiOranlariPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium">Ad</th>
-                  <th className="text-left p-3 font-medium">Oran (%)</th>
+                  <th className="text-left p-3 font-medium w-12">Renk</th>
+                  <th className="text-left p-3 font-medium">Grup Adı</th>
+                  <th className="text-left p-3 font-medium">Kod</th>
                   <th className="text-left p-3 font-medium">Açıklama</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz vergi oranı kaydı yok.'}</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz grup kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
                     <tr
@@ -235,9 +231,16 @@ export function VergiOranlariPage() {
                       className="border-b hover:bg-muted/30 cursor-pointer"
                       onClick={() => openEdit(item)}
                     >
+                      <td className="p-3">
+                        <span
+                          className="inline-block w-6 h-6 rounded-md border border-muted-foreground/30 shrink-0"
+                          style={{ backgroundColor: item.color || 'transparent' }}
+                          title={item.color || 'Renk yok'}
+                        />
+                      </td>
                       <td className="p-3">{item.name}</td>
-                      <td className="p-3">{item.value}%</td>
-                      <td className="p-3 text-muted-foreground">{item.description || '—'}</td>
+                      <td className="p-3">{item.code}</td>
+                      <td className="p-3">{item.description || '—'}</td>
                     </tr>
                   ))
                 )}
@@ -250,44 +253,30 @@ export function VergiOranlariPage() {
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingId ? 'Vergi Oranı Düzenle' : 'Yeni Vergi Oranı'}</DialogTitle>
-            <DialogDescription>Vergi oranı bilgilerini girin.</DialogDescription>
+            <DialogTitle>{editingId ? 'Grup Düzenle' : 'Yeni Müşteri Grubu'}</DialogTitle>
+            <DialogDescription>Grup bilgilerini girin.</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="name">Ad *</Label>
-                <Input
-                  id="name"
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="Örn: KDV %18"
-                  required
-                />
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-9 space-y-2">
+                <Label htmlFor="name">Grup Adı *</Label>
+                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Perakende" required />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="value">Oran (%)</Label>
-                <Input
-                  id="value"
-                  type="number"
-                  step={1}
-                  min="0"
-                  value={form.value || ''}
-                  onChange={(e) => setForm((f) => ({ ...f, value: parseFloat(e.target.value) || 0 }))}
-                  placeholder="0"
-                />
+              <div className="col-span-3 space-y-2">
+                <Label htmlFor="code">Kod</Label>
+                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: PR" />
               </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="description">Açıklama</Label>
-              <Input
-                id="description"
-                value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                placeholder="Opsiyonel açıklama"
-              />
+              <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
             </div>
+            <ColorPresetPicker
+              value={form.color}
+              onChange={(color) => setForm((f) => ({ ...f, color }))}
+              label="Renk"
+            />
             <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">

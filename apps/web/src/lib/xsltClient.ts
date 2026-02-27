@@ -250,7 +250,8 @@ function isHtmlOutput(s: string): boolean {
 
 /**
  * HTML'i DOMPurify ile sanitize eder.
- * script, iframe, object, embed yasak; style izinli.
+ * script, iframe, object, embed yasak; style, html/head/body korunur.
+ * WHOLE_DOCUMENT: true → tam HTML yapısı (<html><head><body>) korunur.
  */
 export function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
@@ -258,7 +259,7 @@ export function sanitizeHtml(html: string): string {
     ADD_ATTR: ['target', 'rel', 'charset'],
     ADD_TAGS: ['style'],
     FORBID_TAGS: ['script', 'iframe', 'object', 'embed'],
-    FORCE_BODY: true,
+    WHOLE_DOCUMENT: true,
     ALLOW_UNKNOWN_PROTOCOLS: false,
   })
 }
@@ -335,10 +336,11 @@ export async function renderXmlToHtml(
   }
 
   const sanitized = sanitizeHtml(transformed)
-  const hasContent = (sanitized.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? '').replace(/<script[\s\S]*?<\/script>/gi, '').trim().length > 50
-
-  if (!hasContent) {
-    log('xsltClient', 'warn', 'XSLT çıktısı boş veya çok kısa')
+  // body varsa içeriğini al, yoksa tüm string (WHOLE_DOCUMENT ile body korunur ama her ihtimale karşı)
+  const bodyMatch = sanitized.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+  const checkContent = (bodyMatch?.[1] ?? sanitized).replace(/<script[\s\S]*?<\/script>/gi, '').trim()
+  if (checkContent.length < 50) {
+    log('xsltClient', 'warn', 'XSLT çıktısı boş veya çok kısa', { len: checkContent.length })
   }
 
   return { html: sanitized }

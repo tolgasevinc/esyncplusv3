@@ -59,6 +59,16 @@
   50% { transform: translateX(200%); }
 }
 
+@keyframes row-highlight {
+  0% { background-color: rgb(34 197 94 / 0.4); }
+  70% { background-color: rgb(34 197 94 / 0.15); }
+  100% { background-color: transparent; }
+}
+
+.animate-row-highlight {
+  animation: row-highlight 2.5s ease-out forwards;
+}
+
 @layer base {
   * {
     @apply border-border;

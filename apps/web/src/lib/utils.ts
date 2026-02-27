@@ -5,12 +5,33 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Türkçe karakterleri arama için normalize eder (ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c, İ→i) */
+export function normalizeForSearch(s: string): string {
+  return (s || '')
+    .toLowerCase()
+    .replace(/İ/g, 'i')
+    .replace(/ı/g, 'i')
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ö/g, 'o')
+    .replace(/ş/g, 's')
+    .replace(/ç/g, 'c')
+}
+
 /** Tarihi yerel formatta göster (tr-TR: gg.aa.yyyy) */
 export function formatDate(value: string | null | undefined): string {
   if (!value || value === '—') return '—'
   const d = new Date(value)
   if (isNaN(d.getTime())) return value
   return d.toLocaleDateString('tr-TR')
+}
+
+/** Virgül veya nokta ile girilen metni sayıya çevirir (16,50 veya 16.50 → 16.5) */
+export function parseDecimal(value: string): number {
+  if (!value || typeof value !== 'string') return 0
+  const normalized = value.trim().replace(',', '.')
+  const parsed = parseFloat(normalized)
+  return isNaN(parsed) ? 0 : parsed
 }
 
 /** Para değerini Türkçe formatta render et: binlik ayırıcı (.) ve ondalık ayırıcı (,) */
@@ -24,6 +45,30 @@ export function formatPriceWithSymbol(value: number | null | undefined, symbol?:
   const formatted = formatPrice(value)
   if (formatted === '—') return '—'
   return symbol ? `${formatted} ${symbol}`.trim() : formatted
+}
+
+/** Türkiye telefon formatı: XXX XXX XX XX (3-3-2-2, 10 rakam, örn: 532 207 12 53) */
+export function formatPhoneInput(value: string): string {
+  let digits = value.replace(/\D/g, '')
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1)
+  digits = digits.slice(0, 10)
+  if (digits.length <= 3) return digits
+  if (digits.length <= 6) return `${digits.slice(0, 3)} ${digits.slice(3)}`
+  if (digits.length <= 8) return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`
+  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 8)} ${digits.slice(8)}`
+}
+
+/** Telefon numarasını görüntüleme formatında döndürür (XXX XXX XX XX, 10 rakam) */
+export function formatPhone(value: string | null | undefined): string {
+  if (!value || value.trim() === '') return '—'
+  let digits = value.replace(/\D/g, '')
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1)
+  digits = digits.slice(0, 10)
+  if (digits.length === 0) return '—'
+  if (digits.length <= 3) return digits
+  if (digits.length <= 6) return `${digits.slice(0, 3)} ${digits.slice(3)}`
+  if (digits.length <= 8) return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`
+  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 8)} ${digits.slice(8)}`
 }
 
 /** Hex rengi rgba'ya çevirir (alpha 0-1) */
