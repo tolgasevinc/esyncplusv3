@@ -4197,7 +4197,7 @@ app.get('/api/app-settings', async (c) => {
     if (!category) return c.json({ error: 'category gerekli' }, 400);
 
     const { results } = await c.env.DB.prepare(
-      `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND status = 1`
+      `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
     ).bind(category).all();
 
     const settings: Record<string, string> = {};
@@ -4241,7 +4241,7 @@ app.put('/api/app-settings', async (c) => {
     }
 
     const { results } = await c.env.DB.prepare(
-      `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND status = 1`
+      `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
     ).bind(category.trim()).all();
 
     const out: Record<string, string> = {};
@@ -4251,6 +4251,418 @@ app.put('/api/app-settings', async (c) => {
     return c.json(out);
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== ENTEGRASYON BAĞLANTI TESTİ ==========
+app.post('/api/integrations/test/parasut', async (c) => {
+  try {
+    const body = await c.req.json<{
+      api_url?: string; api_key?: string;
+      PARASUT_CLIENT_ID?: string; PARASUT_CLIENT_SECRET?: string;
+      PARASUT_USERNAME?: string; PARASUT_PASSWORD?: string;
+    }>().catch(() => ({}));
+    const apiUrl = (body.api_url || '').trim().replace(/\/+$/, '') || 'https://api.parasut.com';
+    const base = apiUrl.startsWith('http') ? apiUrl : 'https://' + apiUrl;
+
+    let token: string | null = null;
+    if (body.api_key) {
+      token = body.api_key.trim();
+    } else if (body.PARASUT_CLIENT_ID && body.PARASUT_CLIENT_SECRET && body.PARASUT_USERNAME && body.PARASUT_PASSWORD) {
+      const tokenRes = await fetch(`${base}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'password',
+          client_id: body.PARASUT_CLIENT_ID,
+          client_secret: body.PARASUT_CLIENT_SECRET,
+          username: body.PARASUT_USERNAME,
+          password: body.PARASUT_PASSWORD,
+        }).toString(),
+      });
+      const tokenData = await tokenRes.json().catch(() => ({}));
+      token = (tokenData as { access_token?: string }).access_token || null;
+      if (!token) {
+        const err = (tokenData as { error_description?: string; error?: string }).error_description
+          || (tokenData as { error_description?: string; error?: string }).error
+          || `Token alınamadı (HTTP ${tokenRes.status})`;
+        return c.json({ ok: false, error: err }, 400);
+      }
+    }
+    if (!token) return c.json({ ok: false, error: 'API Key veya OAuth bilgileri (Client ID, Secret, Kullanıcı, Şifre) gerekli' }, 400);
+
+    const testUrl = `${base}/v4/companies`;
+    const res = await fetch(testUrl, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json',
+      },
+    });
+    if (res.ok) return c.json({ ok: true, message: 'Bağlantı başarılı' });
+    const errText = await res.text();
+    let errMsg = `HTTP ${res.status}`;
+    try {
+      const errJson = JSON.parse(errText) as { error?: string; message?: string };
+      errMsg = errJson.error || errJson.message || errMsg;
+    } catch { /* ignore */ }
+    return c.json({ ok: false, error: errMsg }, 400);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+app.post('/api/integrations/test/opencart', async (c) => {
+  try {
+    const body = await c.req.json<{
+      store_url?: string; auth_type?: string; secret_key?: string;
+      client_id?: string; client_secret?: string; language?: string;
+      api_format?: string;
+    }>().catch(() => ({}));
+    let storeUrl = (body.store_url || '').trim().replace(/\/+$/, '');
+    if (!storeUrl) return c.json({ ok: false, error: 'Mağaza URL gerekli' }, 400);
+    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
+    const authType = (body.auth_type || 'simple') as string;
+    const language = body.language || 'tr';
+    const headers: Record<string, string> = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'eSync+/1.0',
+      'X-Oc-Merchant-Language': language,
+    };
+    if (authType === 'oauth' && body.client_id && body.client_secret) {
+      const tokenRes = await fetch(`${storeUrl}/index.php?route=rest/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `grant_type=client_credentials&client_id=${encodeURIComponent(body.client_id)}&client_secret=${encodeURIComponent(body.client_secret)}`,
+      });
+      const tokenData = await tokenRes.json().catch(() => ({}));
+      const token = (tokenData as { access_token?: string; token?: string }).access_token || (tokenData as { access_token?: string; token?: string }).token;
+      if (!token) {
+        const err = (tokenData as { error?: string })?.error || `Token alınamadı (HTTP ${tokenRes.status})`;
+        return c.json({ ok: false, error: err }, 400);
+      }
+      headers['Authorization'] = `Bearer ${token}`;
+    } else if (body.secret_key) {
+      const sk = String(body.secret_key).trim();
+      headers['X-Oc-Restadmin-Id'] = sk;
+      headers['X-Oc-Merchant-Id'] = sk; // bazı eklentiler bu header'ı kullanır
+    } else {
+      return c.json({ ok: false, error: 'Simple auth için Secret Key, OAuth için Client ID/Secret gerekli' }, 400);
+    }
+    const apiFormat = (body.api_format || 'rest').toLowerCase();
+    const testUrls: { url: string; label: string }[] = [];
+    if (apiFormat === 'api_rest_admin') {
+      testUrls.push(
+        { url: `${storeUrl}/api/rest_admin/categories`, label: 'api/rest_admin/categories' },
+        { url: `${storeUrl}/api/rest_admin/products`, label: 'api/rest_admin/products' },
+      );
+    } else {
+      const routePrefixes = ['rest', 'rest_admin_api'];
+      const routes = ['product_admin/products', 'product_admin/product', 'product/product', 'category_admin/category', 'category/category'];
+      for (const prefix of routePrefixes) {
+        for (const route of routes) {
+          testUrls.push({ url: `${storeUrl}/index.php?route=${prefix}/${route}&limit=1`, label: `${prefix}/${route}` });
+        }
+      }
+    }
+    let lastRes: Response | null = null;
+    let lastErr = '';
+    let lastRoute = '';
+    let lastStatus = 0;
+    for (const { url: testUrl, label } of testUrls) {
+      lastRoute = label;
+      let reqUrl = testUrl + (testUrl.includes('?') ? '&' : '?') + 'limit=1';
+      if (apiFormat === 'api_rest_admin' && body.secret_key) {
+        const sk = encodeURIComponent(String(body.secret_key).trim());
+        reqUrl += `&key=${sk}&api_key=${sk}`;
+      }
+      lastRes = await fetch(reqUrl, { headers });
+        lastStatus = lastRes.status;
+        if (lastRes.ok) return c.json({ ok: true, message: 'Bağlantı başarılı' });
+        const errText = await lastRes.text();
+        const isHtml = errText.trim().startsWith('<') || errText.trim().startsWith('<!');
+        try {
+          if (isHtml) {
+            lastErr = lastStatus === 404
+              ? `Route ${lastRoute} bulunamadı (404). REST API eklentisi veya route yapısı farklı olabilir.`
+              : `Sunucu HTML döndü (${lastStatus}). ${lastRoute} erişilemiyor.`;
+          } else {
+            const errJson = JSON.parse(errText) as { error?: string | string[]; message?: string };
+            const errVal = errJson.error;
+            lastErr = (Array.isArray(errVal) ? errVal.join(', ') : errVal) || errJson.message || errText.slice(0, 200) || `HTTP ${lastStatus}`;
+          }
+        } catch {
+          lastErr = errText.slice(0, 200) || `HTTP ${lastStatus}`;
+        }
+        if (lastRes.status === 401 || lastRes.status === 403) {
+          lastErr = lastErr || (lastRes.status === 401
+            ? '401 Unauthorized — Secret Key veya kimlik bilgilerini kontrol edin'
+            : '403 Forbidden — API erişim iznini kontrol edin');
+          break;
+        }
+    }
+    return c.json({
+      ok: false,
+      error: lastErr || 'Bağlantı kurulamadı',
+      detail: lastRoute ? `Son denenen: ${lastRoute} (HTTP ${lastStatus})` : undefined,
+    }, 400);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+app.post('/api/integrations/test/opencart/categories', async (c) => {
+  try {
+    const body = await c.req.json<{
+      store_url?: string; auth_type?: string; secret_key?: string;
+      client_id?: string; client_secret?: string; language?: string;
+      api_format?: string;
+    }>().catch(() => ({}));
+    let storeUrl = (body.store_url || '').trim().replace(/\/+$/, '');
+    if (!storeUrl) return c.json({ ok: false, error: 'Mağaza URL gerekli' }, 400);
+    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
+    const authType = (body.auth_type || 'simple') as string;
+    const language = body.language || 'tr';
+    const headers: Record<string, string> = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'eSync+/1.0',
+      'X-Oc-Merchant-Language': language,
+    };
+    if (authType === 'oauth' && body.client_id && body.client_secret) {
+      const tokenRes = await fetch(`${storeUrl}/index.php?route=rest/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `grant_type=client_credentials&client_id=${encodeURIComponent(body.client_id)}&client_secret=${encodeURIComponent(body.client_secret)}`,
+      });
+      const tokenData = await tokenRes.json().catch(() => ({}));
+      const token = (tokenData as { access_token?: string; token?: string }).access_token || (tokenData as { access_token?: string; token?: string }).token;
+      if (!token) return c.json({ ok: false, error: 'Token alınamadı' }, 400);
+      headers['Authorization'] = `Bearer ${token}`;
+    } else if (body.secret_key) {
+      const sk = String(body.secret_key).trim();
+      headers['X-Oc-Restadmin-Id'] = sk;
+      headers['X-Oc-Merchant-Id'] = sk;
+    } else {
+      return c.json({ ok: false, error: 'Secret Key gerekli' }, 400);
+    }
+    const apiFormat = (body.api_format || 'rest').toLowerCase();
+    let categoriesUrl: string;
+    if (apiFormat === 'api_rest_admin') {
+      categoriesUrl = `${storeUrl}/api/rest_admin/categories?limit=20`;
+      if (body.secret_key) {
+        const sk = encodeURIComponent(String(body.secret_key).trim());
+        categoriesUrl += `&key=${sk}&api_key=${sk}`;
+      }
+    } else {
+      categoriesUrl = `${storeUrl}/index.php?route=rest/category_admin/category&limit=20`;
+    }
+    const res = await fetch(categoriesUrl, { headers });
+    const text = await res.text();
+    if (!res.ok) {
+      const isHtml = text.trim().startsWith('<') || text.trim().startsWith('<!');
+      const errMsg = isHtml ? `Sunucu HTML döndü (${res.status})` : (() => {
+        try {
+          const j = JSON.parse(text) as { error?: string | string[] };
+          const e = j.error;
+          return Array.isArray(e) ? e.join(', ') : e || text.slice(0, 200);
+        } catch { return text.slice(0, 200) || res.statusText; }
+      })();
+      return c.json({ ok: false, error: errMsg }, 400);
+    }
+    let data: unknown;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      return c.json({ ok: false, error: 'Yanıt parse edilemedi' }, 400);
+    }
+    return c.json({ ok: true, data });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+// ========== OPENCART PROXY ==========
+// OpenCart REST Admin API proxy - app_settings opencart config ile mağazaya istek iletir
+app.all('/api/opencart-proxy/*', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const path = c.req.path.replace(/^\/api\/opencart-proxy\//, '').replace(/\/$/, '');
+    if (!path) return c.json({ error: 'path gerekli' }, 400);
+    const method = c.req.method;
+    const fullUrl = new URL(c.req.url);
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'opencart' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+    ).all();
+    const config: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) config[r.key] = r.value ?? '';
+    }
+    let storeUrl = (config.store_url || '').trim().replace(/\/+$/, '');
+    if (!storeUrl) return c.json({ error: 'OpenCart mağaza URL yapılandırılmamış. Ayarlar > Entegrasyonlar > OpenCart' }, 400);
+    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
+    const apiFormat = (config.api_format || 'rest').toLowerCase();
+    const pathMap: Record<string, string> = {
+      'product_admin/product': 'products',
+      'product_admin/products': 'products',
+      'category_admin/category': 'categories',
+      'manufacturer_admin/manufacturer': 'manufacturers',
+      'filter_admin/filter': 'filters',
+      'attribute_admin/attribute': 'attributes',
+      'option_admin/option': 'options',
+    };
+    let resolvedPath = path;
+    if (apiFormat === 'api_rest_admin') {
+      const parts = path.split('/');
+      const base = parts.slice(0, 2).join('/');
+      const suffix = parts.slice(2).join('/');
+      resolvedPath = pathMap[base] ? pathMap[base] + (suffix ? '/' + suffix : '') : path;
+    }
+    let query = fullUrl.searchParams.toString();
+    const idParam = fullUrl.searchParams.get('id');
+    const url = apiFormat === 'api_rest_admin'
+      ? `${storeUrl}/api/rest_admin/${resolvedPath}`
+      : `${storeUrl}/index.php?route=rest/${path}`;
+    if (apiFormat === 'api_rest_admin' && config.secret_key) {
+      const sk = encodeURIComponent(String(config.secret_key).trim());
+      const keyParams = `key=${sk}&api_key=${sk}`;
+      query = query ? `${keyParams}&${query}` : keyParams;
+    }
+    const sep = url.includes('?') ? '&' : '?';
+    const finalUrl = query ? `${url}${sep}${query}` : url;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'eSync+/1.0',
+      'X-Oc-Merchant-Language': config.language || 'tr',
+    };
+    if ((config.auth_type || 'simple') === 'oauth' && config.client_id && config.client_secret) {
+      // OAuth: önce token al (client_credentials)
+      const tokenRes = await fetch(`${storeUrl}/index.php?route=rest/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `grant_type=client_credentials&client_id=${encodeURIComponent(config.client_id)}&client_secret=${encodeURIComponent(config.client_secret)}`,
+      });
+      const tokenData = await tokenRes.json().catch(() => ({}));
+      const accessToken = tokenData.access_token || tokenData.token;
+      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+    } else if (config.secret_key) {
+      const sk = String(config.secret_key).trim();
+      headers['X-Oc-Restadmin-Id'] = sk;
+      headers['X-Oc-Merchant-Id'] = sk; // bazı eklentiler bu header'ı kullanır
+    }
+
+    const opts: RequestInit = { method, headers };
+    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      try {
+        const body = await c.req.json() as Record<string, unknown>;
+        delete body.key;
+        delete body.api_key;
+        // Hem id hem product_id gönder — bazı eklentiler farklı alan okur
+        if (idParam) {
+          if (!body.id) body.id = idParam;
+          if (!body.product_id) body.product_id = idParam;
+        }
+        opts.body = JSON.stringify(body);
+      } catch { /* no body */ }
+    }
+
+    let res = await fetch(finalUrl, opts);
+    let text = await res.text();
+    let data: unknown;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      const isHtml = text.trim().startsWith('<') || text.trim().startsWith('<!');
+      const errMsg = isHtml
+        ? (res.status === 404
+          ? 'OpenCart mağazasında REST API bulunamadı (404). REST API eklentisi kurulu olmayabilir veya route yanlış.'
+          : `OpenCart mağazası HTML sayfası döndü (${res.status}). REST API erişilemiyor.`)
+        : (text.slice(0, 200) || res.statusText || 'OpenCart yanıtı parse edilemedi');
+      return c.json({ error: errMsg }, res.status);
+    }
+    const errVal = (data as { error?: string | string[] })?.error;
+    const errLower = (Array.isArray(errVal) ? errVal.join(' ') : String(errVal ?? '')).toLowerCase();
+    if (errLower.includes('invalid') && errLower.includes('secret key')) {
+      const hint = 'Ayarlar > Entegrasyonlar > OpenCart\'ta Secret Key\'in OpenCart REST API yapılandırmasıyla birebir aynı olduğunu kontrol edin.';
+      const errMsg = (Array.isArray(errVal) ? errVal.join(', ') : String(errVal ?? '')) + ' ' + hint;
+      return c.json({ error: errMsg }, 401);
+    }
+    const isProductNotFound = res.status === 404 || errLower.includes('product not found') || errLower.includes('not found');
+    const isInvalidId = !res.ok && (errLower.includes('invalid id') || errLower.includes('invalid') || errLower.length > 0);
+    const triedUrls: string[] = [finalUrl];
+    if (apiFormat === 'api_rest_admin' && (isProductNotFound || isInvalidId) && idParam && ['PUT', 'DELETE', 'PATCH'].includes(method) && path.startsWith('product_admin/')) {
+      const sk = config.secret_key ? encodeURIComponent(config.secret_key.trim()) : '';
+      const keyPart = sk ? `key=${sk}&api_key=${sk}` : '';
+      const altUrls = [
+        `${storeUrl}/api/rest_admin/products/${idParam}?${keyPart}`,
+        `${storeUrl}/api/rest_admin/product/${idParam}?${keyPart}`,
+        `${storeUrl}/api/rest_admin/product?id=${idParam}${keyPart ? '&' + keyPart : ''}`,
+        `${storeUrl}/api/rest_admin/products?product_id=${idParam}${keyPart ? '&' + keyPart : ''}`,
+        `${storeUrl}/index.php?route=rest/product_admin/products&id=${idParam}&${keyPart}`,
+        `${storeUrl}/index.php?route=rest/product_admin/product&id=${idParam}&${keyPart}`,
+        `${storeUrl}/index.php?route=api/rest_admin/products&id=${idParam}&${keyPart}`,
+      ];
+      for (const altUrl of altUrls) {
+        triedUrls.push(altUrl);
+        res = await fetch(altUrl, opts);
+        text = await res.text();
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          continue;
+        }
+        const altErr = (data as { error?: string | string[] })?.error;
+        const altErrLower = (Array.isArray(altErr) ? altErr.join(' ') : String(altErr ?? '')).toLowerCase();
+        const altIsOk = res.ok && !altErrLower.includes('product not found') && !altErrLower.includes('not found') && !altErrLower.includes('invalid id') && !altErrLower.includes('invalid or missing');
+        if (altIsOk) break;
+      }
+    }
+    // Hata durumunda denenen URL'leri hata mesajına ekle (debug için)
+    if (!res.ok) {
+      const d = data as { error?: string | string[]; debug_tried?: string[] };
+      d.debug_tried = triedUrls.map(u => {
+        const short = u.replace(/key=[^&]+/g, 'key=***').replace(/api_key=[^&]+/g, 'api_key=***');
+        return short;
+      });
+    }
+    return c.json(data, { status: res.status });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: msg }, 500);
+  }
+});
+
+// OpenCart görsel proxy - mağaza URL + image path
+app.get('/api/opencart-image', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const path = c.req.query('path');
+    if (!path) return c.json({ error: 'path gerekli' }, 400);
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'opencart' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+    ).all();
+    const config: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) config[r.key] = r.value ?? '';
+    }
+    let storeUrl = (config.store_url || '').trim().replace(/\/+$/, '');
+    if (!storeUrl) return c.json({ error: 'OpenCart yapılandırılmamış' }, 400);
+    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
+    const imgPath = path.startsWith('/') ? path.slice(1) : path;
+    const imgUrl = `${storeUrl}/${imgPath}`;
+    const res = await fetch(imgUrl, { headers: { 'User-Agent': 'eSync+/1.0' } });
+    if (!res.ok) return c.json({ error: 'Görsel alınamadı' }, 400);
+    const ct = res.headers.get('content-type') || 'image/png';
+    const buf = await res.arrayBuffer();
+    return new Response(buf, { headers: { 'Content-Type': ct } });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Proxy hatası' }, 500);
   }
 });
 

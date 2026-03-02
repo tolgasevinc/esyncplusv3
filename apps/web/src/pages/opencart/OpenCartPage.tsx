@@ -261,33 +261,55 @@ export function OpenCartPage() {
   }
 
   const handleProductSave = async () => {
-    if (!productDetailModal?.product_id || productSaving) return
+    const productId = productDetailModal?.product_id ?? (productDetailModal as { id?: number })?.id
+    if (!productId) {
+      toastError('Hata', 'Ürün ID bulunamadı')
+      return
+    }
+    if (productSaving) return
     setProductSaving(true)
     try {
-      const pd = productDetailModal.product_description
-      const productDescription: Record<string, { name?: string; description?: string; meta_title?: string; meta_description?: string; meta_keyword?: string }> = {}
+      // product_description'ı GET yanıtıyla aynı array formatında gönder
+      const pd = productDetailModal?.product_description
+      const productDescArr: { language_id: string; name: string; description?: string; meta_title?: string; meta_description?: string; meta_keyword?: string; tag?: string }[] = []
       if (pd && typeof pd === 'object') {
-        for (const [langId, desc] of Object.entries(pd)) {
+        for (const [key, desc] of Object.entries(pd)) {
           if (desc && typeof desc === 'object') {
-            productDescription[langId] = { ...desc, name: productForm.name ?? desc.name }
+            const d = desc as { language_id?: string | number; name?: string; description?: string; meta_title?: string; meta_description?: string; meta_keyword?: string; tag?: string }
+            const langId = d.language_id != null ? String(d.language_id) : key
+            productDescArr.push({
+              language_id: langId,
+              name: productForm.name ?? d.name ?? '',
+              description: d.description ?? '',
+              meta_title: d.meta_title ?? '',
+              meta_description: d.meta_description ?? '',
+              meta_keyword: d.meta_keyword ?? '',
+              tag: d.tag ?? '',
+            })
           }
         }
       }
-      if (Object.keys(productDescription).length === 0 && productForm.name) {
-        productDescription['1'] = { name: productForm.name }
+      if (productDescArr.length === 0 && productForm.name) {
+        productDescArr.push({ language_id: '1', name: productForm.name })
       }
+      const p = productDetailModal as Record<string, unknown>
       const body: Record<string, unknown> = {
-        model: productForm.model,
-        sku: productForm.sku,
-        price: productForm.price,
-        quantity: productForm.quantity,
-        status: productForm.status,
-        sort_order: productForm.sort_order,
+        id: Number(productId),
+        product_id: Number(productId),
+        model: productForm.model ?? '',
+        sku: productForm.sku ?? '',
+        price: Number(productForm.price ?? 0),
+        quantity: Number(productForm.quantity ?? 0),
+        status: Number(productForm.status ?? 0),
+        sort_order: Number(productForm.sort_order ?? 0),
+        product_description: productDescArr,
+        manufacturer_id: Number(p.manufacturer_id ?? 0),
+        tax_class_id: Number(p.tax_class_id ?? 0),
+        stock_status_id: Number(p.stock_status_id ?? 0),
+        subtract: Number(p.subtract ?? 1),
+        stores: (p.stores as number[]) ?? [0],
       }
-      if (Object.keys(productDescription).length > 0) {
-        body.product_description = productDescription
-      }
-      await opencartPut('product_admin/product', productDetailModal.product_id, body)
+      await opencartPut(`product_admin/products/${productId}`, productId, body)
       toastSuccess('Güncellendi', 'Ürün bilgileri kaydedildi')
       fetchProducts()
       closeProductDetail()
@@ -546,7 +568,15 @@ export function OpenCartPage() {
                   <Button variant="outline" onClick={closeProductDetail} disabled={productSaving}>
                     Kapat
                   </Button>
-                  <Button variant="save" onClick={handleProductSave}>
+                  <Button
+                    type="button"
+                    variant="save"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      handleProductSave()
+                    }}
+                  >
                     <Save className="h-4 w-4 mr-1.5" />
                     {productSaving ? 'Kaydediliyor...' : 'Kaydet'}
                   </Button>

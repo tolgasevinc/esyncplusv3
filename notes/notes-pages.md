@@ -3,6 +3,7 @@
 - Sayfalarda sabit header alanı olacak, solda gerekiyors geri butonu (ikon ve çerçeveli) sağında sayfa başlığı
   ve altında açıklaması olacak, sağ başta refresh butonu sadece ikon.
 - altta sabit bir footer alanı olacak.
+- Form/ayar sayfalarında Kaydet vb. butonlar footer'da sağa yaslı olacak (PageLayout `footerActions` prop ile).
 - tooltip butonlarda ve başka yerlerde hemen görünsün ve standarttan 1 birim büyük olsun
 
 **Kart/Liste Sayfaları**
@@ -22,6 +23,11 @@
 - product görselleri 1000x1000 olacak, kare olacak, kare değilse yukarıda açıklandığı gibi boyut değişimi yapılacak.
 - müşteri logosu görselleri 50x50 olacak
 - sidebar ikon görselleri 50x50 olacak
+
+**Tema**
+
+- Ayarlar › Genel Ayarlar › Tema sekmesinden arka plan ve buton renkleri özelleştirilebilir.
+- Kaydet, Kapat, Güncelle, Sil butonları için Button bileşeninde variant kullan: `variant="save"`, `variant="close"`, `variant="update"`, `variant="delete"`.
 
 **Modal Tassarım Kuralları**
 

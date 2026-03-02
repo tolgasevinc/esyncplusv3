@@ -27,9 +27,12 @@ async function opencartFetch<T = unknown>(
     throw parseErr
   }
   if (!res.ok) {
-    const errVal = (data as { error?: string | string[] })?.error
-    const err = Array.isArray(errVal) ? errVal.join(', ') : errVal || res.statusText || 'OpenCart hatası'
-    throw new Error(err)
+    const d = data as { error?: string | string[]; hint?: string; message?: string; debug_tried?: string[] }
+    const errVal = d.error
+    const hint = d.hint ? ` ${d.hint}` : ''
+    const tried = d.debug_tried?.length ? ` | Denenenler: ${d.debug_tried.join(' → ')}` : ''
+    const err = (Array.isArray(errVal) ? errVal.join(', ') : errVal || d.message || res.statusText || 'OpenCart hatası') + hint + tried
+    throw new Error(`[${res.status}] ${err}`)
   }
   // api_rest_admin: { success: 0, error: [...], data: [] } - HTTP 200 ile gelebilir
   const d = data as { success?: number; error?: string | string[]; data?: unknown }
@@ -228,9 +231,12 @@ export async function opencartPost(path: string, body: unknown): Promise<unknown
 }
 
 export async function opencartPut(path: string, id: number | string, body: unknown): Promise<unknown> {
+  const b = typeof body === 'object' && body ? body : {}
+  const bodyObj = { ...b } as Record<string, unknown>
+  if (!('product_id' in bodyObj)) bodyObj.id = id
   return opencartFetch(path, {
     method: 'PUT',
-    body: { ...(typeof body === 'object' && body ? body : {}), id },
+    body: bodyObj,
     searchParams: { id: String(id) },
   })
 }
