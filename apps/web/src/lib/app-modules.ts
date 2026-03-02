@@ -29,6 +29,7 @@ export const APP_MODULES: AppModule[] = [
   { id: 'ayarlar-veritabani', label: 'settings › database', path: '/ayarlar/veritabani' },
   { id: 'ayarlar-depolama', label: 'settings › storage', path: '/ayarlar/depolama' },
   { id: 'ayarlar-entegrasyonlar', label: 'settings › integrations', path: '/ayarlar/entegrasyonlar' },
+  { id: 'opencart', label: 'OpenCart', path: '/opencart' },
   { id: 'ayarlar-hesaplamalar', label: 'settings › calculations', path: '/ayarlar/hesaplamalar' },
   { id: 'ayarlar-erisim', label: 'settings › access', path: '/ayarlar/erisim' },
   { id: 'ayarlar-tedarikciler', label: 'settings › suppliers', path: '/ayarlar/tedarikciler' },

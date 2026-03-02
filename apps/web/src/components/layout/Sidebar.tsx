@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { API_URL } from '@/lib/api'
 
-const DIA_ICON_KEY = 'images/icons/1771670345789-yqkiwdl30bh.png'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { getSidebarMenus, getSidebarHeader, fetchSidebarMenus, fetchSidebarHeader, SEPARATOR_COLORS } from '@/lib/sidebar-menus'
 import { getModuleById } from '@/lib/app-modules'
@@ -68,12 +67,12 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex flex-col h-screen bg-sidebar text-sidebar-foreground border-r border-border transition-all duration-300',
+        'flex flex-col h-screen theme-sidebar-bg theme-sidebar-text border-r border-border transition-all duration-300',
         collapsed ? 'w-[60px]' : 'w-64'
       )}
     >
       {/* Header - Sticky */}
-        <header className={cn('sticky top-0 z-10 flex items-center justify-center p-4 bg-sidebar shrink-0 border-b border-gray-200 dark:border-gray-600 w-full')}>
+        <header className={cn('sticky top-0 z-10 flex items-center justify-center p-4 theme-sidebar-header-bg shrink-0 border-b border-gray-200 dark:border-gray-600 w-full')}>
         <Link to="/" className={cn('flex items-center gap-2 min-w-0', !collapsed && 'w-full justify-center')}>
           {header.logoPath ? (
             <div className="w-8 h-8 shrink-0 overflow-hidden flex items-center justify-center">
@@ -159,7 +158,7 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <footer className={cn('shrink-0 p-3 space-y-3 border-t border-gray-200 dark:border-gray-600 w-full')}>
+      <footer className={cn('shrink-0 p-3 space-y-3 border-t border-gray-200 dark:border-gray-600 theme-sidebar-footer-bg w-full')}>
         {/* Sidebar toggle - collapsed iken ayarlar üzerinde */}
         {collapsed && (
           <div className="flex justify-center">
@@ -203,12 +202,6 @@ export function Sidebar() {
                   Parametreler
                 </Link>
               </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <Link to="/dia">
-                  <Package className="w-4 h-4 mr-2" />
-                  Dia
-                </Link>
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
@@ -242,24 +235,6 @@ export function Sidebar() {
             >
               <SlidersHorizontal className="w-4 h-4" />
             </Link>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Link
-                  to="/dia"
-                  className={cn(
-                    buttonVariants({ variant: 'ghost', size: 'icon' }),
-                    location.pathname.startsWith('/dia') && 'bg-accent'
-                  )}
-                >
-                  <img
-                    src={`${API_URL}/storage/serve?key=${encodeURIComponent(DIA_ICON_KEY)}`}
-                    alt="Dia"
-                    className="w-4 h-4 object-contain"
-                  />
-                </Link>
-              </TooltipTrigger>
-              <TooltipContent>Dia</TooltipContent>
-            </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button

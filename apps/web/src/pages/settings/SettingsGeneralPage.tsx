@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Plus, Trash2, PanelLeft, GripVertical, Pencil, Minus } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Plus, Trash2, PanelLeft, GripVertical, Pencil, Minus, Palette } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -29,6 +29,14 @@ import { APP_MODULES } from '@/lib/app-modules'
 import { toastSuccess, toastError } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { ImageInput, getImageDisplayUrl } from '@/components/ImageInput'
+import { ColorPresetPicker } from '@/components/ColorPresetPicker'
+import {
+  fetchTheme,
+  saveTheme,
+  applyTheme,
+  type ThemeSettings,
+  type ThemeKeys,
+} from '@/lib/theme'
 
 function genId() {
   return `m-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
@@ -55,6 +63,15 @@ export function SettingsGeneralPage() {
   const [headerTitle, setHeaderTitle] = useState('')
   const [syncing, setSyncing] = useState(false)
 
+  const [theme, setTheme] = useState<ThemeSettings>({})
+  const [themeSaving, setThemeSaving] = useState(false)
+  const [activeTab, setActiveTab] = useState('genel')
+
+  const loadTheme = useCallback(async () => {
+    const t = await fetchTheme()
+    setTheme(t)
+  }, [])
+
   useEffect(() => {
     const load = async () => {
       const [menusData, headerData] = await Promise.all([
@@ -67,6 +84,10 @@ export function SettingsGeneralPage() {
     }
     load()
   }, [])
+
+  useEffect(() => {
+    loadTheme()
+  }, [loadTheme])
 
   const handleSaveMenus = (items: SidebarMenuItem[]) => {
     setMenus(items)
@@ -176,18 +197,49 @@ export function SettingsGeneralPage() {
     setDraggedIndex(null)
   }
 
+  const setThemeValue = (key: ThemeKeys, value: string) => {
+    const next = { ...theme }
+    if (value) next[key] = value
+    else delete next[key]
+    setTheme(next)
+    applyTheme(next)
+  }
+
+  const handleSaveTheme = async () => {
+    setThemeSaving(true)
+    try {
+      await saveTheme(theme)
+      toastSuccess('Kaydedildi', 'Tema ayarları güncellendi.')
+    } catch (err) {
+      toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setThemeSaving(false)
+    }
+  }
+
   return (
     <PageLayout
       title="Genel Ayarlar"
       description="Genel uygulama ayarları"
       backTo="/ayarlar"
+      footerActions={
+        activeTab === 'tema' ? (
+          <Button variant="save" onClick={handleSaveTheme} disabled={themeSaving}>
+            {themeSaving ? 'Kaydediliyor...' : 'Kaydet'}
+          </Button>
+        ) : undefined
+      }
     >
-      <Tabs defaultValue="genel" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="genel">Genel</TabsTrigger>
           <TabsTrigger value="sidebar" className="gap-1.5">
             <PanelLeft className="h-4 w-4" />
             Sidebar
+          </TabsTrigger>
+          <TabsTrigger value="tema" className="gap-1.5">
+            <Palette className="h-4 w-4" />
+            Tema
           </TabsTrigger>
         </TabsList>
         <TabsContent value="genel" className="mt-4">
@@ -202,6 +254,83 @@ export function SettingsGeneralPage() {
               <p className="text-muted-foreground">
                 Genel ayarlar formu burada yer alacak.
               </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="tema" className="mt-4 space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Renk Özelleştirme</CardTitle>
+              <CardDescription>
+                Arka plan ve buton renklerini özelleştirin. Boş bırakırsanız varsayılan tema kullanılır.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div>
+                <h4 className="font-medium mb-3">Arka Planlar</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  <ColorPresetPicker
+                    label="Sayfa arkaplan"
+                    value={theme.page_background ?? ''}
+                    onChange={(v) => setThemeValue('page_background', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Sidebar arkaplan"
+                    value={theme.sidebar_background ?? ''}
+                    onChange={(v) => setThemeValue('sidebar_background', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Sidebar metin"
+                    value={theme.sidebar_text ?? ''}
+                    onChange={(v) => setThemeValue('sidebar_text', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Sidebar header arkaplan"
+                    value={theme.sidebar_header_background ?? ''}
+                    onChange={(v) => setThemeValue('sidebar_header_background', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Sidebar footer arkaplan"
+                    value={theme.sidebar_footer_background ?? ''}
+                    onChange={(v) => setThemeValue('sidebar_footer_background', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Body arkaplan"
+                    value={theme.body_background ?? ''}
+                    onChange={(v) => setThemeValue('body_background', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Footer arkaplan"
+                    value={theme.footer_background ?? ''}
+                    onChange={(v) => setThemeValue('footer_background', v)}
+                  />
+                </div>
+              </div>
+              <div>
+                <h4 className="font-medium mb-3">Buton Renkleri</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <ColorPresetPicker
+                    label="Kaydet butonu"
+                    value={theme.btn_save ?? ''}
+                    onChange={(v) => setThemeValue('btn_save', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Kapat butonu"
+                    value={theme.btn_close ?? ''}
+                    onChange={(v) => setThemeValue('btn_close', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Güncelle butonu"
+                    value={theme.btn_update ?? ''}
+                    onChange={(v) => setThemeValue('btn_update', v)}
+                  />
+                  <ColorPresetPicker
+                    label="Sil butonu"
+                    value={theme.btn_delete ?? ''}
+                    onChange={(v) => setThemeValue('btn_delete', v)}
+                  />
+                </div>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -540,10 +669,10 @@ export function SettingsGeneralPage() {
                         )}
                       </div>
                       <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditItem(null)}>
+                        <Button variant="close" onClick={() => setEditItem(null)}>
                           İptal
                         </Button>
-                        <Button onClick={handleSaveEdit}>
+                        <Button variant="save" onClick={handleSaveEdit}>
                           Kaydet
                         </Button>
                       </DialogFooter>
@@ -603,10 +732,10 @@ export function SettingsGeneralPage() {
                         </div>
                       </div>
                       <DialogFooter>
-                        <Button variant="outline" onClick={() => setAddSeparatorOpen(false)}>
+                        <Button variant="close" onClick={() => setAddSeparatorOpen(false)}>
                           İptal
                         </Button>
-                        <Button onClick={handleAddSeparator}>
+                        <Button variant="save" onClick={handleAddSeparator}>
                           Ekle
                         </Button>
                       </DialogFooter>

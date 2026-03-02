@@ -1,6 +1,7 @@
 import { Toaster } from 'sonner'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
+import { ThemeLoader } from '@/components/ThemeLoader'
 import { HomePage } from '@/pages/HomePage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ParametersPage } from '@/pages/ParametersPage'
@@ -32,13 +33,16 @@ import { SettingsAccessPage } from '@/pages/settings/SettingsAccessPage'
 import { SettingsSuppliersPage } from '@/pages/settings/SettingsSuppliersPage'
 import { SettingsDataTransferPage } from '@/pages/settings/SettingsDataTransferPage'
 import { SettingsFileManagerPage } from '@/pages/settings/SettingsFileManagerPage'
+import { OpenCartPage } from '@/pages/opencart/OpenCartPage'
 
 function App() {
+  const location = useLocation()
   return (
     <>
+      <ThemeLoader />
       <Toaster richColors position="top-center" />
       <AppLayout>
-      <Routes>
+      <Routes key={location.pathname}>
         <Route path="/" element={<HomePage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
@@ -75,6 +79,7 @@ function App() {
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/urunler" element={<Navigate to="/products" replace />} />
         <Route path="/e-documents" element={<EDocumentsPage />} />
+        <Route path="/opencart" element={<OpenCartPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppLayout>

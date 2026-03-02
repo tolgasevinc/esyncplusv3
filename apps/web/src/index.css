@@ -78,3 +78,49 @@
   }
 }
 
+/* Tema özelleştirmeleri - CSS değişkenleri (boşsa varsayılan kullanılır) */
+.theme-page-bg { background-color: var(--theme-page-bg, hsl(var(--background))); }
+.theme-body-bg { background-color: var(--theme-body-bg, hsl(var(--background))); }
+.theme-footer-bg { background-color: var(--theme-footer-bg, hsl(var(--background))); }
+.theme-sidebar-bg { background-color: var(--theme-sidebar-bg, hsl(var(--sidebar))); }
+.theme-sidebar-text { color: var(--theme-sidebar-text, hsl(var(--sidebar-foreground))); }
+.theme-sidebar-header-bg { background-color: var(--theme-sidebar-header-bg, hsl(var(--sidebar))); }
+.theme-sidebar-footer-bg { background-color: var(--theme-sidebar-footer-bg, hsl(var(--sidebar))); }
+
+/* Buton tema renkleri - variant ile kullanılır */
+.btn-theme-save {
+  background-color: var(--theme-btn-save, hsl(var(--primary))) !important;
+  color: var(--theme-btn-save-fg, hsl(var(--primary-foreground))) !important;
+  border-color: var(--theme-btn-save, hsl(var(--primary))) !important;
+}
+.btn-theme-save:hover {
+  background-color: var(--theme-btn-save-hover, color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)) !important;
+  border-color: var(--theme-btn-save-hover, color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)) !important;
+}
+.btn-theme-close {
+  background-color: transparent !important;
+  color: var(--theme-btn-close, hsl(var(--foreground))) !important;
+  border-color: var(--theme-btn-close, hsl(var(--input))) !important;
+}
+.btn-theme-close:hover {
+  background-color: var(--theme-btn-close-hover, hsl(var(--accent))) !important;
+}
+.btn-theme-update {
+  background-color: var(--theme-btn-update, hsl(var(--primary))) !important;
+  color: var(--theme-btn-update-fg, hsl(var(--primary-foreground))) !important;
+  border-color: var(--theme-btn-update, hsl(var(--primary))) !important;
+}
+.btn-theme-update:hover {
+  background-color: var(--theme-btn-update-hover, color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)) !important;
+  border-color: var(--theme-btn-update-hover, color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)) !important;
+}
+.btn-theme-delete {
+  background-color: var(--theme-btn-delete, hsl(var(--destructive))) !important;
+  color: var(--theme-btn-delete-fg, hsl(var(--destructive-foreground))) !important;
+  border-color: var(--theme-btn-delete, hsl(var(--destructive))) !important;
+}
+.btn-theme-delete:hover {
+  background-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
+  border-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
+}
+

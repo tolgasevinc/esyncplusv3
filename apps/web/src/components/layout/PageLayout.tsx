@@ -14,8 +14,10 @@ interface PageLayoutProps {
   showRefresh?: boolean
   /** Kart/Liste sayfaları: header sağ tarafı (arama, filtre, yeni, refresh, reset) */
   headerActions?: ReactNode
-  /** Kart/Liste sayfaları: footer içeriği (sayfalama, kayıt sayıları) */
+  /** Kart/Liste sayfaları: footer sol içeriği (sayfalama, kayıt sayıları) */
   footerContent?: ReactNode
+  /** Ayarlar/form sayfaları: footer sağ tarafı (kaydet vb. butonlar) */
+  footerActions?: ReactNode
   /** İçerik alanı ref (Sığdır hesaplaması için) */
   contentRef?: React.RefObject<HTMLDivElement>
   children: ReactNode
@@ -30,13 +32,14 @@ export function PageLayout({
   showRefresh = false,
   headerActions,
   footerContent,
+  footerActions,
   contentRef,
   children,
 }: PageLayoutProps) {
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Sabit Header */}
-      <header className="shrink-0 flex items-start justify-between gap-4 p-4 border-b bg-background">
+      <header className="shrink-0 flex items-start justify-between gap-4 p-4 border-b theme-page-bg">
         <div className="flex items-center gap-4 min-w-0">
           {logo && (
             <div className="shrink-0 w-9 h-9 flex items-center justify-center overflow-hidden rounded-lg bg-muted">
@@ -73,24 +76,19 @@ export function PageLayout({
       </header>
 
       {/* Scrollable Content */}
-      <div ref={contentRef} className="flex-1 overflow-auto p-4">
+      <div ref={contentRef} className="flex-1 overflow-auto p-4 theme-page-bg">
         {children}
       </div>
 
-      {/* Sabit Footer */}
-      <footer className="shrink-0 border-t bg-background px-4 py-2 flex items-center justify-between gap-4">
-        {footerContent ? (
-          <>
-            <div className="flex-1 min-w-0">{footerContent}</div>
-            <div className="text-xs text-muted-foreground shrink-0">
-              © {new Date().getFullYear()} eSync+
-            </div>
-          </>
-        ) : (
-          <div className="text-xs text-muted-foreground">
+      {/* Sabit Footer - sol: sayfalama/kayıt sayıları, sağ: kaydet vb. butonlar */}
+      <footer className="shrink-0 border-t theme-footer-bg px-4 py-2 flex items-center justify-between gap-4">
+        <div className="flex-1 min-w-0">{footerContent}</div>
+        <div className="flex items-center gap-2 shrink-0">
+          {footerActions}
+          <span className="text-xs text-muted-foreground">
             © {new Date().getFullYear()} eSync+
-          </div>
-        )}
+          </span>
+        </div>
       </footer>
     </div>
   )

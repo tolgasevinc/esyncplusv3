@@ -1,13 +1,16 @@
 /** API base URL - trailing slash kaldırılır (çift slash sorununu önler) */
 export const API_URL = (import.meta.env.VITE_API_URL || 'https://api.e-syncplus.com').replace(/\/+$/, '')
 
-/** Response'u JSON olarak parse eder. Sunucu JSON dışı (404, 500 HTML vb.) dönerse hata fırlatır. */
+/** Response'u JSON olarak parse eder. HTML dönerse anlamlı hata fırlatır. */
 export async function parseJsonResponse<T = unknown>(res: Response): Promise<T> {
   const text = await res.text()
+  const trimmed = text.trim()
+  if (trimmed.startsWith('<') || trimmed.startsWith('<!')) {
+    throw new Error(`API HTML döndü (${res.status}) — Sunucu erişilemiyor veya yol yanlış. URL: ${res.url}`)
+  }
   try {
-    return (text ? JSON.parse(text) : {}) as T
+    return (trimmed ? JSON.parse(trimmed) : {}) as T
   } catch {
-    const msg = text?.slice(0, 200) || res.statusText || `HTTP ${res.status}`
-    throw new Error(msg)
+    throw new Error(trimmed.slice(0, 150) || res.statusText || `HTTP ${res.status}`)
   }
 }
