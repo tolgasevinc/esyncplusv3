@@ -33,8 +33,8 @@ import { SettingsAccessPage } from '@/pages/settings/SettingsAccessPage'
 import { SettingsSuppliersPage } from '@/pages/settings/SettingsSuppliersPage'
 import { SettingsDataTransferPage } from '@/pages/settings/SettingsDataTransferPage'
 import { SettingsFileManagerPage } from '@/pages/settings/SettingsFileManagerPage'
+import { SettingsExchangeRatesPage } from '@/pages/settings/SettingsExchangeRatesPage'
 import { OpenCartPage } from '@/pages/opencart/OpenCartPage'
-
 function App() {
   const location = useLocation()
   return (
@@ -42,7 +42,8 @@ function App() {
       <ThemeLoader />
       <Toaster richColors position="top-center" />
       <AppLayout>
-      <Routes key={location.pathname}>
+      <div key={location.key} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
@@ -54,6 +55,7 @@ function App() {
         <Route path="/ayarlar/tedarikciler" element={<SettingsSuppliersPage />} />
         <Route path="/ayarlar/veri-aktarimi" element={<SettingsDataTransferPage />} />
         <Route path="/ayarlar/dosya-yoneticisi" element={<SettingsFileManagerPage />} />
+        <Route path="/ayarlar/doviz-kurlari" element={<SettingsExchangeRatesPage />} />
         <Route path="/parametreler" element={<ParametersPage />} />
         <Route path="/parametreler/markalar" element={<MarkalarPage />} />
         <Route path="/parametreler/birimler" element={<BirimlerPage />} />
@@ -82,6 +84,7 @@ function App() {
         <Route path="/opencart" element={<OpenCartPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </div>
     </AppLayout>
     </>
   )

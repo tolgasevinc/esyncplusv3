@@ -5,17 +5,23 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-/** Türkçe karakterleri arama için normalize eder (ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c, İ→i) */
+/** Türkçe karakterleri arama için normalize eder. toLowerCase öncesi replace ile İ/ı sorunu önlenir. */
 export function normalizeForSearch(s: string): string {
   return (s || '')
-    .toLowerCase()
     .replace(/İ/g, 'i')
+    .replace(/I/g, 'i')
     .replace(/ı/g, 'i')
+    .replace(/Ğ/g, 'g')
     .replace(/ğ/g, 'g')
+    .replace(/Ü/g, 'u')
     .replace(/ü/g, 'u')
+    .replace(/Ö/g, 'o')
     .replace(/ö/g, 'o')
+    .replace(/Ş/g, 's')
     .replace(/ş/g, 's')
+    .replace(/Ç/g, 'c')
     .replace(/ç/g, 'c')
+    .toLowerCase()
 }
 
 /** Tarihi yerel formatta göster (tr-TR: gg.aa.yyyy) */

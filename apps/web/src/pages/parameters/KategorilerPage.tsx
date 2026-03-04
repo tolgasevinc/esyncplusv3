@@ -280,12 +280,15 @@ export function KategorilerPage() {
               </div>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" onClick={() => setGroupModalOpen(true)}>
+                  <Button variant="outline" size="icon" onClick={() => openNew()}>
                     <Plus className="h-4 w-4" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Yeni grup</TooltipContent>
+                <TooltipContent>Yeni kategori</TooltipContent>
               </Tooltip>
+              <Button variant="ghost" size="sm" onClick={() => setGroupModalOpen(true)}>
+                Grup ekle
+              </Button>
               {hasFilter && (
                 <Tooltip>
                   <TooltipTrigger asChild>

@@ -1,0 +1,48 @@
+---
+description: notes-pages.md'deki tüm UI/sayfa tasarım kuralları
+globs: apps/web/src/**/*.tsx
+alwaysApply: false
+---
+
+# UI Tasarım Kuralları
+
+`notes/notes-pages.md` dosyasındaki kurallara birebir uy. Aşağıdaki metin o dosyadan alınmıştır.
+
+## Sayfa Genel
+
+- Sayfalarda sabit header alanı olacak, solda gerekiyorsa geri butonu (ikon ve çerçeveli) sağında sayfa başlığı ve altında açıklaması olacak, sağ başta refresh butonu sadece ikon.
+- Altta sabit bir footer alanı olacak.
+- Form/ayar sayfalarında Kaydet vb. butonlar footer'da sağa yaslı olacak (PageLayout `footerActions` prop ile).
+- Tooltip butonlarda ve başka yerlerde hemen görünsün ve standarttan 1 birim büyük olsun.
+
+## Kart/Liste Sayfaları
+
+- Header'da sağa yaslı olarak yeni ve refresh butonları sadece ikon olarak bulunur. Solunda arama kutusu olur, gerekli sayfalarda toggle buton veya dropdown olarak filtre seçenekleri de olur.
+- Arama veya filtreleme işlemi yapıldığında refresh yanında reset butonu görünür (X ikonu ile).
+- Tablo ve liste içeren sayfaların footer alanında solda sayfalama ve kayıt sayıları (toplam ve gösterilen) olur.
+- Satırlarda işlem butonu olmayacak, satırlara tıkladığımızda edit modal açılsın.
+- Modal footer'da ikon olarak sil, kopyala, kaydet butonları olacak ve sağa yaslı olacak.
+- Modallarda aktif/pasif switch footer'da sola yaslı olmalı.
+- Sayfalama: < << 1 2 3 4 .. 20 >> > şeklinde olmalı.
+- Sayfada gösterilecek kayıt sayısı ayarı toggle buton olmalı: Sığdır, 10, 25, 50, 100. Varsayılan (default) Sığdır seçili yüklenecek.
+- Kayıt: X/Y (Gösterilen/Toplam) ve Sayfa A/B (Mevcut/Toplam).
+
+## Görsel İşlemleri
+
+- Kayıtlara görsel eklemek gerektiğinde textbox ile görsel linki gösterilecek, pasif olacak. Textbox'a bitişik ikon olarak yükle ve linkten indir butonları olacak.
+- Yükle ile lokalden bir görsel dosyasını seçebiliriz veya linkten indir ile açılan modaldan bir web linki girilecek textbox. Link yapıştırıldığında avatar boyutunda görseli gösteririz ve kurallara göre görseli işleyip storage alanında tanımlanmış olan klasöre kaydederiz. Linkini de textbox'a yapıştırırız.
+- Brand görselleri 50x50 px ve kare olacak. Kare değilse kısa kenarı uzun kenarın ölçüsüne büyüterek kare yapacağız. Büyütürken kenardaki renk kodu neyse eklediğimiz alanları o renk ile dolduracağız.
+- Product görselleri 1000x1000 olacak, kare olacak. Kare değilse yukarıda açıklandığı gibi boyut değişimi yapılacak.
+- Müşteri logosu görselleri 50x50 olacak.
+- Sidebar ikon görselleri 50x50 olacak.
+
+## Tema
+
+- Ayarlar › Genel Ayarlar › Tema sekmesinden arka plan ve buton renkleri özelleştirilebilir.
+- Kaydet, Kapat, Güncelle, Sil butonları için Button bileşeninde variant kullan: `variant="save"`, `variant="close"`, `variant="update"`, `variant="delete"`.
+
+## Modal Tasarım Kuralları
+
+- Header ve Footer alanı olacak.
+- Footer'da sola yaslı: sıra kontrolü ve hemen yanında aktif/pasif switch kontrolü.
+- Footer'da sağa yaslı: kaydet, kopyala, sil butonları, sadece ikon olarak. Butonlar gri çerçeveli olacak.

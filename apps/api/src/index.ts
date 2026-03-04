@@ -2,17 +2,23 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { createConnection } from 'mysql2/promise';
 
-/** Türkçe karakterleri arama için ASCII karşılıklarına çevirir (ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c, İ→i) */
+/** Türkçe karakterleri arama için ASCII karşılıklarına çevirir. toLowerCase öncesi replace ile İ/ı sorunu önlenir. */
 function normalizeForSearch(s: string): string {
   return (s || '')
-    .toLowerCase()
     .replace(/İ/g, 'i')
+    .replace(/I/g, 'i')
     .replace(/ı/g, 'i')
+    .replace(/Ğ/g, 'g')
     .replace(/ğ/g, 'g')
+    .replace(/Ü/g, 'u')
     .replace(/ü/g, 'u')
+    .replace(/Ö/g, 'o')
     .replace(/ö/g, 'o')
+    .replace(/Ş/g, 's')
     .replace(/ş/g, 's')
-    .replace(/ç/g, 'c');
+    .replace(/Ç/g, 'c')
+    .replace(/ç/g, 'c')
+    .toLowerCase();
 }
 
 /** LIKE pattern'da % ve _ literal olarak aranması için escape eder */
@@ -962,6 +968,10 @@ app.get('/api/products', async (c) => {
     const filter_sku = (c.req.query('filter_sku') || '').trim();
     const filter_brand_id = c.req.query('filter_brand_id');
     const filter_category_id = c.req.query('filter_category_id');
+    const filter_type_id_raw = c.req.query('filter_type_id');
+    const filter_type_id = Array.isArray(filter_type_id_raw)
+      ? (filter_type_id_raw as string[]).join(',')
+      : (filter_type_id_raw ?? '');
     const filter_no_image = c.req.query('filter_no_image') === '1';
     const sort_by = (c.req.query('sort_by') || 'sort_order').trim();
     const sort_order = (c.req.query('sort_order') || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
@@ -994,6 +1004,19 @@ app.get('/api/products', async (c) => {
     if (filter_category_id) {
       where += ' AND p.category_id = ?';
       params.push(Number(filter_category_id));
+    }
+    if (filter_type_id !== undefined && filter_type_id !== '') {
+      const ids = String(filter_type_id)
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n) && n > 0);
+      if (ids.length === 1) {
+        where += ' AND p.type_id = ?';
+        params.push(ids[0]);
+      } else if (ids.length > 1) {
+        where += ` AND p.type_id IN (${ids.map(() => '?').join(',')})`;
+        params.push(...ids);
+      }
     }
     if (filter_no_image) {
       where += " AND (COALESCE(TRIM(p.image), '') = '' OR TRIM(p.image) = '[]')";
@@ -1080,6 +1103,117 @@ app.get('/api/products/supplier-codes', async (c) => {
     ).bind(Number(brand_id)).all<{ code: string }>();
     const codes = (results || []).map((r) => String(r.code ?? '').trim()).filter(Boolean);
     return c.json({ codes });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Ana ürün tablosunda isimle kelime kelime arama (otomatik tamamlama için) */
+app.get('/api/products/search-by-name', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const q = (c.req.query('q') || '').trim();
+    const limit = Math.min(parseInt(c.req.query('limit') || '20') || 20, 50);
+    if (!q) return c.json({ products: [] });
+    const words = q.split(/\s+/).filter((w) => w.length > 0);
+    if (words.length === 0) return c.json({ products: [] });
+    const escapeClause = /[%_]/.test(q) ? " ESCAPE '\\'" : '';
+    const conditions = words
+      .map(() => `${sqlNormalizeCol('p.name')} LIKE ?${escapeClause}`)
+      .join(' AND ');
+    const params = words.map((w) => `%${escapeLikePattern(normalizeForSearch(w))}%`);
+    const { results } = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.sku, p.barcode, b.name as brand_name
+       FROM products p
+       LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
+       WHERE p.is_deleted = 0 AND ${conditions}
+       ORDER BY p.sort_order, p.id
+       LIMIT ?`
+    )
+      .bind(...params, limit)
+      .all<{ id: number; name: string; sku: string | null; barcode: string | null; brand_name: string | null }>();
+    return c.json({ products: results ?? [] });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/products/by-sku', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const sku = (c.req.query('sku') || '').trim();
+    if (!sku) return c.json(null);
+    const skuLower = sku.toLowerCase();
+    const productRow = await c.env.DB.prepare(
+      `SELECT id, name, sku, barcode, price, quantity, currency_id FROM products
+       WHERE is_deleted = 0 AND LOWER(TRIM(COALESCE(sku, ''))) = ?
+       ORDER BY id DESC LIMIT 1`
+    )
+      .bind(skuLower)
+      .first<{ id: number; name: string; sku: string; barcode: string | null; price: number; quantity: number; currency_id: number | null }>();
+    if (!productRow) return c.json(null);
+    const priceTypeSetting = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'products' AND key = 'fiyat_getir_price_type' AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).first<{ value: string | null }>();
+    const priceType = (priceTypeSetting?.value ?? '1').trim();
+    let price = productRow.price;
+    if (priceType !== 'products' && priceType !== '') {
+      const ptId = parseInt(priceType, 10);
+      if (!Number.isNaN(ptId) && ptId > 0) {
+        const ppRow = await c.env.DB.prepare(
+          `SELECT price FROM product_prices
+           WHERE product_id = ? AND price_type_id = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL)
+           LIMIT 1`
+        )
+          .bind(productRow.id, ptId)
+          .first<{ price: number }>();
+        if (ppRow != null && ppRow.price != null) price = ppRow.price;
+      }
+    }
+    return c.json({ ...productRow, price });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Ana üründen e-ticaret fiyatı, para birimi ve KDV oranını model/SKU ile getirir (OpenCart Getir butonu için) */
+app.get('/api/products/ecommerce-price-by-sku', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const code = (c.req.query('sku') || c.req.query('model') || '').trim();
+    if (!code) return c.json(null);
+    const codeLower = code.toLowerCase();
+    const productRow = await c.env.DB.prepare(
+      `SELECT p.id, p.tax_rate, p.currency_id FROM products p
+       WHERE p.is_deleted = 0 AND LOWER(TRIM(COALESCE(p.sku, ''))) = ?
+       ORDER BY p.id DESC LIMIT 1`
+    )
+      .bind(codeLower)
+      .first<{ id: number; tax_rate: number | null; currency_id: number | null }>();
+    if (!productRow) return c.json(null);
+    const ppRow = await c.env.DB.prepare(
+      `SELECT pp.price, pp.currency_id FROM product_prices pp
+       WHERE pp.product_id = ? AND pp.price_type_id = 1 AND pp.is_deleted = 0 AND (pp.status = 1 OR pp.status IS NULL)
+       LIMIT 1`
+    )
+      .bind(productRow.id)
+      .first<{ price: number; currency_id: number | null }>();
+    const price = ppRow?.price ?? 0;
+    const currencyId = ppRow?.currency_id ?? productRow.currency_id;
+    let currencySymbol = '₺';
+    if (currencyId) {
+      const curRow = await c.env.DB.prepare(
+        `SELECT symbol FROM product_currencies WHERE id = ? AND is_deleted = 0 LIMIT 1`
+      )
+        .bind(currencyId)
+        .first<{ symbol: string | null }>();
+      if (curRow?.symbol) currencySymbol = curRow.symbol;
+    }
+    return c.json({
+      price,
+      currency_symbol: currencySymbol,
+      tax_rate: productRow.tax_rate ?? 0,
+    });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -2206,11 +2340,16 @@ app.get('/api/customers', async (c) => {
     let where = 'WHERE is_deleted = 0 AND status = 1';
     const params: (string | number)[] = [];
     if (search) {
-      const n = escapeLikePattern(normalizeForSearch(search));
-      const pat = `%${n}%`;
-      const escapeClause = /[%_]/.test(n) ? " ESCAPE '\\'" : '';
-      where += ` AND (title LIKE ?${escapeClause} OR code LIKE ?${escapeClause} OR tax_no LIKE ?${escapeClause} OR email LIKE ?${escapeClause})`;
-      params.push(pat, pat, pat, pat);
+      const words = search.split(/\s+/).map((w) => w.trim()).filter(Boolean).slice(0, 8);
+      const escapeClause = " ESCAPE '\\'";
+      const wordConditions = words.map(() => {
+        return `(${sqlNormalizeCol('title')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('code')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('tax_no')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('email')} LIKE ?${escapeClause})`;
+      }).join(' AND ');
+      where += ` AND ${wordConditions}`;
+      for (const w of words) {
+        const pat = `%${escapeLikePattern(normalizeForSearch(w))}%`;
+        params.push(pat, pat, pat, pat);
+      }
     }
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM customers ${where}`
@@ -2653,12 +2792,60 @@ app.get('/api/offers', async (c) => {
       `SELECT COUNT(*) as total FROM offers o LEFT JOIN customers c ON o.customer_id = c.id AND c.is_deleted = 0 ${where}`
     ).bind(...params).first<{ total: number }>();
     const { results } = await c.env.DB.prepare(
-      `SELECT o.id, o.date, o.order_no, o.customer_id, o.contact_id, o.description, o.notes, o.discount_1, o.discount_2, o.discount_3, o.discount_4, o.status, o.created_at,
-       c.title as customer_title, c.code as customer_code
+      `SELECT o.id, o.date, o.order_no, o.customer_id, o.contact_id, o.description, o.notes, o.discount_1, o.discount_2, o.discount_3, o.discount_4, o.status, o.currency_id, o.exchange_rate,
+       c.title as customer_title, c.code as customer_code,
+       cur.code as currency_code, cur.symbol as currency_symbol,
+       (SELECT COALESCE(SUM(oi.amount * oi.unit_price - COALESCE(oi.line_discount, 0)), 0) FROM offer_items oi WHERE oi.offer_id = o.id AND oi.is_deleted = 0) as subtotal
        FROM offers o LEFT JOIN customers c ON o.customer_id = c.id AND c.is_deleted = 0
+       LEFT JOIN product_currencies cur ON o.currency_id = cur.id AND cur.is_deleted = 0
        ${where} ORDER BY o.date DESC, o.id DESC LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
-    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+    let exchangeRates: Record<string, number> = {};
+    try {
+      const ratesRow = await c.env.DB.prepare(
+        `SELECT value FROM app_settings WHERE category = 'parabirimleri' AND "key" = 'exchange_rates' AND is_deleted = 0 LIMIT 1`
+      ).first<{ value: string | null }>();
+      if (ratesRow?.value) {
+        const parsed = JSON.parse(ratesRow.value) as Record<string, number>;
+        if (parsed && typeof parsed === 'object') exchangeRates = parsed;
+      }
+    } catch { /* ignore */ }
+    const rows = (results || []) as { id: number; subtotal?: number; discount_1?: number; currency_id?: number | null; exchange_rate?: number | null; currency_code?: string | null; currency_symbol?: string | null }[];
+    const data = rows.map((r) => {
+      const subtotal = Number(r.subtotal) ?? 0;
+      const discountPct = Number(r.discount_1) ?? 0;
+      const totalAmount = subtotal * (1 - discountPct / 100);
+      const rate = r.currency_id && r.exchange_rate != null && r.exchange_rate > 0 ? Number(r.exchange_rate) : 1;
+      const code = (r.currency_code || 'TRY').toUpperCase();
+      const currentRate = (code === 'TRY' || code === 'TL' || code === '') ? 1 : (exchangeRates[code] ?? rate);
+      const total_tl_offer = totalAmount * rate;
+      const total_tl_current = totalAmount * currentRate;
+      const { subtotal: _s, ...rest } = r;
+      return { ...rest, total_amount: totalAmount, total_tl_offer, total_tl_current, currency_code: code || 'TRY' };
+    });
+    return c.json({ data, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/offers/check-order-no', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const order_no = (c.req.query('order_no') || '').trim();
+    const exclude_id = c.req.query('exclude_id');
+    if (!order_no) return c.json({ available: true });
+    let sql = `SELECT id FROM offers WHERE is_deleted = 0 AND order_no = ?`;
+    const params: (string | number)[] = [order_no];
+    if (exclude_id) {
+      const exId = parseInt(exclude_id, 10);
+      if (!isNaN(exId)) {
+        sql += ' AND id != ?';
+        params.push(exId);
+      }
+    }
+    const existing = await c.env.DB.prepare(sql).bind(...params).first();
+    return c.json({ available: !existing });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -2715,10 +2902,17 @@ app.post('/api/offers', async (c) => {
     const body = await c.req.json<{
       date?: string; order_no?: string; customer_id?: number | null; contact_id?: number | null;
       description?: string; notes?: string; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number;
+      currency_id?: number | null; exchange_rate?: number | null;
       items?: Array<{ type?: string; product_id?: number | null; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number; discount_5?: number }>;
     }>();
     const date = body.date?.trim() || new Date().toISOString().slice(0, 10);
     const order_no = body.order_no?.trim() || null;
+    const currency_id = body.currency_id ?? null;
+    const exchange_rate = body.exchange_rate != null && body.exchange_rate > 0 ? Number(body.exchange_rate) : 1;
+    if (order_no) {
+      const dup = await c.env.DB.prepare(`SELECT id FROM offers WHERE is_deleted = 0 AND order_no = ?`).bind(order_no).first();
+      if (dup) return c.json({ error: 'Bu teklif numarası zaten kullanılıyor' }, 400);
+    }
     const customer_id = body.customer_id ?? null;
     const contact_id = body.contact_id ?? null;
     const description = body.description?.trim() || null;
@@ -2729,9 +2923,9 @@ app.post('/api/offers', async (c) => {
     const discount_4 = body.discount_4 ?? 0;
     const uuid = crypto.randomUUID();
     await c.env.DB.prepare(
-      `INSERT INTO offers (date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
-    ).bind(date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4).run();
+      `INSERT INTO offers (date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, currency_id, exchange_rate, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, currency_id, exchange_rate).run();
     const offerId = (await c.env.DB.prepare(`SELECT last_insert_rowid() as id`).first()) as { id: number };
     const id = offerId.id;
     const items = body.items || [];
@@ -2760,10 +2954,18 @@ app.put('/api/offers/:id', async (c) => {
     const body = await c.req.json<{
       date?: string; order_no?: string; customer_id?: number | null; contact_id?: number | null;
       description?: string; notes?: string; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number;
+      currency_id?: number | null; exchange_rate?: number | null;
       items?: Array<{ type?: string; product_id?: number | null; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number; discount_5?: number }>;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM offers WHERE id = ? AND is_deleted = 0`).bind(id).first();
     if (!existing) return c.json({ error: 'Teklif bulunamadı' }, 404);
+    if (body.order_no !== undefined) {
+      const order_no = (body.order_no as string)?.trim() || null;
+      if (order_no) {
+        const dup = await c.env.DB.prepare(`SELECT id FROM offers WHERE is_deleted = 0 AND order_no = ? AND id != ?`).bind(order_no, id).first();
+        if (dup) return c.json({ error: 'Bu teklif numarası başka bir teklifte kullanılıyor' }, 400);
+      }
+    }
     const updates: string[] = [];
     const values: (string | number | null)[] = [];
     if (body.date !== undefined) { updates.push('date = ?'); values.push(body.date?.trim() || new Date().toISOString().slice(0, 10)); }
@@ -2776,6 +2978,8 @@ app.put('/api/offers/:id', async (c) => {
     if (body.discount_2 !== undefined) { updates.push('discount_2 = ?'); values.push(body.discount_2); }
     if (body.discount_3 !== undefined) { updates.push('discount_3 = ?'); values.push(body.discount_3); }
     if (body.discount_4 !== undefined) { updates.push('discount_4 = ?'); values.push(body.discount_4); }
+    if (body.currency_id !== undefined) { updates.push('currency_id = ?'); values.push(body.currency_id); }
+    if (body.exchange_rate !== undefined) { updates.push('exchange_rate = ?'); values.push(body.exchange_rate != null && body.exchange_rate > 0 ? body.exchange_rate : 1); }
     if (updates.length > 0) {
       updates.push("updated_at = datetime('now')");
       values.push(id);
@@ -3586,6 +3790,518 @@ app.get('/api/mysql/table-data/:table', async (c) => {
   }
 });
 
+// ========== OpenCart MySQL endpoints ==========
+async function getOpencartMysqlConfig(c: { env: Bindings }): Promise<Record<string, string> | null> {
+  const base = await getMysqlConfig(c);
+  if (!base) return null;
+  if (!c.env.DB) return null;
+  const { results } = await c.env.DB.prepare(
+    `SELECT value FROM app_settings WHERE category = 'opencart_mysql' AND "key" = 'database' AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+  ).all();
+  const dbVal = (results as { value: string | null }[])[0]?.value;
+  const database = (dbVal ?? 'otomati1_opencart').trim() || 'otomati1_opencart';
+  return { ...base, database };
+}
+
+async function getOpencartMysqlSettings(c: { env: Bindings }): Promise<{
+  store_url: string;
+  language_id: string;
+  store_id: string;
+  database: string;
+  table_prefix: string;
+} | null> {
+  if (!c.env.DB) return null;
+  const { results } = await c.env.DB.prepare(
+    `SELECT key, value FROM app_settings WHERE category = 'opencart_mysql' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+  ).all();
+  const settings: Record<string, string> = {};
+  for (const r of results as { key: string; value: string | null }[]) {
+    if (r.key) settings[r.key] = r.value ?? '';
+  }
+  const raw = (settings.table_prefix ?? 'oc_').trim() || 'oc_';
+  const tablePrefix = raw.replace(/[^a-zA-Z0-9_]/g, '') || 'oc';
+  return {
+    store_url: settings.store_url ?? '',
+    language_id: settings.language_id ?? '1',
+    store_id: settings.store_id ?? '0',
+    database: settings.database ?? 'otomati1_opencart',
+    table_prefix: tablePrefix.endsWith('_') ? tablePrefix : tablePrefix + '_',
+  };
+}
+
+app.get('/api/opencart-mysql/categories', async (c) => {
+  try {
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const prefix = settings?.table_prefix ?? 'oc_';
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT c.category_id, c.image, c.parent_id, c.sort_order, c.status, cd.name, cd.description
+         FROM ${prefix}category c
+         LEFT JOIN ${prefix}category_description cd ON c.category_id = cd.category_id AND cd.language_id = ?
+         ORDER BY c.sort_order, cd.name`,
+        [languageId]
+      );
+      return c.json({ categories: rows as Record<string, unknown>[] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/manufacturers', async (c) => {
+  try {
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const prefix = settings?.table_prefix ?? 'oc_';
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT manufacturer_id, name, image, sort_order FROM ${prefix}manufacturer ORDER BY sort_order, name`
+      );
+      return c.json({ manufacturers: rows as Record<string, unknown>[] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products', async (c) => {
+  try {
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const search = (c.req.query('search') || '').trim();
+    const filterName = (c.req.query('filter_name') || '').trim();
+    const filterModel = (c.req.query('filter_model') || '').trim();
+    const filterSku = (c.req.query('filter_sku') || '').trim();
+    const filterManufacturerId = c.req.query('filter_manufacturer_id');
+    const filterStatus = c.req.query('filter_status');
+    const filterMatchedSku = c.req.query('filter_matched_sku') === '1';
+    const sortBy = (c.req.query('sort_by') || 'p.product_id').trim();
+    const sortOrder = (c.req.query('sort_order') || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const limit = Math.min(parseInt(c.req.query('limit') || '50') || 50, 500);
+    const offset = Math.max(0, parseInt(c.req.query('offset') || '0') || 0);
+
+    let d1Skus: string[] = [];
+    if (c.env.DB) {
+      const { results: skuRows } = await c.env.DB.prepare(
+        `SELECT DISTINCT TRIM(sku) as sku FROM products WHERE is_deleted = 0 AND sku IS NOT NULL AND TRIM(sku) != ''`
+      ).all();
+      d1Skus = (skuRows as { sku: string }[]).map((r) => String(r.sku ?? '').trim()).filter(Boolean);
+    }
+    if (filterMatchedSku && d1Skus.length === 0) return c.json({ products: [], total: 0 });
+
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const where: string[] = ['1=1'];
+      const params: unknown[] = [];
+
+      const searchTerm = search || filterName;
+      if (searchTerm) {
+        const p = `%${escapeLikePattern(searchTerm)}%`;
+        where.push('(pd.name LIKE ? OR pd.description LIKE ? OR p.model LIKE ? OR p.sku LIKE ?)');
+        params.push(p, p, p, p);
+      }
+      if (filterModel) {
+        where.push('p.model LIKE ?');
+        params.push(`%${escapeLikePattern(filterModel)}%`);
+      }
+      if (filterSku) {
+        where.push('p.sku LIKE ?');
+        params.push(`%${escapeLikePattern(filterSku)}%`);
+      }
+      if (filterManufacturerId !== undefined && filterManufacturerId !== '') {
+        where.push('p.manufacturer_id = ?');
+        params.push(parseInt(filterManufacturerId) || 0);
+      }
+      if (filterStatus !== undefined && filterStatus !== '') {
+        where.push('p.status = ?');
+        params.push(parseInt(filterStatus) || 0);
+      }
+      if (filterMatchedSku && d1Skus.length > 0) {
+        const placeholders = d1Skus.map(() => 'TRIM(p.model) = ?').join(' OR ');
+        where.push(`(${placeholders})`);
+        params.push(...d1Skus);
+      }
+
+      const safeSortCols = ['p.product_id', 'pd.name', 'p.model', 'p.sku', 'p.price', 'p.quantity', 'p.status', 'm.name'];
+      const sortCol = safeSortCols.includes(sortBy) ? sortBy : 'p.product_id';
+
+      const whereSql = where.join(' AND ');
+      const [countRows] = await conn.execute(
+        `SELECT COUNT(*) as total FROM oc_product p
+         LEFT JOIN oc_product_description pd ON p.product_id = pd.product_id AND pd.language_id = ?
+         LEFT JOIN oc_manufacturer m ON p.manufacturer_id = m.manufacturer_id
+         WHERE ${whereSql}`,
+        [languageId, ...params]
+      );
+      const total = (countRows as { total: number }[])[0]?.total ?? 0;
+
+      const [rows] = await conn.execute(
+        `SELECT p.product_id, p.model, p.sku, p.price, p.quantity, p.image, p.manufacturer_id, p.status,
+                pd.name, pd.description, m.name as manufacturer_name
+         FROM oc_product p
+         LEFT JOIN oc_product_description pd ON p.product_id = pd.product_id AND pd.language_id = ?
+         LEFT JOIN oc_manufacturer m ON p.manufacturer_id = m.manufacturer_id
+         WHERE ${whereSql}
+         ORDER BY ${sortCol} ${sortOrder}
+         LIMIT ? OFFSET ?`,
+        [languageId, ...params, limit, offset]
+      );
+
+      const products = rows as Record<string, unknown>[];
+      const d1SkuSet = new Set(d1Skus);
+      const out = products.map((p) => ({
+        ...p,
+        matched: d1SkuSet.has(String(p.model ?? '').trim()),
+      }));
+      return c.json({ products: out, total });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/** OpenCart toplu fiyat güncelleme: ana ürünlerden e-ticaret fiyatını alıp yüzde uygulayarak OC fiyatlarını günceller */
+app.post('/api/opencart-mysql/products/bulk-update-prices', async (c) => {
+  try {
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = (await c.req.json()) as { percentage?: number };
+    const percentage = Number(body?.percentage ?? 0);
+    if (Number.isNaN(percentage) || percentage < -100 || percentage > 500) {
+      return c.json({ error: 'Geçersiz yüzde (-100 ile 500 arası)' }, 400);
+    }
+    const multiplier = 1 + percentage / 100;
+
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [ocRows] = await conn.execute(
+        `SELECT p.product_id, p.model, p.price FROM oc_product p WHERE TRIM(COALESCE(p.model, '')) != ''`
+      );
+      const ocProducts = ocRows as { product_id: number; model: string; price: number }[];
+
+      let updated = 0;
+      let failed = 0;
+      for (const oc of ocProducts) {
+        const modelVal = String(oc.model ?? '').trim();
+        if (!modelVal) continue;
+        const modelLower = modelVal.toLowerCase();
+        const ppRow = await c.env.DB.prepare(
+          `SELECT pp.price FROM product_prices pp
+           JOIN products p ON p.id = pp.product_id AND p.is_deleted = 0
+           WHERE LOWER(TRIM(COALESCE(p.sku, ''))) = ? AND pp.price_type_id = 1 AND pp.is_deleted = 0 AND (pp.status = 1 OR pp.status IS NULL)
+           LIMIT 1`
+        )
+          .bind(modelLower)
+          .first<{ price: number }>();
+        if (ppRow == null || ppRow.price == null) {
+          failed++;
+          continue;
+        }
+        const newPrice = Math.round(ppRow.price * multiplier * 100) / 100;
+        await conn.execute(`UPDATE oc_product SET price = ? WHERE product_id = ?`, [newPrice, oc.product_id]);
+        updated++;
+      }
+      return c.json({ updated, failed, total: ocProducts.length });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT p.*, pd.name, pd.description, pd.tag, pd.meta_title, pd.meta_description, pd.meta_keyword,
+                pd.seo_keyword, pd.seo_h1, pd.seo_h2, pd.seo_h3, pd.image_title, pd.image_alt, pd.bilgi
+         FROM oc_product p
+         LEFT JOIN oc_product_description pd ON p.product_id = pd.product_id AND pd.language_id = ?
+         WHERE p.product_id = ?`,
+        [languageId, id]
+      );
+      const product = (rows as Record<string, unknown>[])[0];
+      if (!product) return c.json({ error: 'Ürün bulunamadı' }, 404);
+      return c.json(product);
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.put('/api/opencart-mysql/products/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const body = (await c.req.json()) as Record<string, unknown>;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+
+      if (body.name != null) {
+        await conn.execute(
+          `UPDATE oc_product_description SET name = ? WHERE product_id = ? AND language_id = ?`,
+          [String(body.name), id, languageId]
+        );
+      }
+      const productUpdates: string[] = [];
+      const productValues: unknown[] = [];
+      if (body.model != null) { productUpdates.push('model = ?'); productValues.push(String(body.model)); }
+      if (body.sku != null) { productUpdates.push('sku = ?'); productValues.push(String(body.sku)); }
+      if (body.price != null) { productUpdates.push('price = ?'); productValues.push(Number(body.price)); }
+      if (body.quantity != null) { productUpdates.push('quantity = ?'); productValues.push(Number(body.quantity)); }
+      if (body.tax_class_id != null) { productUpdates.push('tax_class_id = ?'); productValues.push(Number(body.tax_class_id)); }
+      if (body.manufacturer_id != null) { productUpdates.push('manufacturer_id = ?'); productValues.push(Number(body.manufacturer_id)); }
+      if (body.status != null) { productUpdates.push('status = ?'); productValues.push(Number(body.status)); }
+      if (body.sort_order != null) { productUpdates.push('sort_order = ?'); productValues.push(Number(body.sort_order)); }
+      if (productUpdates.length > 0) {
+        productValues.push(id);
+        await conn.execute(
+          `UPDATE oc_product SET ${productUpdates.join(', ')} WHERE product_id = ?`,
+          productValues
+        );
+      }
+      if (Array.isArray(body.categories)) {
+        await conn.execute(`DELETE FROM oc_product_to_category WHERE product_id = ?`, [id]);
+        for (const catId of body.categories) {
+          const cid = Number(catId);
+          if (cid > 0) {
+            await conn.execute(
+              `INSERT INTO oc_product_to_category (product_id, category_id) VALUES (?, ?)`,
+              [id, cid]
+            );
+          }
+        }
+      }
+      return c.json({ ok: true });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id/attributes', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT pa.attribute_id, pa.text, ad.name
+         FROM oc_product_attribute pa
+         LEFT JOIN oc_attribute_description ad ON pa.attribute_id = ad.attribute_id AND ad.language_id = ?
+         WHERE pa.product_id = ?`,
+        [languageId, id]
+      );
+      return c.json({ attributes: rows as Record<string, unknown>[] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id/images', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT product_image_id, product_id, image, sort_order FROM oc_product_image WHERE product_id = ? ORDER BY sort_order`,
+        [id]
+      );
+      return c.json({ images: rows as Record<string, unknown>[] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id/filters', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT pf.filter_id, fd.name
+         FROM oc_product_filter pf
+         LEFT JOIN oc_filter_description fd ON pf.filter_id = fd.filter_id AND fd.language_id = ?
+         WHERE pf.product_id = ?`,
+        [languageId, id]
+      );
+      return c.json({ filters: rows as Record<string, unknown>[] });
+    } catch {
+      return c.json({ filters: [] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id/options', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT po.product_option_id, po.option_id, od.name AS option_name, po.value, po.required,
+                pov.product_option_value_id, pov.option_value_id, ovd.name AS option_value_name,
+                pov.quantity, pov.price, pov.price_prefix
+         FROM oc_product_option po
+         LEFT JOIN oc_option_description od ON po.option_id = od.option_id AND od.language_id = ?
+         LEFT JOIN oc_product_option_value pov ON po.product_option_id = pov.product_option_id
+         LEFT JOIN oc_option_value_description ovd ON pov.option_value_id = ovd.option_value_id AND ovd.language_id = ?
+         WHERE po.product_id = ?
+         ORDER BY po.product_option_id, pov.product_option_value_id`,
+        [languageId, languageId, id]
+      );
+      return c.json({ options: rows as Record<string, unknown>[] });
+    } catch {
+      return c.json({ options: [] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id/related', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT pr.related_id, pd.name
+         FROM oc_product_related pr
+         LEFT JOIN oc_product_description pd ON pr.related_id = pd.product_id AND pd.language_id = ?
+         WHERE pr.product_id = ?`,
+        [languageId, id]
+      );
+      return c.json({ related: rows as Record<string, unknown>[] });
+    } catch {
+      return c.json({ related: [] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/products/:id/categories', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const prefix = settings?.table_prefix ?? 'oc_';
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT ptc.category_id, cd.name, cd.description
+         FROM ${prefix}product_to_category ptc
+         LEFT JOIN ${prefix}category_description cd ON ptc.category_id = cd.category_id AND cd.language_id = ?
+         WHERE ptc.product_id = ?`,
+        [languageId, id]
+      );
+      return c.json({ categories: rows as Record<string, unknown>[] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.get('/api/opencart-mysql/attributes', async (c) => {
+  try {
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    const languageId = parseInt(settings?.language_id ?? '1') || 1;
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT a.attribute_id, a.attribute_group_id, ad.name
+         FROM oc_attribute a
+         LEFT JOIN oc_attribute_description ad ON a.attribute_id = ad.attribute_id AND ad.language_id = ?
+         ORDER BY a.attribute_group_id, ad.name`,
+        [languageId]
+      );
+      return c.json({ attributes: rows as Record<string, unknown>[] });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 app.get('/api/d1/tables', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'D1 bulunamadı' }, 500);
@@ -4312,360 +5028,6 @@ app.post('/api/integrations/test/parasut', async (c) => {
   }
 });
 
-app.post('/api/integrations/test/opencart', async (c) => {
-  try {
-    const body = await c.req.json<{
-      store_url?: string; auth_type?: string; secret_key?: string;
-      client_id?: string; client_secret?: string; language?: string;
-      api_format?: string;
-    }>().catch(() => ({}));
-    let storeUrl = (body.store_url || '').trim().replace(/\/+$/, '');
-    if (!storeUrl) return c.json({ ok: false, error: 'Mağaza URL gerekli' }, 400);
-    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
-    const authType = (body.auth_type || 'simple') as string;
-    const language = body.language || 'tr';
-    const headers: Record<string, string> = {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'eSync+/1.0',
-      'X-Oc-Merchant-Language': language,
-    };
-    if (authType === 'oauth' && body.client_id && body.client_secret) {
-      const tokenRes = await fetch(`${storeUrl}/index.php?route=rest/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `grant_type=client_credentials&client_id=${encodeURIComponent(body.client_id)}&client_secret=${encodeURIComponent(body.client_secret)}`,
-      });
-      const tokenData = await tokenRes.json().catch(() => ({}));
-      const token = (tokenData as { access_token?: string; token?: string }).access_token || (tokenData as { access_token?: string; token?: string }).token;
-      if (!token) {
-        const err = (tokenData as { error?: string })?.error || `Token alınamadı (HTTP ${tokenRes.status})`;
-        return c.json({ ok: false, error: err }, 400);
-      }
-      headers['Authorization'] = `Bearer ${token}`;
-    } else if (body.secret_key) {
-      const sk = String(body.secret_key).trim();
-      headers['X-Oc-Restadmin-Id'] = sk;
-      headers['X-Oc-Merchant-Id'] = sk; // bazı eklentiler bu header'ı kullanır
-    } else {
-      return c.json({ ok: false, error: 'Simple auth için Secret Key, OAuth için Client ID/Secret gerekli' }, 400);
-    }
-    const apiFormat = (body.api_format || 'rest').toLowerCase();
-    const testUrls: { url: string; label: string }[] = [];
-    if (apiFormat === 'api_rest_admin') {
-      testUrls.push(
-        { url: `${storeUrl}/api/rest_admin/categories`, label: 'api/rest_admin/categories' },
-        { url: `${storeUrl}/api/rest_admin/products`, label: 'api/rest_admin/products' },
-      );
-    } else {
-      const routePrefixes = ['rest', 'rest_admin_api'];
-      const routes = ['product_admin/products', 'product_admin/product', 'product/product', 'category_admin/category', 'category/category'];
-      for (const prefix of routePrefixes) {
-        for (const route of routes) {
-          testUrls.push({ url: `${storeUrl}/index.php?route=${prefix}/${route}&limit=1`, label: `${prefix}/${route}` });
-        }
-      }
-    }
-    let lastRes: Response | null = null;
-    let lastErr = '';
-    let lastRoute = '';
-    let lastStatus = 0;
-    for (const { url: testUrl, label } of testUrls) {
-      lastRoute = label;
-      let reqUrl = testUrl + (testUrl.includes('?') ? '&' : '?') + 'limit=1';
-      if (apiFormat === 'api_rest_admin' && body.secret_key) {
-        const sk = encodeURIComponent(String(body.secret_key).trim());
-        reqUrl += `&key=${sk}&api_key=${sk}`;
-      }
-      lastRes = await fetch(reqUrl, { headers });
-        lastStatus = lastRes.status;
-        if (lastRes.ok) return c.json({ ok: true, message: 'Bağlantı başarılı' });
-        const errText = await lastRes.text();
-        const isHtml = errText.trim().startsWith('<') || errText.trim().startsWith('<!');
-        try {
-          if (isHtml) {
-            lastErr = lastStatus === 404
-              ? `Route ${lastRoute} bulunamadı (404). REST API eklentisi veya route yapısı farklı olabilir.`
-              : `Sunucu HTML döndü (${lastStatus}). ${lastRoute} erişilemiyor.`;
-          } else {
-            const errJson = JSON.parse(errText) as { error?: string | string[]; message?: string };
-            const errVal = errJson.error;
-            lastErr = (Array.isArray(errVal) ? errVal.join(', ') : errVal) || errJson.message || errText.slice(0, 200) || `HTTP ${lastStatus}`;
-          }
-        } catch {
-          lastErr = errText.slice(0, 200) || `HTTP ${lastStatus}`;
-        }
-        if (lastRes.status === 401 || lastRes.status === 403) {
-          lastErr = lastErr || (lastRes.status === 401
-            ? '401 Unauthorized — Secret Key veya kimlik bilgilerini kontrol edin'
-            : '403 Forbidden — API erişim iznini kontrol edin');
-          break;
-        }
-    }
-    return c.json({
-      ok: false,
-      error: lastErr || 'Bağlantı kurulamadı',
-      detail: lastRoute ? `Son denenen: ${lastRoute} (HTTP ${lastStatus})` : undefined,
-    }, 400);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ ok: false, error: msg }, 500);
-  }
-});
-
-app.post('/api/integrations/test/opencart/categories', async (c) => {
-  try {
-    const body = await c.req.json<{
-      store_url?: string; auth_type?: string; secret_key?: string;
-      client_id?: string; client_secret?: string; language?: string;
-      api_format?: string;
-    }>().catch(() => ({}));
-    let storeUrl = (body.store_url || '').trim().replace(/\/+$/, '');
-    if (!storeUrl) return c.json({ ok: false, error: 'Mağaza URL gerekli' }, 400);
-    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
-    const authType = (body.auth_type || 'simple') as string;
-    const language = body.language || 'tr';
-    const headers: Record<string, string> = {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'eSync+/1.0',
-      'X-Oc-Merchant-Language': language,
-    };
-    if (authType === 'oauth' && body.client_id && body.client_secret) {
-      const tokenRes = await fetch(`${storeUrl}/index.php?route=rest/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `grant_type=client_credentials&client_id=${encodeURIComponent(body.client_id)}&client_secret=${encodeURIComponent(body.client_secret)}`,
-      });
-      const tokenData = await tokenRes.json().catch(() => ({}));
-      const token = (tokenData as { access_token?: string; token?: string }).access_token || (tokenData as { access_token?: string; token?: string }).token;
-      if (!token) return c.json({ ok: false, error: 'Token alınamadı' }, 400);
-      headers['Authorization'] = `Bearer ${token}`;
-    } else if (body.secret_key) {
-      const sk = String(body.secret_key).trim();
-      headers['X-Oc-Restadmin-Id'] = sk;
-      headers['X-Oc-Merchant-Id'] = sk;
-    } else {
-      return c.json({ ok: false, error: 'Secret Key gerekli' }, 400);
-    }
-    const apiFormat = (body.api_format || 'rest').toLowerCase();
-    let categoriesUrl: string;
-    if (apiFormat === 'api_rest_admin') {
-      categoriesUrl = `${storeUrl}/api/rest_admin/categories?limit=20`;
-      if (body.secret_key) {
-        const sk = encodeURIComponent(String(body.secret_key).trim());
-        categoriesUrl += `&key=${sk}&api_key=${sk}`;
-      }
-    } else {
-      categoriesUrl = `${storeUrl}/index.php?route=rest/category_admin/category&limit=20`;
-    }
-    const res = await fetch(categoriesUrl, { headers });
-    const text = await res.text();
-    if (!res.ok) {
-      const isHtml = text.trim().startsWith('<') || text.trim().startsWith('<!');
-      const errMsg = isHtml ? `Sunucu HTML döndü (${res.status})` : (() => {
-        try {
-          const j = JSON.parse(text) as { error?: string | string[] };
-          const e = j.error;
-          return Array.isArray(e) ? e.join(', ') : e || text.slice(0, 200);
-        } catch { return text.slice(0, 200) || res.statusText; }
-      })();
-      return c.json({ ok: false, error: errMsg }, 400);
-    }
-    let data: unknown;
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      return c.json({ ok: false, error: 'Yanıt parse edilemedi' }, 400);
-    }
-    return c.json({ ok: true, data });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ ok: false, error: msg }, 500);
-  }
-});
-
-// ========== OPENCART PROXY ==========
-// OpenCart REST Admin API proxy - app_settings opencart config ile mağazaya istek iletir
-app.all('/api/opencart-proxy/*', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const path = c.req.path.replace(/^\/api\/opencart-proxy\//, '').replace(/\/$/, '');
-    if (!path) return c.json({ error: 'path gerekli' }, 400);
-    const method = c.req.method;
-    const fullUrl = new URL(c.req.url);
-
-    const { results } = await c.env.DB.prepare(
-      `SELECT key, value FROM app_settings WHERE category = 'opencart' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
-    ).all();
-    const config: Record<string, string> = {};
-    for (const r of results as { key: string; value: string | null }[]) {
-      if (r.key) config[r.key] = r.value ?? '';
-    }
-    let storeUrl = (config.store_url || '').trim().replace(/\/+$/, '');
-    if (!storeUrl) return c.json({ error: 'OpenCart mağaza URL yapılandırılmamış. Ayarlar > Entegrasyonlar > OpenCart' }, 400);
-    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
-    const apiFormat = (config.api_format || 'rest').toLowerCase();
-    const pathMap: Record<string, string> = {
-      'product_admin/product': 'products',
-      'product_admin/products': 'products',
-      'category_admin/category': 'categories',
-      'manufacturer_admin/manufacturer': 'manufacturers',
-      'filter_admin/filter': 'filters',
-      'attribute_admin/attribute': 'attributes',
-      'option_admin/option': 'options',
-    };
-    let resolvedPath = path;
-    if (apiFormat === 'api_rest_admin') {
-      const parts = path.split('/');
-      const base = parts.slice(0, 2).join('/');
-      const suffix = parts.slice(2).join('/');
-      resolvedPath = pathMap[base] ? pathMap[base] + (suffix ? '/' + suffix : '') : path;
-    }
-    let query = fullUrl.searchParams.toString();
-    const idParam = fullUrl.searchParams.get('id');
-    const url = apiFormat === 'api_rest_admin'
-      ? `${storeUrl}/api/rest_admin/${resolvedPath}`
-      : `${storeUrl}/index.php?route=rest/${path}`;
-    if (apiFormat === 'api_rest_admin' && config.secret_key) {
-      const sk = encodeURIComponent(String(config.secret_key).trim());
-      const keyParams = `key=${sk}&api_key=${sk}`;
-      query = query ? `${keyParams}&${query}` : keyParams;
-    }
-    const sep = url.includes('?') ? '&' : '?';
-    const finalUrl = query ? `${url}${sep}${query}` : url;
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'User-Agent': 'eSync+/1.0',
-      'X-Oc-Merchant-Language': config.language || 'tr',
-    };
-    if ((config.auth_type || 'simple') === 'oauth' && config.client_id && config.client_secret) {
-      // OAuth: önce token al (client_credentials)
-      const tokenRes = await fetch(`${storeUrl}/index.php?route=rest/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `grant_type=client_credentials&client_id=${encodeURIComponent(config.client_id)}&client_secret=${encodeURIComponent(config.client_secret)}`,
-      });
-      const tokenData = await tokenRes.json().catch(() => ({}));
-      const accessToken = tokenData.access_token || tokenData.token;
-      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-    } else if (config.secret_key) {
-      const sk = String(config.secret_key).trim();
-      headers['X-Oc-Restadmin-Id'] = sk;
-      headers['X-Oc-Merchant-Id'] = sk; // bazı eklentiler bu header'ı kullanır
-    }
-
-    const opts: RequestInit = { method, headers };
-    if (['POST', 'PUT', 'PATCH'].includes(method)) {
-      try {
-        const body = await c.req.json() as Record<string, unknown>;
-        delete body.key;
-        delete body.api_key;
-        // Hem id hem product_id gönder — bazı eklentiler farklı alan okur
-        if (idParam) {
-          if (!body.id) body.id = idParam;
-          if (!body.product_id) body.product_id = idParam;
-        }
-        opts.body = JSON.stringify(body);
-      } catch { /* no body */ }
-    }
-
-    let res = await fetch(finalUrl, opts);
-    let text = await res.text();
-    let data: unknown;
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      const isHtml = text.trim().startsWith('<') || text.trim().startsWith('<!');
-      const errMsg = isHtml
-        ? (res.status === 404
-          ? 'OpenCart mağazasında REST API bulunamadı (404). REST API eklentisi kurulu olmayabilir veya route yanlış.'
-          : `OpenCart mağazası HTML sayfası döndü (${res.status}). REST API erişilemiyor.`)
-        : (text.slice(0, 200) || res.statusText || 'OpenCart yanıtı parse edilemedi');
-      return c.json({ error: errMsg }, res.status);
-    }
-    const errVal = (data as { error?: string | string[] })?.error;
-    const errLower = (Array.isArray(errVal) ? errVal.join(' ') : String(errVal ?? '')).toLowerCase();
-    if (errLower.includes('invalid') && errLower.includes('secret key')) {
-      const hint = 'Ayarlar > Entegrasyonlar > OpenCart\'ta Secret Key\'in OpenCart REST API yapılandırmasıyla birebir aynı olduğunu kontrol edin.';
-      const errMsg = (Array.isArray(errVal) ? errVal.join(', ') : String(errVal ?? '')) + ' ' + hint;
-      return c.json({ error: errMsg }, 401);
-    }
-    const isProductNotFound = res.status === 404 || errLower.includes('product not found') || errLower.includes('not found');
-    const isInvalidId = !res.ok && (errLower.includes('invalid id') || errLower.includes('invalid') || errLower.length > 0);
-    const triedUrls: string[] = [finalUrl];
-    if (apiFormat === 'api_rest_admin' && (isProductNotFound || isInvalidId) && idParam && ['PUT', 'DELETE', 'PATCH'].includes(method) && path.startsWith('product_admin/')) {
-      const sk = config.secret_key ? encodeURIComponent(config.secret_key.trim()) : '';
-      const keyPart = sk ? `key=${sk}&api_key=${sk}` : '';
-      const altUrls = [
-        `${storeUrl}/api/rest_admin/products/${idParam}?${keyPart}`,
-        `${storeUrl}/api/rest_admin/product/${idParam}?${keyPart}`,
-        `${storeUrl}/api/rest_admin/product?id=${idParam}${keyPart ? '&' + keyPart : ''}`,
-        `${storeUrl}/api/rest_admin/products?product_id=${idParam}${keyPart ? '&' + keyPart : ''}`,
-        `${storeUrl}/index.php?route=rest/product_admin/products&id=${idParam}&${keyPart}`,
-        `${storeUrl}/index.php?route=rest/product_admin/product&id=${idParam}&${keyPart}`,
-        `${storeUrl}/index.php?route=api/rest_admin/products&id=${idParam}&${keyPart}`,
-      ];
-      for (const altUrl of altUrls) {
-        triedUrls.push(altUrl);
-        res = await fetch(altUrl, opts);
-        text = await res.text();
-        try {
-          data = text ? JSON.parse(text) : {};
-        } catch {
-          continue;
-        }
-        const altErr = (data as { error?: string | string[] })?.error;
-        const altErrLower = (Array.isArray(altErr) ? altErr.join(' ') : String(altErr ?? '')).toLowerCase();
-        const altIsOk = res.ok && !altErrLower.includes('product not found') && !altErrLower.includes('not found') && !altErrLower.includes('invalid id') && !altErrLower.includes('invalid or missing');
-        if (altIsOk) break;
-      }
-    }
-    // Hata durumunda denenen URL'leri hata mesajına ekle (debug için)
-    if (!res.ok) {
-      const d = data as { error?: string | string[]; debug_tried?: string[] };
-      d.debug_tried = triedUrls.map(u => {
-        const short = u.replace(/key=[^&]+/g, 'key=***').replace(/api_key=[^&]+/g, 'api_key=***');
-        return short;
-      });
-    }
-    return c.json(data, { status: res.status });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ error: msg }, 500);
-  }
-});
-
-// OpenCart görsel proxy - mağaza URL + image path
-app.get('/api/opencart-image', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const path = c.req.query('path');
-    if (!path) return c.json({ error: 'path gerekli' }, 400);
-    const { results } = await c.env.DB.prepare(
-      `SELECT key, value FROM app_settings WHERE category = 'opencart' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
-    ).all();
-    const config: Record<string, string> = {};
-    for (const r of results as { key: string; value: string | null }[]) {
-      if (r.key) config[r.key] = r.value ?? '';
-    }
-    let storeUrl = (config.store_url || '').trim().replace(/\/+$/, '');
-    if (!storeUrl) return c.json({ error: 'OpenCart yapılandırılmamış' }, 400);
-    if (!storeUrl.startsWith('http')) storeUrl = 'https://' + storeUrl;
-    const imgPath = path.startsWith('/') ? path.slice(1) : path;
-    const imgUrl = `${storeUrl}/${imgPath}`;
-    const res = await fetch(imgUrl, { headers: { 'User-Agent': 'eSync+/1.0' } });
-    if (!res.ok) return c.json({ error: 'Görsel alınamadı' }, 400);
-    const ct = res.headers.get('content-type') || 'image/png';
-    const buf = await res.arrayBuffer();
-    return new Response(buf, { headers: { 'Content-Type': ct } });
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Proxy hatası' }, 500);
-  }
-});
-
 // Görsel URL proxy (CORS bypass - linkten indir için)
 app.get('/storage/proxy-image', async (c) => {
   try {
@@ -4690,4 +5052,173 @@ app.get('/storage/proxy-image', async (c) => {
   }
 });
 
-export default app;
+// ========== DÖVİZ KURLARI ==========
+const TCMB_URL = 'https://www.tcmb.gov.tr/kurlar/today.xml';
+
+/** Kayıtlı döviz kurları listesi (filtre: currency_code, date_from, date_to) */
+app.get('/api/exchange-rates', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const currencyCode = (c.req.query('currency_code') || '').trim().toUpperCase();
+    const dateFrom = (c.req.query('date_from') || '').trim();
+    const dateTo = (c.req.query('date_to') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(100, Math.max(10, parseInt(c.req.query('limit') || '50', 10)));
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    if (currencyCode) {
+      conditions.push('currency_code = ?');
+      params.push(currencyCode);
+    }
+    if (dateFrom) {
+      conditions.push("DATE(recorded_at) >= DATE(?)");
+      params.push(dateFrom);
+    }
+    if (dateTo) {
+      conditions.push("DATE(recorded_at) <= DATE(?)");
+      params.push(dateTo);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM exchange_rates ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const total = countRes?.total ?? 0;
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, currency_code, rate, recorded_at, source FROM exchange_rates ${where}
+       ORDER BY recorded_at DESC, id DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+
+    const currenciesRes = await c.env.DB.prepare(
+      `SELECT DISTINCT currency_code FROM exchange_rates ORDER BY currency_code`
+    ).all();
+    const currencies = (currenciesRes.results || []).map((r: { currency_code: string }) => r.currency_code);
+
+    return c.json({ data: results || [], total, page, limit, currencies });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Tek döviz kuru kaydı sil */
+app.delete('/api/exchange-rates/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = parseInt(c.req.param('id'), 10);
+    if (isNaN(id)) return c.json({ error: 'Geçersiz id' }, 400);
+    const res = await c.env.DB.prepare(`DELETE FROM exchange_rates WHERE id = ?`).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Kayıt bulunamadı' }, 404);
+    return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Toplu döviz kuru kaydı sil */
+app.delete('/api/exchange-rates', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ ids?: number[] }>().catch(() => ({}));
+    const ids = Array.isArray(body?.ids) ? body.ids.filter((x) => typeof x === 'number' && !isNaN(x)) : [];
+    if (ids.length === 0) return c.json({ error: 'ids dizisi gerekli' }, 400);
+    const placeholders = ids.map(() => '?').join(',');
+    const res = await c.env.DB.prepare(`DELETE FROM exchange_rates WHERE id IN (${placeholders})`).bind(...ids).run();
+    return c.json({ ok: true, deleted: res.meta.changes });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Manuel tetikleme: Döviz kurlarını TCMB'den çekip kaydet */
+app.post('/api/cron/exchange-rates', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    await runExchangeRatesCron(c.env.DB);
+    return c.json({ ok: true, message: 'Döviz kurları güncellendi' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Hata';
+    console.error('[Cron] Döviz kurları hatası:', err);
+    return c.json({ error: msg }, 500);
+  }
+});
+/** TCMB XML'den ForexSelling kurlarını parse eder. JPY 100 birim olduğu için 100'e böler. */
+async function fetchTcmbRates(): Promise<Record<string, number>> {
+  const res = await fetch(TCMB_URL);
+  if (!res.ok) throw new Error(`TCMB yanıt vermedi: ${res.status}`);
+  const xml = await res.text();
+  const rates: Record<string, number> = {};
+  // <Currency ... CurrencyCode="USD" ...> ... <ForexSelling>43.97</ForexSelling>
+  const currencyBlocks = xml.matchAll(/<Currency[^>]*CurrencyCode="([A-Z]{3})"[^>]*>([\s\S]*?)<\/Currency>/g);
+  for (const [, code, block] of currencyBlocks) {
+    const forexSelling = block.match(/<ForexSelling>([\d.]+)<\/ForexSelling>/);
+    const unitMatch = block.match(/<Unit>(\d+)<\/Unit>/);
+    const unit = unitMatch ? parseInt(unitMatch[1], 10) : 1;
+    if (forexSelling && code) {
+      const rate = parseFloat(forexSelling[1]) / unit;
+      if (!Number.isNaN(rate) && rate > 0) rates[code] = rate;
+    }
+  }
+  return rates;
+}
+
+/** Sistemde kaydedilen döviz kurları: sadece USD ve EUR */
+const SYSTEM_EXCHANGE_CURRENCIES = ['USD', 'EUR'];
+
+/** Cron: Döviz kurlarını TCMB'den çekip exchange_rates tablosuna ve app_settings'e yazar */
+async function runExchangeRatesCron(db: D1Database): Promise<void> {
+  const rates = await fetchTcmbRates();
+  if (Object.keys(rates).length === 0) return;
+
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  for (const code of SYSTEM_EXCHANGE_CURRENCIES) {
+    const rate = rates[code];
+    if (rate != null && rate > 0) {
+      await db.prepare(
+        `INSERT INTO exchange_rates (currency_code, rate, recorded_at, source) VALUES (?, ?, ?, 'tcmb')`
+      ).bind(code, rate, now).run();
+    }
+  }
+
+  const exchangeRates: Record<string, number> = {};
+  for (const code of SYSTEM_EXCHANGE_CURRENCIES) {
+    if (rates[code] != null) exchangeRates[code] = rates[code];
+  }
+  if (Object.keys(exchangeRates).length === 0) return;
+
+  const existing = await db.prepare(
+    `SELECT id FROM app_settings WHERE category = 'parabirimleri' AND "key" = 'exchange_rates' AND is_deleted = 0`
+  ).first();
+  const jsonVal = JSON.stringify(exchangeRates);
+  if (existing) {
+    await db.prepare(
+      `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE id = ?`
+    ).bind(jsonVal, (existing as { id: number }).id).run();
+  } else {
+    await db.prepare(
+      `INSERT INTO app_settings (category, "key", value) VALUES ('parabirimleri', 'exchange_rates', ?)`
+    ).bind(jsonVal).run();
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(
+    event: ScheduledEvent,
+    env: Bindings,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          if (!env.DB) return;
+          await runExchangeRatesCron(env.DB);
+        } catch (err) {
+          console.error('[Cron] Döviz kurları hatası:', err);
+        }
+      })(),
+    );
+  },
+};

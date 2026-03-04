@@ -89,6 +89,9 @@ interface BrandOption extends SelectOption {
 /** Bu tiplerde tedarikçi kodu aranmaz (paket, mamül, hizmet) */
 const SKIP_SUPPLIER_CODE_TYPE_CODES = ['PAK', 'MAM', 'HIZ', 'paket', 'mamul', 'hizmet']
 
+/** Ticari Mal seçildiğinde genişletilecek alt tipler (basit ürün + paket ürün) */
+const TICARI_MAL_CHILD_CODES = ['BASIT', 'PAKET', 'PAK']
+
 const IMAGE_SLOTS = 10
 
 function BrandLogoCell({
@@ -253,6 +256,7 @@ const productsListDefaults = {
   filterSku: '',
   filterBrandId: '' as string,
   filterCategoryId: '' as string,
+  filterTypeId: '' as string,
   filterNoImage: false,
   sortBy: 'sort_order' as SortBy,
   sortOrder: 'asc' as SortOrder,
@@ -263,7 +267,7 @@ const productsListDefaults = {
 
 export function ProductsPage() {
   const [listState, setListState] = usePersistedListState('products', productsListDefaults)
-  const { search, filterName, filterSku, filterBrandId, filterCategoryId, filterNoImage, sortBy, sortOrder, page, pageSize, fitLimit } = listState
+  const { search, filterName, filterSku, filterBrandId, filterCategoryId, filterTypeId, filterNoImage, sortBy, sortOrder, page, pageSize, fitLimit } = listState
   const [debouncedSearch, setDebouncedSearch] = useState(search)
   const [debouncedFilterName, setDebouncedFilterName] = useState(filterName)
   const [debouncedFilterSku, setDebouncedFilterSku] = useState(filterSku)
@@ -280,7 +284,7 @@ export function ProductsPage() {
   const [brands, setBrands] = useState<BrandOption[]>([])
   const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
   const [categories, setCategories] = useState<CategoryItem[]>([])
-  const [types, setTypes] = useState<{ id: number; name: string; code?: string; color?: string }[]>([])
+  const [types, setTypes] = useState<{ id: number; name: string; code?: string; color?: string; sort_order: number }[]>([])
   const [units, setUnits] = useState<SelectOption[]>([])
   const [currencies, setCurrencies] = useState<CurrencyOption[]>([])
   const [priceTypes, setPriceTypes] = useState<{ id: number; name: string; code?: string; sort_order: number }[]>([])
@@ -297,7 +301,7 @@ export function ProductsPage() {
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
   const imageUploadProductRef = useRef<Product | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterNoImage
+  const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterTypeId !== '' || filterNoImage
 
   useEffect(() => {
     const t = setTimeout(() => { setDebouncedSearch(search); setListState({ page: 1 }) }, 300)
@@ -322,7 +326,7 @@ export function ProductsPage() {
   }
 
   const handleResetFilters = () => {
-    setListState({ search: '', filterName: '', filterSku: '', filterBrandId: '', filterCategoryId: '', filterNoImage: false, page: 1 })
+    setListState({ search: '', filterName: '', filterSku: '', filterBrandId: '', filterCategoryId: '', filterTypeId: '', filterNoImage: false, page: 1 })
     setDebouncedSearch('')
     setDebouncedFilterName('')
     setDebouncedFilterSku('')
@@ -362,6 +366,21 @@ export function ProductsPage() {
     return t?.code ? SKIP_SUPPLIER_CODE_TYPE_CODES.some((c) => (c || '').toUpperCase() === (t.code || '').toUpperCase()) : false
   }, [types, form.type_id])
 
+  /** API'ye gönderilecek filter_type_id: Ticari Mal seçiliyse basit+paket tiplerinin ID'leri */
+  const effectiveFilterTypeId = useMemo(() => {
+    if (!filterTypeId) return ''
+    const selectedType = types.find((t) => String(t.id) === filterTypeId)
+    if (!selectedType) return filterTypeId
+    const nameLower = (selectedType.name || '').toLowerCase()
+    if (nameLower.includes('ticari') && nameLower.includes('mal')) {
+      const childIds = types
+        .filter((t) => TICARI_MAL_CHILD_CODES.some((c) => (t.code || '').toUpperCase() === c))
+        .map((t) => t.id)
+      return childIds.length > 0 ? childIds.join(',') : filterTypeId
+    }
+    return filterTypeId
+  }, [filterTypeId, types])
+
   const computeEcommercePrice = useCallback((price: number) => {
     const rule = calculationRules.find((r) => String(r.target) === '1')
     if (!rule || !rule.operations?.length) {
@@ -379,6 +398,7 @@ export function ProductsPage() {
       if (debouncedFilterSku) params.set('filter_sku', debouncedFilterSku)
       if (filterBrandId) params.set('filter_brand_id', filterBrandId)
       if (filterCategoryId) params.set('filter_category_id', filterCategoryId)
+      if (filterTypeId) params.set('filter_type_id', effectiveFilterTypeId)
       if (filterNoImage) params.set('filter_no_image', '1')
       const res = await fetch(`${API_URL}/api/products?${params}`)
       const json = await res.json()
@@ -393,7 +413,7 @@ export function ProductsPage() {
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [page, limit, sortBy, sortOrder, debouncedSearch, debouncedFilterName, debouncedFilterSku, filterBrandId, filterCategoryId, filterNoImage])
+  }, [page, limit, sortBy, sortOrder, debouncedSearch, debouncedFilterName, debouncedFilterSku, filterBrandId, filterCategoryId, effectiveFilterTypeId, filterNoImage])
 
   const lookupSupplierCodeRef = useRef<(() => Promise<void>) | null>(null)
   const lookupSupplierCode = useCallback(async () => {
@@ -534,7 +554,15 @@ export function ProductsPage() {
           color: x.color,
         }))
       )
-      setTypes((t.data || []).map((x: { id: number; name: string; code?: string; color?: string }) => ({ id: x.id, name: x.name, code: x.code, color: x.color })))
+      setTypes(
+        (t.data || []).map((x: { id: number; name: string; code?: string; color?: string; sort_order?: number }) => ({
+          id: x.id,
+          name: x.name,
+          code: x.code,
+          color: x.color,
+          sort_order: x.sort_order ?? 0,
+        }))
+      )
       setUnits((u.data || []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name })))
       setCurrencies((cur.data || []).map((x: { id: number; name: string; code?: string; symbol?: string; is_default?: number }) => ({ id: x.id, name: x.name, code: x.code, symbol: x.symbol, is_default: x.is_default })))
       setTaxRates((tax.data || []).map((x: { id: number; name: string; value: number }) => ({ id: x.id, name: x.name, value: x.value })))
@@ -577,7 +605,7 @@ export function ProductsPage() {
 
   useEffect(() => {
     fetchData()
-  }, [fetchData])
+  }, [fetchData, filterTypeId])
 
   useEffect(() => {
     const brandIds = new Set<number>()
@@ -937,14 +965,51 @@ export function ProductsPage() {
       headerActions={
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0">
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder="Ad, SKU veya barkod ara..."
                 value={search}
                 onChange={(e) => setListState({ search: e.target.value })}
-                className="pl-8 w-56 h-9"
+                className="pl-8 w-56 h-9 rounded-r-none border-r-0"
               />
+            </div>
+            <div
+              role="group"
+              aria-label="Ürün tipi filtresi"
+              className="inline-flex rounded-r-md border border-l-0 border-input bg-muted/30 p-0.5 shrink-0"
+            >
+              {[
+                { key: '', label: 'Tümü', color: undefined },
+                ...[...types]
+                  .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+                  .map((t) => ({ key: String(t.id), label: t.name, color: t.color })),
+              ].map(({ key, label, color }) => {
+                const isActive = filterTypeId === key
+                const bgStyle = isActive && color ? { backgroundColor: color, color: '#fff' } : undefined
+                return (
+                  <button
+                    key={key || 'all'}
+                    type="button"
+                    role="radio"
+                    aria-checked={isActive}
+                    aria-label={label}
+                    className={`h-9 px-2.5 text-xs font-medium transition-colors first:rounded-l-none last:rounded-r-md ${
+                      isActive
+                        ? color
+                          ? 'shadow-sm'
+                          : 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    style={bgStyle}
+                    onClick={() => setListState({ filterTypeId: key, page: 1 })}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
             </div>
             <Tooltip>
               <TooltipTrigger asChild>

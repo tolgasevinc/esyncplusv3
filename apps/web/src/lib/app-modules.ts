@@ -34,6 +34,7 @@ export const APP_MODULES: AppModule[] = [
   { id: 'ayarlar-erisim', label: 'settings › access', path: '/ayarlar/erisim' },
   { id: 'ayarlar-tedarikciler', label: 'settings › suppliers', path: '/ayarlar/tedarikciler' },
   { id: 'ayarlar-veri-aktarimi', label: 'settings › data-transfer', path: '/ayarlar/veri-aktarimi' },
+  { id: 'ayarlar-doviz-kurlari', label: 'settings › exchange-rates', path: '/ayarlar/doviz-kurlari' },
 ]
 
 export function getModuleById(id: string): AppModule | undefined {

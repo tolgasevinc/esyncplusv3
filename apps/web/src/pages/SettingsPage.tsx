@@ -9,6 +9,7 @@ import {
   Shield,
   Truck,
   ArrowRightLeft,
+  DollarSign,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
@@ -23,6 +24,7 @@ const settingsSections = [
   { id: 'erisim', title: 'Erişim', icon: Shield, path: '/ayarlar/erisim' },
   { id: 'tedarikciler', title: 'Tedarikçiler', icon: Truck, path: '/ayarlar/tedarikciler' },
   { id: 'veri-aktarimi', title: 'Veri Aktarımı', icon: ArrowRightLeft, path: '/ayarlar/veri-aktarimi' },
+  { id: 'doviz-kurlari', title: 'Döviz Kurları', icon: DollarSign, path: '/ayarlar/doviz-kurlari' },
 ]
 
 export function SettingsPage() {

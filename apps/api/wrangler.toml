@@ -9,6 +9,11 @@ database_name = "esync-db"
 database_id = "084b0070-ef9c-40f2-a34e-2a78356adb94"
 migrations_dir = "migrations"
 
+# Cron: Döviz kurları - sabah 10 ve akşam 16 (Türkiye saati, UTC+3)
+# 10:00 TR = 07:00 UTC, 16:00 TR = 13:00 UTC
+[triggers]
+crons = ["0 7 * * *", "0 13 * * *"]
+
 # R2 Storage - döküman, resim, video
 # Önce bucket oluşturun: npx wrangler r2 bucket create esyncplus-storage
 [[r2_buckets]]
