@@ -34,6 +34,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { API_URL } from '@/lib/api'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { cn } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
@@ -85,6 +86,8 @@ export function SettingsFileManagerPage() {
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<FileSortBy>('name')
   const [sortOrder, setSortOrder] = useState<FileSortOrder>('asc')
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; key: string | null }>({ open: false, key: null })
 
   const fetchFolders = useCallback(async (prefix = '') => {
     setLoadingFolders(true)
@@ -199,19 +202,28 @@ export function SettingsFileManagerPage() {
     )
   }
 
-  const handleDelete = async () => {
-    if (!previewItem?.key || !confirm('Bu dosyayı silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(key: string) {
+    setDeleteConfirm({ open: true, key })
+  }
+
+  async function executeDelete() {
+    const { key } = deleteConfirm
+    if (!key) return
+    setDeleting(true)
     try {
-      const res = await fetch(`${API_URL}/storage/delete?key=${encodeURIComponent(previewItem.key)}`, {
+      const res = await fetch(`${API_URL}/storage/delete?key=${encodeURIComponent(key)}`, {
         method: 'DELETE',
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Silinemedi')
       toastSuccess('Dosya silindi')
+      setDeleteConfirm({ open: false, key: null })
       setPreviewItem(null)
       if (selectedFolder) fetchContents(selectedFolder)
     } catch (err) {
       toastError(err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -584,7 +596,7 @@ export function SettingsFileManagerPage() {
           <DialogFooter className="flex-row justify-end gap-1 border-t px-4 py-2 shrink-0">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="outline" size="icon" onClick={handleDelete}>
+                <Button variant="outline" size="icon" onClick={() => previewItem?.key && openDeleteConfirm(previewItem.key)}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
@@ -625,6 +637,14 @@ export function SettingsFileManagerPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu dosyayı silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
 
       <Dialog open={!!actionMode} onOpenChange={(open) => !open && (setActionMode(null), setActionValue(''))}>
         <DialogContent className="max-w-md">

@@ -19,6 +19,7 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL } from '@/lib/api'
 import { formatPhone, formatPhoneInput } from '@/lib/utils'
 import { PhoneInput } from '@/components/PhoneInput'
@@ -133,6 +134,14 @@ export function CustomersPage() {
   const [editingAddressId, setEditingAddressId] = useState<number | null>(null)
   const [addressForm, setAddressForm] = useState({ type: 'Fatura', title: '', contact_name: '', address_line_1: '', address_line_2: '', city: '', district: '', post_code: '', phone: '', email: '', is_default: false })
   const [addressSaving, setAddressSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    open: boolean
+    type: 'customer' | 'contact' | 'address'
+    id: number | null
+    customerId?: number
+    onSuccess?: () => void
+  }>({ open: false, type: 'customer', id: null })
   const contentRef = useRef<HTMLDivElement>(null)
 
   const emptyContactForm = { full_name: '', role: '', phone: '', phone_mobile: '', email: '', is_primary: false, notes: '' }
@@ -350,17 +359,9 @@ export function CustomersPage() {
     }
   }
 
-  const handleDeleteContact = async (contactId: number) => {
-    if (!editingId || !confirm('Bu kişiyi silmek istediğinize emin misiniz?')) return
-    try {
-      const res = await fetch(`${API_URL}/api/customers/${editingId}/contacts/${contactId}`, { method: 'DELETE' })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'Silinemedi')
-      toastSuccess('Kişi silindi')
-      fetchContacts()
-    } catch (err) {
-      toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
-    }
+  function openDeleteContactConfirm(contactId: number) {
+    if (!editingId) return
+    setDeleteConfirm({ open: true, type: 'contact', id: contactId, customerId: editingId })
   }
 
   const openAddAddress = () => {
@@ -439,17 +440,9 @@ export function CustomersPage() {
     }
   }
 
-  const handleDeleteAddress = async (addressId: number) => {
-    if (!editingId || !confirm('Bu adresi silmek istediğinize emin misiniz?')) return
-    try {
-      const res = await fetch(`${API_URL}/api/customers/${editingId}/addresses/${addressId}`, { method: 'DELETE' })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'Silinemedi')
-      toastSuccess('Adres silindi')
-      fetchAddresses()
-    } catch (err) {
-      toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
-    }
+  function openDeleteAddressConfirm(addressId: number) {
+    if (!editingId) return
+    setDeleteConfirm({ open: true, type: 'address', id: addressId, customerId: editingId })
   }
 
   const checkTaxNoDuplicate = useCallback(async () => {
@@ -515,17 +508,49 @@ export function CustomersPage() {
     }
   }
 
-  async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu müşteriyi silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: number, onSuccess?: () => void) {
+    setDeleteConfirm({ open: true, type: 'customer', id, onSuccess })
+  }
+
+  async function executeDelete() {
+    const { type, id, customerId, onSuccess } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
-      const res = await fetch(`${API_URL}/api/customers/${id}`, { method: 'DELETE' })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'Silinemedi')
-      fetchData()
-      toastSuccess('Müşteri silindi', 'Müşteri başarıyla silindi.')
-      onSuccess?.()
+      if (type === 'customer') {
+        const res = await fetch(`${API_URL}/api/customers/${id}`, { method: 'DELETE' })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || 'Silinemedi')
+        fetchData()
+        toastSuccess('Müşteri silindi', 'Müşteri başarıyla silindi.')
+        onSuccess?.()
+      } else if (type === 'contact' && customerId) {
+        const res = await fetch(`${API_URL}/api/customers/${customerId}/contacts/${id}`, { method: 'DELETE' })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || 'Silinemedi')
+        toastSuccess('Kişi silindi')
+        fetchContacts()
+      } else if (type === 'address' && customerId) {
+        const res = await fetch(`${API_URL}/api/customers/${customerId}/addresses/${id}`, { method: 'DELETE' })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || 'Silinemedi')
+        toastSuccess('Adres silindi')
+        fetchAddresses()
+      }
+      setDeleteConfirm({ open: false, type: 'customer', id: null })
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const getDeleteDescription = () => {
+    switch (deleteConfirm.type) {
+      case 'customer': return 'Bu müşteriyi silmek istediğinize emin misiniz?'
+      case 'contact': return 'Bu kişiyi silmek istediğinize emin misiniz?'
+      case 'address': return 'Bu adresi silmek istediğinize emin misiniz?'
+      default: return 'Silmek istediğinize emin misiniz?'
     }
   }
 
@@ -879,7 +904,7 @@ export function CustomersPage() {
                                   </Tooltip>
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => handleDeleteAddress(a.id)}>
+                                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => openDeleteAddressConfirm(a.id)}>
                                         <Trash2 className="h-3.5 w-3.5" />
                                       </Button>
                                     </TooltipTrigger>
@@ -936,7 +961,7 @@ export function CustomersPage() {
                                   </Tooltip>
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => handleDeleteContact(c.id)}>
+                                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => openDeleteContactConfirm(c.id)}>
                                         <Trash2 className="h-3.5 w-3.5" />
                                       </Button>
                                     </TooltipTrigger>
@@ -970,7 +995,7 @@ export function CustomersPage() {
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-block">
-                        <Button type="button" variant="outline" size="icon" onClick={() => handleDelete(editingId, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
+                        <Button type="button" variant="outline" size="icon" onClick={() => openDeleteConfirm(editingId!, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </span>
@@ -991,6 +1016,14 @@ export function CustomersPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description={getDeleteDescription()}
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
 
       <Dialog open={contactDialogOpen} onOpenChange={(open) => !open && closeContactDialog()}>
         <DialogContent className="max-w-md">

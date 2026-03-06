@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Search, Plus, X, Trash2, SquarePen, Save, ArrowDownToLine } from 'lucide-react'
+import { Search, Plus, X, Trash2, SquarePen, Save, ArrowDownToLine, ChevronDown, ChevronUp } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,8 +17,9 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL, parseJsonResponse } from '@/lib/api'
-import { formatDate, formatPrice, normalizeForSearch, parseDecimal } from '@/lib/utils'
+import { formatDate, formatPrice, normalizeForSearch, parseDecimal, cn } from '@/lib/utils'
 import { PhoneInput } from '@/components/PhoneInput'
 import { CustomerTitleInput } from '@/components/CustomerTitleInput'
 
@@ -100,6 +101,8 @@ interface Product {
   sku?: string | null
   price: number
   unit_name?: string | null
+  currency_id?: number | null
+  currency_symbol?: string | null
 }
 
 const emptyItem = (): OfferItem => ({
@@ -179,15 +182,16 @@ export function TekliflerPage() {
   const [customerEditMode, setCustomerEditMode] = useState(false)
   const [expandedRowIndex, setExpandedRowIndex] = useState<number | null>(null)
   const [totalEditMode, setTotalEditMode] = useState(false)
-  const [productSearchInput, setProductSearchInput] = useState('')
-  const [productSearchDebounced, setProductSearchDebounced] = useState('')
   const [productTypeFilter, setProductTypeFilter] = useState<'' | number>('')
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: number | null; onSuccess?: () => void }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
   const [customerInput, setCustomerInput] = useState('')
   const [customerSearchResults, setCustomerSearchResults] = useState<Customer[]>([])
+  const [customerSearchHighlightIndex, setCustomerSearchHighlightIndex] = useState(0)
   const [similarCustomersModalOpen, setSimilarCustomersModalOpen] = useState(false)
   const [similarCustomersList, setSimilarCustomersList] = useState<Customer[]>([])
   const [newCustomerModalOpen, setNewCustomerModalOpen] = useState(false)
@@ -202,9 +206,18 @@ export function TekliflerPage() {
   const [newContactForm, setNewContactForm] = useState({ full_name: '', phone: '', role: '' })
   const [newContactSaving, setNewContactSaving] = useState(false)
   const [activeProductSearchRow, setActiveProductSearchRow] = useState<number | null>(null)
-  const [, setProductSearchQuery] = useState('')
+  const [addRowFormOpen, setAddRowFormOpen] = useState(false)
+  const [addRowDraft, setAddRowDraft] = useState<OfferItem>(() => emptyItem())
+  const [addRowProductInput, setAddRowProductInput] = useState('')
+  const [addRowProductDebounced, setAddRowProductDebounced] = useState('')
+  const [addRowProductResults, setAddRowProductResults] = useState<Product[]>([])
+  const [rowProductSearchInput, setRowProductSearchInput] = useState('')
+  const [rowProductSearchDebounced, setRowProductSearchDebounced] = useState('')
+  const [rowProductResults, setRowProductResults] = useState<Product[]>([])
+  const [rowProductSearchHighlightIndex, setRowProductSearchHighlightIndex] = useState(0)
+  const [addRowProductHighlightIndex, setAddRowProductHighlightIndex] = useState(0)
+  const lastCommittedItemsRef = useRef<OfferItem[]>([])
   const customerInputRef = useRef<HTMLInputElement>(null)
-  const [productResults, setProductResults] = useState<Product[]>([])
   const [currencies, setCurrencies] = useState<ProductCurrency[]>([])
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
   const contentRef = useRef<HTMLDivElement>(null)
@@ -234,11 +247,6 @@ export function TekliflerPage() {
   useEffect(() => {
     fetchData()
   }, [fetchData])
-
-  useEffect(() => {
-    const t = setTimeout(() => setProductSearchDebounced(productSearchInput), 300)
-    return () => clearTimeout(t)
-  }, [productSearchInput])
 
   const fetchCustomerSearch = useCallback(async (q: string) => {
     const trimmed = q.trim()
@@ -396,38 +404,45 @@ export function TekliflerPage() {
     }
   }, [])
 
-  const fetchProductSearch = useCallback(async (q: string) => {
-    if (!q.trim()) {
-      setProductResults([])
-      return
-    }
-    try {
-      const params = new URLSearchParams()
-      params.set('search', q)
-      params.set('limit', '10')
-      if (productTypeFilter !== '') params.set('filter_type_id', String(productTypeFilter))
-      const res = await fetch(`${API_URL}/api/products?${params}`)
-      const json = await parseJsonResponse<{ data?: Product[] }>(res)
-      const list = (json.data || []).map((p: Product) => ({
-        id: p.id,
-        name: p.name,
-        sku: p.sku,
-        price: p.price,
-        unit_name: p.unit_name,
-      }))
-      setProductResults(list)
-    } catch {
-      setProductResults([])
-    }
-  }, [productTypeFilter])
+  useEffect(() => {
+    const t = setTimeout(() => setAddRowProductDebounced(addRowProductInput), 300)
+    return () => clearTimeout(t)
+  }, [addRowProductInput])
 
   useEffect(() => {
-    if (modalOpen && productSearchDebounced.trim()) {
-      fetchProductSearch(productSearchDebounced)
-    } else {
-      setProductResults([])
+    const t = setTimeout(() => setRowProductSearchDebounced(rowProductSearchInput), 300)
+    return () => clearTimeout(t)
+  }, [rowProductSearchInput])
+
+  useEffect(() => {
+    if (!addRowFormOpen || !addRowProductDebounced.trim()) {
+      setAddRowProductResults([])
+      return
     }
-  }, [modalOpen, productSearchDebounced, fetchProductSearch])
+    const params = new URLSearchParams({ search: addRowProductDebounced, limit: '10' })
+    if (productTypeFilter !== '') params.set('filter_type_id', String(productTypeFilter))
+    fetch(`${API_URL}/api/products?${params}`)
+      .then((r) => r.json())
+      .then((json: { data?: Product[] }) => setAddRowProductResults(json.data || []))
+      .catch(() => setAddRowProductResults([]))
+  }, [addRowFormOpen, addRowProductDebounced, productTypeFilter])
+
+  useEffect(() => {
+    if (addRowFormOpen || activeProductSearchRow == null || !rowProductSearchDebounced.trim()) {
+      setRowProductResults([])
+      return
+    }
+    const params = new URLSearchParams({ search: rowProductSearchDebounced, limit: '10' })
+    if (productTypeFilter !== '') params.set('filter_type_id', String(productTypeFilter))
+    fetch(`${API_URL}/api/products?${params}`)
+      .then((r) => r.json())
+      .then((json: { data?: Product[] }) => setRowProductResults(json.data || []))
+      .catch(() => setRowProductResults([]))
+  }, [addRowFormOpen, activeProductSearchRow, rowProductSearchDebounced, productTypeFilter])
+
+  useEffect(() => {
+    setCustomerSearchHighlightIndex(0)
+  }, [customerSearchResults])
 
   useEffect(() => {
     if (modalOpen && customerEditMode) {
@@ -435,6 +450,23 @@ export function TekliflerPage() {
       return () => clearTimeout(t)
     }
   }, [modalOpen, customerEditMode])
+
+  const customerSearchHighlightRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    customerSearchHighlightRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [customerSearchHighlightIndex])
+
+  useEffect(() => { setRowProductSearchHighlightIndex(0) }, [rowProductResults])
+  useEffect(() => { setAddRowProductHighlightIndex(0) }, [addRowProductResults])
+
+  const rowProductHighlightRef = useRef<HTMLDivElement>(null)
+  const addRowProductHighlightRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    rowProductHighlightRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [rowProductSearchHighlightIndex])
+  useEffect(() => {
+    addRowProductHighlightRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [addRowProductHighlightIndex])
 
   useEffect(() => {
     if (modalOpen) {
@@ -454,8 +486,7 @@ export function TekliflerPage() {
 
   const openNew = async () => {
     setEditingId(null)
-    setForm(emptyForm)
-    setForm((f) => ({ ...f, date: new Date().toISOString().slice(0, 10) }))
+    setForm({ ...emptyForm, items: [emptyItem()], date: new Date().toISOString().slice(0, 10) })
     setContacts([])
     setCustomerInput('')
     setCustomerSearchResults([])
@@ -469,6 +500,7 @@ export function TekliflerPage() {
       const json = await parseJsonResponse<{ order_no?: string }>(res)
       if (json.order_no) setForm((f) => ({ ...f, order_no: json.order_no as string }))
     } catch { /* ignore */ }
+    lastCommittedItemsRef.current = []
     setModalOpen(true)
   }
 
@@ -483,7 +515,7 @@ export function TekliflerPage() {
       const res = await fetch(`${API_URL}/api/offers/${item.id}`)
       const json = await parseJsonResponse<{ error?: string; items?: unknown[]; [k: string]: unknown }>(res)
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
-      const items = (json.items || []).map((i: unknown) => {
+      const rawItems = (json.items || []).map((i: unknown) => {
         const row = i as Record<string, unknown>
         const it = emptyItem()
         it.type = (row.type as string) === 'expense' ? 'expense' : 'product'
@@ -503,6 +535,7 @@ export function TekliflerPage() {
         it.tax_rate = (row.tax_rate as number) ?? 0
         return it
       })
+      const items = rawItems.length > 0 ? rawItems : [emptyItem()]
       setForm({
         date: (json.date as string)?.slice(0, 10) || new Date().toISOString().slice(0, 10),
         order_no: (json.order_no as string) || '',
@@ -521,28 +554,12 @@ export function TekliflerPage() {
       if (json.customer_id) fetchContacts(json.customer_id as number)
       setCustomerInput((json.customer_title as string) || '')
       setCustomerSearchResults([])
+      lastCommittedItemsRef.current = items.map((i) => ({ ...i }))
     } catch (err) {
       toastError('Yüklenemedi', err instanceof Error ? err.message : 'Teklif yüklenemedi')
       return
     }
     setModalOpen(true)
-  }
-
-  const addProductToItems = (p: Product) => {
-    setForm((f) => ({
-      ...f,
-      items: [...f.items, {
-        ...emptyItem(),
-        product_id: p.id,
-        product_name: p.name,
-        product_sku: p.sku || null,
-        unit_name: p.unit_name || null,
-        amount: 1,
-        unit_price: p.price,
-      }],
-    }))
-    setProductSearchInput('')
-    setProductResults([])
   }
 
   const closeModal = () => {
@@ -555,10 +572,13 @@ export function TekliflerPage() {
     setTotalEditMode(false)
     setExpandedRowIndex(null)
     setActiveProductSearchRow(null)
-    setProductSearchQuery('')
-    setProductSearchInput('')
     setProductTypeFilter('')
-    setProductResults([])
+    setAddRowFormOpen(false)
+    setAddRowDraft(emptyItem())
+    setAddRowProductInput('')
+    setAddRowProductResults([])
+    setRowProductSearchInput('')
+    setRowProductResults([])
     setCustomerInput('')
     setCustomerSearchResults([])
     setSimilarCustomersModalOpen(false)
@@ -682,22 +702,36 @@ export function TekliflerPage() {
     }
   }
 
-  const handleDelete = async (id: number, onSuccess?: () => void) => {
-    if (!confirm('Bu teklifi silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: number, onSuccess?: () => void) {
+    setDeleteConfirm({ open: true, id, onSuccess })
+  }
+
+  async function executeDelete() {
+    const { id, onSuccess } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
       const res = await fetch(`${API_URL}/api/offers/${id}`, { method: 'DELETE' })
       const json = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
       toastSuccess('Teklif silindi')
+      setDeleteConfirm({ open: false, id: null })
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
   const removeItem = (idx: number) => {
-    setForm((f) => ({ ...f, items: f.items.filter((_, i) => i !== idx) }))
+    setForm((f) => {
+      if (idx < lastCommittedItemsRef.current.length) {
+        lastCommittedItemsRef.current = lastCommittedItemsRef.current.filter((_, i) => i !== idx)
+      }
+      return { ...f, items: f.items.filter((_, i) => i !== idx) }
+    })
     if (expandedRowIndex === idx) setExpandedRowIndex(null)
     else if (expandedRowIndex != null && expandedRowIndex > idx) setExpandedRowIndex(expandedRowIndex - 1)
     if (activeProductSearchRow === idx) setActiveProductSearchRow(null)
@@ -821,17 +855,10 @@ export function TekliflerPage() {
                         <td className="p-3 text-muted-foreground max-w-[200px] truncate">{item.description || '—'}</td>
                         <td className="p-3 text-right">
                           <div className="flex flex-col items-end gap-0.5 text-sm">
-                            <span className="tabular-nums">
-                              <span className="font-medium">{formatPrice(item.total_tl_offer ?? 0)} ₺</span>
-                              {!isTry && item.currency_symbol && (
-                                <span className="text-muted-foreground ml-1">
-                                  ({formatPrice(item.total_amount ?? 0)} {item.currency_symbol} — teklif kuru)
-                                </span>
-                              )}
-                            </span>
-                            {!isTry && item.total_tl_current != null && (
-                              <span className="text-xs text-muted-foreground tabular-nums">
-                                Anlık TL: {formatPrice(item.total_tl_current)} ₺
+                            <span className="font-medium tabular-nums">{formatPrice(item.total_tl_offer ?? 0)} ₺</span>
+                            {!isTry && item.currency_symbol && (
+                              <span className="text-destructive tabular-nums text-xs">
+                                {formatPrice(item.total_amount ?? 0)} {item.currency_symbol}
                               </span>
                             )}
                           </div>
@@ -855,11 +882,11 @@ export function TekliflerPage() {
           <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1 overflow-hidden gap-6">
             {error && <p className="text-sm text-destructive shrink-0 mt-1">{error}</p>}
 
-            {/* Üst bilgiler: 1. satır tarih + teklif no + döviz kuru, 2. satır müşteri */}
+            {/* Üst bilgiler: 1. satır tarih + teklif no + para birimi (satırı kaplar), 2. satır müşteri */}
             <div className="shrink-0 border rounded-lg p-4 bg-muted/20 space-y-4">
-              {/* 1. satır: Tarih, Teklif No, Döviz (eşit genişlik, satırı kaplar) */}
-              <div className="grid grid-cols-3 gap-4 w-full">
-                <div className="space-y-1.5 min-w-0">
+              {/* 1. satır: Tarih, Teklif No, Para Birimi — satırı kaplar */}
+              <div className="flex gap-4 w-full">
+                <div className="flex-1 min-w-0 space-y-1.5">
                   <Label className="text-xs text-muted-foreground">Teklif Tarihi</Label>
                   <div className="flex items-center gap-2">
                     {dateEditMode ? (
@@ -877,7 +904,7 @@ export function TekliflerPage() {
                     </Tooltip>
                   </div>
                 </div>
-                <div className="space-y-1.5 min-w-0">
+                <div className="flex-1 min-w-0 space-y-1.5">
                   <Label className="text-xs text-muted-foreground">Teklif No</Label>
                   <div className="flex items-center gap-2">
                     {orderNoEditMode ? (
@@ -895,11 +922,11 @@ export function TekliflerPage() {
                     </Tooltip>
                   </div>
                 </div>
-                <div className="space-y-1.5 min-w-0">
+                <div className="flex-1 min-w-0 space-y-1.5">
                   <Label className="text-xs text-muted-foreground">Para Birimi / Döviz Kuru</Label>
-                  <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
                     <select
-                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                      className="h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm flex-1 min-w-0"
                       value={form.currency_id === '' ? '' : form.currency_id}
                       onChange={(e) => {
                         const val = e.target.value === '' ? '' : Number(e.target.value)
@@ -914,14 +941,14 @@ export function TekliflerPage() {
                       ))}
                     </select>
                     {form.currency_id !== '' && form.currency_id ? (
-                      <div className="flex items-center gap-2">
+                      <div className="flex">
                         <Input
                           type="text"
                           inputMode="decimal"
-                          className="h-9 flex-1 min-w-0"
+                          className="h-9 w-24 rounded-r-none border-r-0"
                           value={form.exchange_rate === 1 ? '' : form.exchange_rate.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
                           onChange={(e) => setForm((f) => ({ ...f, exchange_rate: parseDecimal(e.target.value) ?? 1 }))}
-                          placeholder="1 birim = X ₺"
+                          placeholder="1=X ₺"
                         />
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -929,7 +956,7 @@ export function TekliflerPage() {
                               type="button"
                               variant="outline"
                               size="sm"
-                              className="shrink-0"
+                              className="h-9 w-9 shrink-0 rounded-l-none px-0"
                               onClick={() => setForm((f) => ({
                                 ...f,
                                 exchange_rate: Math.floor((f.exchange_rate || 1) * 100) / 100,
@@ -940,23 +967,16 @@ export function TekliflerPage() {
                           </TooltipTrigger>
                           <TooltipContent>Virgülden sonrasını aşağı yuvarla (2 basamak)</TooltipContent>
                         </Tooltip>
-                        <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
-                          Anlık: {(() => {
-                            const cur = currencies.find((c) => c.id === form.currency_id)
-                            const anlikKur = cur?.code ? exchangeRates[cur.code.toUpperCase()] : null
-                            return anlikKur != null ? formatPrice(anlikKur) : '—'
-                          })()} ₺
-                        </span>
                       </div>
                     ) : null}
                   </div>
                 </div>
               </div>
-              {/* 2. satır: Müşteri */}
+              {/* 2. satır: Müşteri - yeni teklifte her zaman düzenlenebilir, düzenlemede butonla açılır */}
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">Müşteri</Label>
                 <div className="flex items-center gap-2">
-                  {customerEditMode ? (
+                  {(customerEditMode || !editingId) ? (
                     <div className="flex gap-2 flex-1 min-w-0">
                       <div className="relative flex-1 min-w-0">
                         <Input
@@ -972,16 +992,36 @@ export function TekliflerPage() {
                             setCustomerSearchResults([])
                             checkSimilarCustomersOnBlur()
                           }, 150)}
+                          onKeyDown={(e) => {
+                            if (customerSearchResults.length === 0) return
+                            if (e.key === 'ArrowDown') {
+                              e.preventDefault()
+                              setCustomerSearchHighlightIndex((i) => (i + 1) % customerSearchResults.length)
+                            } else if (e.key === 'ArrowUp') {
+                              e.preventDefault()
+                              setCustomerSearchHighlightIndex((i) => (i - 1 + customerSearchResults.length) % customerSearchResults.length)
+                            } else if (e.key === 'Enter') {
+                              const c = customerSearchResults[customerSearchHighlightIndex]
+                              if (c) {
+                                e.preventDefault()
+                                setForm((f) => ({ ...f, customer_id: c.id, contact_id: '' }))
+                                setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
+                                setCustomerSearchResults([])
+                                fetchContacts(c.id)
+                              }
+                            }
+                          }}
                           placeholder="Müşteri ara..."
                           className="h-9"
                         />
                         {customerSearchResults.length > 0 && (
-                          <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-20 max-h-48 overflow-y-auto">
-                            {customerSearchResults.map((c) => (
+                          <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-[100] max-h-48 overflow-y-auto">
+                            {customerSearchResults.map((c, i) => (
                               <button
                                 key={c.id}
+                                ref={i === customerSearchHighlightIndex ? customerSearchHighlightRef : undefined}
                                 type="button"
-                                className="w-full text-left px-3 py-2 hover:bg-muted text-sm"
+                                className={cn('w-full text-left px-3 py-2 text-sm', i === customerSearchHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
                                 onMouseDown={(e) => {
                                   e.preventDefault()
                                   setForm((f) => ({ ...f, customer_id: c.id, contact_id: '' }))
@@ -989,6 +1029,7 @@ export function TekliflerPage() {
                                   setCustomerSearchResults([])
                                   fetchContacts(c.id)
                                 }}
+                                onMouseEnter={() => setCustomerSearchHighlightIndex(i)}
                               >
                                 {c.title} {c.code ? `(${c.code})` : ''}
                               </button>
@@ -1003,86 +1044,166 @@ export function TekliflerPage() {
                   ) : (
                     <div className="h-9 px-3 flex items-center rounded-md border bg-muted/50 text-sm flex-1 min-w-0">{customerInput || '—'}</div>
                   )}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button type="button" variant="outline" size="icon" className="h-9 w-9 shrink-0" onClick={() => setCustomerEditMode((v) => !v)}>
-                        {customerEditMode ? <Save className="h-4 w-4" /> : <SquarePen className="h-4 w-4" />}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{customerEditMode ? 'Kaydet' : 'Düzenle'}</TooltipContent>
-                  </Tooltip>
+                  {editingId && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button type="button" variant="outline" size="icon" className="h-9 w-9 shrink-0" onClick={() => setCustomerEditMode((v) => !v)}>
+                          {customerEditMode ? <Save className="h-4 w-4" /> : <SquarePen className="h-4 w-4" />}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{customerEditMode ? 'Kaydet' : 'Düzenle'}</TooltipContent>
+                    </Tooltip>
+                  )}
                 </div>
               </div>
             </div>
 
             {/* Teklif kalemleri */}
             <div className="flex-1 min-h-0 overflow-hidden flex flex-col gap-3">
-              <div className="flex items-center gap-2 shrink-0">
-                <div className="relative flex-1 min-w-0">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    placeholder="Ürün ara ve ekle..."
-                    value={productSearchInput}
-                    onChange={(e) => setProductSearchInput(e.target.value)}
-                    onFocus={() => productSearchDebounced && fetchProductSearch(productSearchDebounced)}
-                    className="pl-9 h-9"
-                  />
-                  {productResults.length > 0 && (
-                    <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-20 max-h-48 overflow-y-auto">
-                      {productResults.map((p) => (
-                        <div key={p.id} className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-muted text-sm">
-                          <span>{p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} ₺</span>
-                          <Button type="button" size="sm" variant="outline" onClick={() => addProductToItems(p)}>Ekle</Button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button type="button" variant="outline" size="sm" disabled={form.items.length === 0} onClick={() => setForm((f) => ({ ...f, items: [...f.items, { ...emptyItem(), type: 'expense', description: 'Yeni satır' }] }))}>
-                      <Plus className="h-4 w-4 mr-1" /> Satır ekle
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>{form.items.length === 0 ? 'Önce ürün ekleyin' : 'Yeni satır ekle'}</TooltipContent>
-                </Tooltip>
-              </div>
               <div className="border rounded-md overflow-auto flex-1 min-h-[140px]">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-muted/50">
-                      <th className="text-left p-2 font-medium">Ürün / Açıklama</th>
-                      <th className="text-right p-2 w-16">Adet</th>
-                      <th className="text-right p-2 w-24">Fiyat</th>
+                      <th className="text-left p-2 font-medium">Ürün Adı</th>
+                      <th className="text-right p-2 w-20">Miktar</th>
+                      <th className="text-center p-2 w-16">Birim</th>
+                      <th className="text-right p-2 w-24">Birim Fiyat</th>
                       <th className="text-right p-2 w-24">Tutar</th>
-                      <th className="w-24" />
+                      <th className="w-36">
+                        <div className="flex items-center justify-end gap-1">
+                          <span className="w-px h-4 bg-border" aria-hidden />
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1" onClick={() => { setAddRowFormOpen(true); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); }}>
+                                <Plus className="h-3.5 w-3.5" /> Satır ekle
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Yeni satır ekle</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {form.items.map((it, idx) => (
                       <React.Fragment key={idx}>
                         <tr className="border-b">
-                          <td className="p-2 font-medium">{it.product_name || it.product_sku || it.description || '—'}</td>
-                          <td className="p-2 text-right tabular-nums">{expandedRowIndex === idx ? (
-                            <Input type="text" inputMode="decimal" className="h-8 w-16 text-right" value={it.amount === 0 ? '' : String(it.amount)} onChange={(e) => updateItem(idx, 'amount', parseDecimal(e.target.value) || 0)} placeholder="0" />
-                          ) : (
-                            it.amount
-                          )}</td>
-                          <td className="p-2 text-right tabular-nums">{expandedRowIndex === idx ? (
-                            <Input type="text" inputMode="decimal" className="h-8 w-24 text-right" value={it.unit_price === 0 ? '' : it.unit_price.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} onChange={(e) => updateItem(idx, 'unit_price', parseDecimal(e.target.value))} placeholder="0,00" />
-                          ) : (
-                            it.unit_price.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
-                          )} ₺</td>
+                          <td className="p-2">
+                            {!it.product_id ? (
+                              <div className="relative" onFocus={() => { setActiveProductSearchRow(idx); setRowProductSearchInput(it.description || ''); }}>
+                                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                                <Input
+                                  placeholder="Ürün ara veya açıklama..."
+                                  value={activeProductSearchRow === idx ? rowProductSearchInput : (it.description || '')}
+                                  onChange={(e) => {
+                                    setActiveProductSearchRow(idx)
+                                    const v = e.target.value
+                                    setRowProductSearchInput(v)
+                                    updateItem(idx, 'description', v || null)
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (activeProductSearchRow !== idx || rowProductResults.length === 0) return
+                                    if (e.key === 'ArrowDown') {
+                                      e.preventDefault()
+                                      setRowProductSearchHighlightIndex((i) => (i + 1) % rowProductResults.length)
+                                    } else if (e.key === 'ArrowUp') {
+                                      e.preventDefault()
+                                      setRowProductSearchHighlightIndex((i) => (i - 1 + rowProductResults.length) % rowProductResults.length)
+                                    } else if (e.key === 'Enter') {
+                                      const p = rowProductResults[rowProductSearchHighlightIndex]
+                                      if (p) {
+                                        e.preventDefault()
+                                        setForm((f) => ({
+                                          ...f,
+                                          items: f.items.map((item, i) =>
+                                            i === idx ? { ...item, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1, description: null } : item
+                                          ),
+                                        }))
+                                        setRowProductSearchInput('')
+                                        setRowProductResults([])
+                                        setActiveProductSearchRow(null)
+                                      }
+                                    }
+                                  }}
+                                  onBlur={() => setTimeout(() => setActiveProductSearchRow(null), 200)}
+                                  className="pl-8 h-8 text-sm"
+                                />
+                                {activeProductSearchRow === idx && rowProductResults.length > 0 && (
+                                  <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-[100] max-h-40 overflow-y-auto">
+                                    {rowProductResults.map((p, i) => (
+                                      <div
+                                        key={p.id}
+                                        ref={i === rowProductSearchHighlightIndex ? rowProductHighlightRef : undefined}
+                                        className={cn('px-3 py-2 text-sm cursor-pointer', i === rowProductSearchHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
+                                        onMouseDown={(e) => {
+                                          e.preventDefault()
+                                          setForm((f) => ({
+                                            ...f,
+                                            items: f.items.map((item, ii) =>
+                                              ii === idx ? { ...item, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1, description: null } : item
+                                            ),
+                                          }))
+                                          setRowProductSearchInput('')
+                                          setRowProductResults([])
+                                          setActiveProductSearchRow(null)
+                                        }}
+                                        onMouseEnter={() => setRowProductSearchHighlightIndex(i)}
+                                      >
+                                        {p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} {p.currency_symbol || '₺'}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="font-medium">{it.product_name || it.product_sku || it.description || '—'}</span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            <Input type="text" inputMode="decimal" className="h-8 w-full min-w-14 text-right" value={it.amount === 0 ? '' : String(it.amount)} onChange={(e) => updateItem(idx, 'amount', parseDecimal(e.target.value) || 0)} placeholder="0" />
+                          </td>
+                          <td className="p-2 text-center text-muted-foreground text-sm">{it.unit_name || 'Adet'}</td>
+                          <td className="p-2">
+                            <Input type="text" inputMode="decimal" className="h-8 w-full min-w-20 text-right" value={it.unit_price === 0 ? '' : it.unit_price.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} onChange={(e) => updateItem(idx, 'unit_price', parseDecimal(e.target.value))} placeholder="0,00" />
+                          </td>
                           <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(it))} ₺</td>
                           <td className="p-2">
                             <div className="flex items-center justify-end gap-1">
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setExpandedRowIndex(expandedRowIndex === idx ? null : idx)}>
-                                    {expandedRowIndex === idx ? <Save className="h-3.5 w-3.5" /> : <SquarePen className="h-3.5 w-3.5" />}
+                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => {
+                                    if (idx < lastCommittedItemsRef.current.length) {
+                                      const committed = lastCommittedItemsRef.current[idx]
+                                      setForm((f) => ({ ...f, items: f.items.map((item, i) => (i === idx ? { ...committed } : item)) }))
+                                    } else {
+                                      removeItem(idx)
+                                    }
+                                  }}>
+                                    <X className="h-3.5 w-3.5" />
                                   </Button>
                                 </TooltipTrigger>
-                                <TooltipContent>{expandedRowIndex === idx ? 'Kaydet' : 'Düzenle'}</TooltipContent>
+                                <TooltipContent>{idx < lastCommittedItemsRef.current.length ? 'Değişiklikleri geri al' : 'Satırı kaldır'}</TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => {
+                                    const arr = [...lastCommittedItemsRef.current]
+                                    while (arr.length <= idx) arr.push({ ...emptyItem() })
+                                    arr[idx] = { ...form.items[idx] }
+                                    lastCommittedItemsRef.current = arr
+                                  }}>
+                                    <Save className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Kaydet</TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setExpandedRowIndex(expandedRowIndex === idx ? null : idx)}>
+                                    {expandedRowIndex === idx ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>{expandedRowIndex === idx ? 'Detayları kapat' : 'KDV, İskonto, Satır notu'}</TooltipContent>
                               </Tooltip>
                               <Tooltip>
                                 <TooltipTrigger asChild>
@@ -1090,32 +1211,36 @@ export function TekliflerPage() {
                                     <Trash2 className="h-3.5 w-3.5" />
                                   </Button>
                                 </TooltipTrigger>
-                                <TooltipContent>Sil</TooltipContent>
+                                <TooltipContent>Satırı sil</TooltipContent>
                               </Tooltip>
                             </div>
                           </td>
                         </tr>
                         {expandedRowIndex === idx && (
                           <tr className="border-b bg-muted/20">
-                            <td colSpan={5} className="p-3">
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <td colSpan={6} className="p-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                                 <div className="space-y-2">
-                                  <Label className="text-xs">Açıklama</Label>
-                                  <Input className="h-8 text-sm" value={it.description || ''} onChange={(e) => updateItem(idx, 'description', e.target.value)} placeholder="Satır açıklaması" />
+                                  <Label className="text-xs">KDV (%)</Label>
+                                  <Input type="text" inputMode="decimal" className="h-8 text-sm" value={it.tax_rate === 0 ? '' : String(it.tax_rate)} onChange={(e) => updateItem(idx, 'tax_rate', parseDecimal(e.target.value) ?? 0)} placeholder="0" />
                                 </div>
                                 <div className="space-y-2">
-                                  <Label className="text-xs">İndirim</Label>
+                                  <Label className="text-xs">İskonto</Label>
                                   <div className="flex items-center gap-2">
-                                    <select className="h-8 rounded-md border border-input bg-transparent px-2 text-sm w-24" value={it.discount_type ?? ''} onChange={(e) => updateItem(idx, 'discount_type', e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed'))}>
+                                    <select className="h-8 rounded-md border border-input bg-transparent px-2 text-sm w-24 shrink-0" value={it.discount_type ?? ''} onChange={(e) => updateItem(idx, 'discount_type', e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed'))}>
                                       <option value="">—</option>
                                       <option value="percent">Yüzde</option>
                                       <option value="fixed">Sabit</option>
                                     </select>
-                                    <div className="relative flex-1">
+                                    <div className="relative flex-1 min-w-0">
                                       <Input type="text" inputMode="decimal" className="h-8 text-right pr-8" value={it.discount_value != null && it.discount_value !== 0 ? String(it.discount_value) : ''} onChange={(e) => updateItem(idx, 'discount_value', parseDecimal(e.target.value))} placeholder="0" />
                                       <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{it.discount_type === 'percent' ? '%' : it.discount_type === 'fixed' ? '₺' : ''}</span>
                                     </div>
                                   </div>
+                                </div>
+                                <div className="space-y-2 sm:col-span-1">
+                                  <Label className="text-xs">Satır notu</Label>
+                                  <Input className="h-8 text-sm" value={it.description || ''} onChange={(e) => updateItem(idx, 'description', e.target.value)} placeholder="Satır notu" />
                                 </div>
                               </div>
                             </td>
@@ -1123,6 +1248,99 @@ export function TekliflerPage() {
                         )}
                       </React.Fragment>
                     ))}
+                    {addRowFormOpen && (
+                      <tr className="border-b bg-muted/20">
+                        <td className="p-2">
+                          <div className="relative">
+                            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                            <Input
+                              placeholder="Ürün ara veya açıklama..."
+                              value={addRowProductInput || addRowDraft.product_name || addRowDraft.description || ''}
+                              onChange={(e) => {
+                                const v = e.target.value
+                                setAddRowProductInput(v)
+                                setAddRowDraft((d) => ({ ...d, description: v || null, ...(v ? { product_id: null, product_name: null, product_sku: null } : {}) }))
+                              }}
+                              onKeyDown={(e) => {
+                                if (addRowProductResults.length === 0) return
+                                if (e.key === 'ArrowDown') {
+                                  e.preventDefault()
+                                  setAddRowProductHighlightIndex((i) => (i + 1) % addRowProductResults.length)
+                                } else if (e.key === 'ArrowUp') {
+                                  e.preventDefault()
+                                  setAddRowProductHighlightIndex((i) => (i - 1 + addRowProductResults.length) % addRowProductResults.length)
+                                } else if (e.key === 'Enter') {
+                                  const p = addRowProductResults[addRowProductHighlightIndex]
+                                  if (p) {
+                                    e.preventDefault()
+                                    setAddRowDraft((d) => ({ ...d, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1 }))
+                                    setAddRowProductInput('')
+                                    setAddRowProductResults([])
+                                  }
+                                }
+                              }}
+                              className="pl-8 h-8 text-sm"
+                            />
+                            {addRowProductResults.length > 0 && (
+                              <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-[100] max-h-40 overflow-y-auto">
+                                {addRowProductResults.map((p, i) => (
+                                  <div
+                                    key={p.id}
+                                    ref={i === addRowProductHighlightIndex ? addRowProductHighlightRef : undefined}
+                                    className={cn('px-3 py-2 text-sm cursor-pointer', i === addRowProductHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
+                                    onMouseDown={(e) => {
+                                      e.preventDefault()
+                                      setAddRowDraft((d) => ({ ...d, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1 }))
+                                      setAddRowProductInput('')
+                                      setAddRowProductResults([])
+                                    }}
+                                    onMouseEnter={() => setAddRowProductHighlightIndex(i)}
+                                  >
+                                    {p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} {p.currency_symbol || '₺'}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-2">
+                          <Input type="text" inputMode="decimal" className="h-8 w-full min-w-14 text-right" value={addRowDraft.amount === 0 ? '' : String(addRowDraft.amount)} onChange={(e) => setAddRowDraft((d) => ({ ...d, amount: parseDecimal(e.target.value) || 0 }))} placeholder="1" />
+                        </td>
+                        <td className="p-2 text-center text-muted-foreground text-sm">{addRowDraft.unit_name || 'Adet'}</td>
+                        <td className="p-2">
+                          <Input type="text" inputMode="decimal" className="h-8 w-full min-w-20 text-right" value={addRowDraft.unit_price === 0 ? '' : addRowDraft.unit_price.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} onChange={(e) => setAddRowDraft((d) => ({ ...d, unit_price: parseDecimal(e.target.value) ?? 0 }))} placeholder="0,00" />
+                        </td>
+                        <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(addRowDraft))} ₺</td>
+                        <td className="p-2">
+                          <div className="flex items-center justify-end gap-1">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => { setAddRowFormOpen(false); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); }}>
+                                  <X className="h-3.5 w-3.5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>İptal</TooltipContent>
+                            </Tooltip>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => {
+                                  const name = addRowDraft.product_name || addRowDraft.description || 'Yeni satır'
+                                  const newItem = { ...addRowDraft, product_name: addRowDraft.product_name || name, description: addRowDraft.description || (addRowDraft.product_id ? null : name) }
+                                  setForm((f) => ({ ...f, items: [...f.items, newItem] }))
+                                  setAddRowFormOpen(false)
+                                  setAddRowDraft(emptyItem())
+                                  setAddRowProductInput('')
+                                  setAddRowProductResults([])
+                                }}>
+                                  <Save className="h-3.5 w-3.5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Kaydet</TooltipContent>
+                            </Tooltip>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -1177,7 +1395,7 @@ export function TekliflerPage() {
                 {editingId && (
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button type="button" variant="outline" size="icon" className="text-destructive" onClick={() => handleDelete(editingId, closeModal)} disabled={saving}>
+                      <Button type="button" variant="outline" size="icon" className="text-destructive" onClick={() => openDeleteConfirm(editingId!, closeModal)} disabled={saving}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TooltipTrigger>
@@ -1207,6 +1425,14 @@ export function TekliflerPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu teklifi silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
 
       <Dialog open={newCustomerModalOpen} onOpenChange={(open) => !open && setNewCustomerModalOpen(false)}>
         <DialogContent className="max-w-md">

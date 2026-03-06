@@ -15,6 +15,7 @@ import {
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { API_URL } from '@/lib/api'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { toastSuccess, toastError } from '@/lib/toast'
 import {
   GENERAL_PRICE_FIELD,
@@ -81,6 +82,8 @@ export function SettingsCalculationsPage() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<CalculationRule | null>(null)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: string | null }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
 
   const [currencies, setCurrencies] = useState<{ id: number; name: string }[]>([])
@@ -157,8 +160,14 @@ export function SettingsCalculationsPage() {
     setError(null)
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm('Bu hesaplamayı silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: string) {
+    setDeleteConfirm({ open: true, id })
+  }
+
+  async function executeDelete() {
+    const { id } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
       const next = calculations.filter((c) => c.id !== id)
       const res = await fetch(`${API_URL}/api/app-settings`, {
@@ -172,10 +181,13 @@ export function SettingsCalculationsPage() {
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       setCalculations(next)
+      setDeleteConfirm({ open: false, id: null })
       closeModal()
       toastSuccess('Silindi', 'Hesaplama kuralı kaldırıldı.')
     } catch (err) {
       toastError('Hata', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -378,7 +390,7 @@ export function SettingsCalculationsPage() {
                           type="button"
                           variant="outline"
                           size="icon"
-                          onClick={(e) => { e.preventDefault(); handleDelete(editingId) }}
+                          onClick={(e) => { e.preventDefault(); editingId && openDeleteConfirm(editingId) }}
                           disabled={saving}
                           className="text-destructive hover:text-destructive"
                         >
@@ -404,6 +416,14 @@ export function SettingsCalculationsPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu hesaplamayı silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
     </PageLayout>
   )
 }

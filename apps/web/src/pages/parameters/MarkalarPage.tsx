@@ -19,6 +19,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ImageInput, getImageDisplayUrl } from '@/components/ImageInput'
 import { Switch } from '@/components/ui/switch'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 
 import { API_URL } from '@/lib/api'
 
@@ -60,6 +61,8 @@ export function MarkalarPage() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: number | null; onSuccess?: () => void }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
@@ -168,17 +171,26 @@ export function MarkalarPage() {
     }
   }
 
-  async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu markayı silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: number, onSuccess?: () => void) {
+    setDeleteConfirm({ open: true, id, onSuccess })
+  }
+
+  async function executeDelete() {
+    const { id, onSuccess } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
       const res = await fetch(`${API_URL}/api/product-brands/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
       toastSuccess('Marka silindi', 'Marka başarıyla silindi.')
+      setDeleteConfirm({ open: false, id: null })
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -404,7 +416,7 @@ export function MarkalarPage() {
                           type="button"
                           variant="outline"
                           size="icon"
-                          onClick={() => { handleDelete(editingId, closeModal); }}
+                          onClick={() => openDeleteConfirm(editingId!, closeModal)}
                           disabled={saving}
                           className="text-destructive hover:text-destructive"
                         >
@@ -449,6 +461,14 @@ export function MarkalarPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu markayı silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
     </PageLayout>
   )
 }

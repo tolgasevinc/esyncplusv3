@@ -19,6 +19,7 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 
 import { API_URL } from '@/lib/api'
 
@@ -47,6 +48,8 @@ export function ParaBirimleriPage() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: number | null; onSuccess?: () => void }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
   const [ratesSaving, setRatesSaving] = useState(false)
@@ -186,17 +189,26 @@ export function ParaBirimleriPage() {
     }
   }
 
-  async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu para birimini silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: number, onSuccess?: () => void) {
+    setDeleteConfirm({ open: true, id, onSuccess })
+  }
+
+  async function executeDelete() {
+    const { id, onSuccess } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
       const res = await fetch(`${API_URL}/api/product-currencies/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
       toastSuccess('Para birimi silindi', 'Para birimi başarıyla silindi.')
+      setDeleteConfirm({ open: false, id: null })
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -384,7 +396,7 @@ export function ParaBirimleriPage() {
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-block">
-                        <Button type="button" variant="outline" size="icon" onClick={() => handleDelete(editingId, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
+                        <Button type="button" variant="outline" size="icon" onClick={() => openDeleteConfirm(editingId!, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </span>
@@ -415,6 +427,14 @@ export function ParaBirimleriPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu para birimini silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
     </PageLayout>
   )
 }
