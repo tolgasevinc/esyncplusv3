@@ -20,8 +20,10 @@ import { toastSuccess, toastError } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL, parseJsonResponse } from '@/lib/api'
 import { formatDate, formatPrice, normalizeForSearch, parseDecimal, cn } from '@/lib/utils'
+import { DecimalInput } from '@/components/DecimalInput'
 import { PhoneInput } from '@/components/PhoneInput'
 import { CustomerTitleInput } from '@/components/CustomerTitleInput'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 
 interface Offer {
   id: number
@@ -51,6 +53,8 @@ interface OfferItem {
   product_name?: string | null
   product_sku?: string | null
   unit_name?: string | null
+  currency_id?: number | null
+  currency_symbol?: string | null
   description?: string | null
   amount: number
   unit_price: number
@@ -100,9 +104,41 @@ interface Product {
   name: string
   sku?: string | null
   price: number
+  tax_rate?: number
   unit_name?: string | null
   currency_id?: number | null
   currency_symbol?: string | null
+  product_item_group_id?: number | null
+  product_item_group_name?: string | null
+  product_item_group_color?: string | null
+  product_item_group_sort_order?: number | null
+}
+
+/** Ürünleri gruplarına göre gruplar; product_item_group sort_order ve renge göre sıralar */
+function groupProductsByItemGroup(products: Product[]): { groupKey: string; groupName: string; groupColor: string | null; items: { product: Product; flatIndex: number }[] }[] {
+  const byGroup = new Map<string, { name: string; color: string | null; sortOrder: number; products: Product[] }>()
+  for (const p of products) {
+    const key = String(p.product_item_group_id ?? '')
+    const name = p.product_item_group_name || 'Grup yok'
+    const color = p.product_item_group_color || null
+    const sortOrder = p.product_item_group_sort_order ?? 9999
+    if (!byGroup.has(key)) byGroup.set(key, { name, color, sortOrder, products: [] })
+    byGroup.get(key)!.products.push(p)
+  }
+  const groups = Array.from(byGroup.entries()).map(([key, g]) => ({ key, ...g }))
+  groups.sort((a, b) => {
+    if (a.key === '') return 1
+    if (b.key === '') return -1
+    if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+    return (a.name || '').localeCompare(b.name || '')
+  })
+  let flatIndex = 0
+  return groups.map((g) => ({
+    groupKey: g.key,
+    groupName: g.name,
+    groupColor: g.color,
+    items: g.products.map((p) => ({ product: p, flatIndex: flatIndex++ })),
+  }))
 }
 
 const emptyItem = (): OfferItem => ({
@@ -111,6 +147,8 @@ const emptyItem = (): OfferItem => ({
   product_name: null,
   product_sku: null,
   unit_name: null,
+  currency_id: null,
+  currency_symbol: null,
   description: null,
   amount: 1,
   unit_price: 0,
@@ -148,16 +186,62 @@ const emptyForm = {
 
 const offersListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
 
-function getItemRowTotal(it: OfferItem): number {
-  let totalDiscount = it.line_discount
+function getOfferCurrencyInfo(form: { currency_id: number | '' }, currencies: ProductCurrency[]): { currency_id: number | null; currency_symbol: string } {
+  if (form.currency_id === '') return { currency_id: null, currency_symbol: '₺' }
+  const cur = currencies.find((c) => c.id === form.currency_id)
+  return { currency_id: form.currency_id, currency_symbol: cur?.symbol || cur?.code || '₺' }
+}
+
+function getItemLineDiscount(it: OfferItem): number {
   if (it.discount_type && it.discount_value != null) {
     const gross = it.amount * it.unit_price
-    totalDiscount = it.discount_type === 'percent' ? gross * (it.discount_value / 100) : it.discount_value
-  } else {
-    const d1 = it.discount_1 ?? 0, d2 = it.discount_2 ?? 0, d3 = it.discount_3 ?? 0, d4 = it.discount_4 ?? 0, d5 = it.discount_5 ?? 0
-    totalDiscount = totalDiscount || (d1 + d2 + d3 + d4 + d5)
+    return it.discount_type === 'percent' ? gross * (it.discount_value / 100) : it.discount_value
   }
-  return it.amount * it.unit_price - totalDiscount
+  const d1 = it.discount_1 ?? 0, d2 = it.discount_2 ?? 0, d3 = it.discount_3 ?? 0, d4 = it.discount_4 ?? 0, d5 = it.discount_5 ?? 0
+  return it.line_discount || (d1 + d2 + d3 + d4 + d5)
+}
+
+function getItemRowTotal(it: OfferItem): number {
+  return it.amount * it.unit_price - getItemLineDiscount(it)
+}
+
+/** 1 birim para biriminin TRY karşılığı (örn: 1 USD = 34.5 TRY → 34.5) */
+function rateToTRY(code: string | undefined, exchangeRates: Record<string, number>): number {
+  const c = (code || '').toUpperCase()
+  if (c === 'TRY' || c === 'TL' || !c) return 1
+  return exchangeRates[c] ?? 1
+}
+
+/** Tutarı item para biriminden teklif para birimine çevirir */
+function convertToOfferCurrency(
+  amount: number,
+  itemCurrencyId: number | null | undefined,
+  offerCurrencyId: number | '' | undefined,
+  currencies: ProductCurrency[],
+  exchangeRates: Record<string, number>
+): number {
+  const itemCode = itemCurrencyId ? currencies.find((c) => c.id === itemCurrencyId)?.code : undefined
+  const offerCode = offerCurrencyId === '' || offerCurrencyId == null
+    ? undefined
+    : currencies.find((c) => c.id === offerCurrencyId)?.code
+  const rateItem = rateToTRY(itemCode, exchangeRates)
+  const rateOffer = rateToTRY(offerCode, exchangeRates)
+  return (amount * rateItem) / rateOffer
+}
+
+/** Tutarı bir para biriminden diğerine çevirir (satır para birimi değişiminde kullanılır) */
+function convertBetweenCurrencies(
+  amount: number,
+  fromCurrencyId: number | null | undefined,
+  toCurrencyId: number | null | undefined,
+  currencies: ProductCurrency[],
+  exchangeRates: Record<string, number>
+): number {
+  const fromCode = fromCurrencyId ? currencies.find((c) => c.id === fromCurrencyId)?.code : undefined
+  const toCode = toCurrencyId ? currencies.find((c) => c.id === toCurrencyId)?.code : undefined
+  const rateFrom = rateToTRY(fromCode, exchangeRates)
+  const rateTo = rateToTRY(toCode, exchangeRates)
+  return (amount * rateFrom) / rateTo
 }
 
 /** Kelime kelime kontrol: her kelime title veya code içinde geçiyor mu? */
@@ -207,6 +291,7 @@ export function TekliflerPage() {
   const [newContactSaving, setNewContactSaving] = useState(false)
   const [activeProductSearchRow, setActiveProductSearchRow] = useState<number | null>(null)
   const [addRowFormOpen, setAddRowFormOpen] = useState(false)
+  const [addRowExpanded, setAddRowExpanded] = useState(false)
   const [addRowDraft, setAddRowDraft] = useState<OfferItem>(() => emptyItem())
   const [addRowProductInput, setAddRowProductInput] = useState('')
   const [addRowProductDebounced, setAddRowProductDebounced] = useState('')
@@ -218,8 +303,12 @@ export function TekliflerPage() {
   const [addRowProductHighlightIndex, setAddRowProductHighlightIndex] = useState(0)
   const lastCommittedItemsRef = useRef<OfferItem[]>([])
   const customerInputRef = useRef<HTMLInputElement>(null)
+  const [focusUnitPriceRow, setFocusUnitPriceRow] = useState<number | null>(null)
+  const unitPriceFocusRef = useRef<HTMLInputElement>(null)
   const [currencies, setCurrencies] = useState<ProductCurrency[]>([])
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
+  const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
+  const [teklifPriceTypeId, setTeklifPriceTypeId] = useState<number>(0)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
   const limit = pageSize === 'fit' ? fitLimit : pageSize
@@ -421,11 +510,12 @@ export function TekliflerPage() {
     }
     const params = new URLSearchParams({ search: addRowProductDebounced, limit: '10' })
     if (productTypeFilter !== '') params.set('filter_type_id', String(productTypeFilter))
+    if (teklifPriceTypeId > 0) params.set('price_type_id', String(teklifPriceTypeId))
     fetch(`${API_URL}/api/products?${params}`)
       .then((r) => r.json())
       .then((json: { data?: Product[] }) => setAddRowProductResults(json.data || []))
       .catch(() => setAddRowProductResults([]))
-  }, [addRowFormOpen, addRowProductDebounced, productTypeFilter])
+  }, [addRowFormOpen, addRowProductDebounced, productTypeFilter, teklifPriceTypeId])
 
   useEffect(() => {
     if (addRowFormOpen || activeProductSearchRow == null || !rowProductSearchDebounced.trim()) {
@@ -434,11 +524,12 @@ export function TekliflerPage() {
     }
     const params = new URLSearchParams({ search: rowProductSearchDebounced, limit: '10' })
     if (productTypeFilter !== '') params.set('filter_type_id', String(productTypeFilter))
+    if (teklifPriceTypeId > 0) params.set('price_type_id', String(teklifPriceTypeId))
     fetch(`${API_URL}/api/products?${params}`)
       .then((r) => r.json())
       .then((json: { data?: Product[] }) => setRowProductResults(json.data || []))
       .catch(() => setRowProductResults([]))
-  }, [addRowFormOpen, activeProductSearchRow, rowProductSearchDebounced, productTypeFilter])
+  }, [addRowFormOpen, activeProductSearchRow, rowProductSearchDebounced, productTypeFilter, teklifPriceTypeId])
 
   useEffect(() => {
     setCustomerSearchHighlightIndex(0)
@@ -469,20 +560,48 @@ export function TekliflerPage() {
   }, [addRowProductHighlightIndex])
 
   useEffect(() => {
+    if (focusUnitPriceRow == null) return
+    const t = setTimeout(() => {
+      if (unitPriceFocusRef.current) {
+        unitPriceFocusRef.current.focus()
+        unitPriceFocusRef.current.select()
+      }
+      setFocusUnitPriceRow(null)
+    }, 50)
+    return () => clearTimeout(t)
+  }, [focusUnitPriceRow])
+
+  useEffect(() => {
     if (modalOpen) {
       Promise.all([
         fetch(`${API_URL}/api/product-currencies?limit=50`).then((r) => r.json()),
         fetch(`${API_URL}/api/app-settings?category=parabirimleri`).then((r) => r.json()),
-      ]).then(([curRes, ratesRes]) => {
-        setCurrencies((curRes?.data || []).filter((c: ProductCurrency) => c.code))
+        fetch(`${API_URL}/api/product-tax-rates?limit=50`).then((r) => r.json()),
+        fetch(`${API_URL}/api/app-settings?category=offers`).then((r) => r.json()),
+      ]).then(([curRes, ratesRes, taxRes, offersRes]) => {
+        const curList = (curRes?.data || []).filter((c: ProductCurrency) => c.code)
+        setCurrencies(curList)
         const rates = ratesRes?.exchange_rates ? (JSON.parse(ratesRes.exchange_rates) as Record<string, number>) : {}
         setExchangeRates(typeof rates === 'object' && rates ? rates : {})
+        setTaxRates((taxRes?.data || []).map((t: { id: number; name: string; value: number }) => ({ id: t.id, name: t.name, value: t.value })))
+        const ptId = parseInt(offersRes?.teklif_fiyat_tipi_id || '0', 10)
+        setTeklifPriceTypeId(Number.isNaN(ptId) || ptId < 1 ? 0 : ptId)
+        if (!editingId) {
+          const eur = curList.find((c: ProductCurrency) => (c.code || '').toUpperCase() === 'EUR' || (c.code || '').toUpperCase() === 'EURO')
+          if (eur) {
+            const rate = (typeof rates === 'object' && rates ? (rates['EUR'] ?? rates['EURO']) : undefined) ?? 1
+            const rateNum = typeof rate === 'number' && !Number.isNaN(rate) ? rate : 1
+            setForm((f) => (f.currency_id === '' ? { ...f, currency_id: eur.id, exchange_rate: rateNum } : f))
+          }
+        }
       }).catch(() => {
         setCurrencies([])
         setExchangeRates({})
+        setTaxRates([])
+        setTeklifPriceTypeId(0)
       })
     }
-  }, [modalOpen])
+  }, [modalOpen, editingId])
 
   const openNew = async () => {
     setEditingId(null)
@@ -523,6 +642,8 @@ export function TekliflerPage() {
         it.product_name = row.product_name as string | null
         it.product_sku = row.product_sku as string | null
         it.unit_name = row.unit_name as string | null
+        it.currency_id = (row.currency_id as number) ?? null
+        it.currency_symbol = (row.currency_symbol as string) || null
         it.description = row.description as string | null
         it.amount = (row.amount as number) ?? 1
         it.unit_price = (row.unit_price as number) ?? 0
@@ -745,10 +866,24 @@ export function TekliflerPage() {
     }))
   }
 
-  const subtotal = form.items.reduce((s, it) => s + getItemRowTotal(it), 0)
+  const toOffer = (amount: number, it: OfferItem) =>
+    convertToOfferCurrency(amount, it.currency_id, form.currency_id, currencies, exchangeRates)
+  const grossTotal = form.items.reduce((s, it) => s + toOffer(it.amount * it.unit_price, it), 0)
+  const lineDiscountTotal = form.items.reduce((s, it) => s + toOffer(getItemLineDiscount(it), it), 0)
+  const subtotal = grossTotal - lineDiscountTotal
   const offerDiscountPercent = form.discount_1 ?? 0
   const offerDiscountAmount = subtotal * (offerDiscountPercent / 100)
-  const grandTotal = subtotal - offerDiscountAmount
+  const araToplam = subtotal - offerDiscountAmount
+  const hasLineDiscount = lineDiscountTotal > 0
+  const totalVat = form.items.reduce((s, it) => {
+    const itemNet = toOffer(getItemRowTotal(it), it)
+    const itemShare = subtotal > 0 ? itemNet / subtotal : 0
+    const itemAfterDiscount = itemNet - offerDiscountAmount * itemShare
+    return s + itemAfterDiscount * ((it.tax_rate ?? 0) / 100)
+  }, 0)
+  const grandTotal = araToplam + totalVat
+  const offerCurrencySymbol = form.currency_id === '' ? '₺' : (currencies.find((c) => c.id === form.currency_id)?.symbol || currencies.find((c) => c.id === form.currency_id)?.code || '₺')
+  const isTry = form.currency_id === ''
 
   const hasNewCustomerPending = customerInput.trim() && !form.customer_id
   const hasNewContactPending = form.customer_id && contactInput.trim() && !form.contact_id
@@ -978,65 +1113,67 @@ export function TekliflerPage() {
                 <div className="flex items-center gap-2">
                   {(customerEditMode || !editingId) ? (
                     <div className="flex gap-2 flex-1 min-w-0">
-                      <div className="relative flex-1 min-w-0">
-                        <Input
-                          ref={customerInputRef}
-                          value={customerInput}
-                          onChange={(e) => {
-                            setCustomerInput(e.target.value)
-                            setForm((f) => ({ ...f, customer_id: '', contact_id: '' }))
-                            fetchCustomerSearch(e.target.value)
-                          }}
-                          onFocus={() => customerInput && fetchCustomerSearch(customerInput)}
-                          onBlur={() => setTimeout(() => {
-                            setCustomerSearchResults([])
-                            checkSimilarCustomersOnBlur()
-                          }, 150)}
-                          onKeyDown={(e) => {
-                            if (customerSearchResults.length === 0) return
-                            if (e.key === 'ArrowDown') {
-                              e.preventDefault()
-                              setCustomerSearchHighlightIndex((i) => (i + 1) % customerSearchResults.length)
-                            } else if (e.key === 'ArrowUp') {
-                              e.preventDefault()
-                              setCustomerSearchHighlightIndex((i) => (i - 1 + customerSearchResults.length) % customerSearchResults.length)
-                            } else if (e.key === 'Enter') {
-                              const c = customerSearchResults[customerSearchHighlightIndex]
-                              if (c) {
+                      <Popover open={customerSearchResults.length > 0}>
+                        <PopoverAnchor asChild>
+                          <div className="relative flex-1 min-w-0">
+                            <Input
+                              ref={customerInputRef}
+                              value={customerInput}
+                              onChange={(e) => {
+                                setCustomerInput(e.target.value)
+                                setForm((f) => ({ ...f, customer_id: '', contact_id: '' }))
+                                fetchCustomerSearch(e.target.value)
+                              }}
+                              onFocus={() => customerInput && fetchCustomerSearch(customerInput)}
+                              onBlur={() => setTimeout(() => {
+                                setCustomerSearchResults([])
+                                checkSimilarCustomersOnBlur()
+                              }, 150)}
+                              onKeyDown={(e) => {
+                                if (customerSearchResults.length === 0) return
+                                if (e.key === 'ArrowDown') {
+                                  e.preventDefault()
+                                  setCustomerSearchHighlightIndex((i) => (i + 1) % customerSearchResults.length)
+                                } else if (e.key === 'ArrowUp') {
+                                  e.preventDefault()
+                                  setCustomerSearchHighlightIndex((i) => (i - 1 + customerSearchResults.length) % customerSearchResults.length)
+                                } else if (e.key === 'Enter') {
+                                  const c = customerSearchResults[customerSearchHighlightIndex]
+                                  if (c) {
+                                    e.preventDefault()
+                                    setForm((f) => ({ ...f, customer_id: c.id, contact_id: '' }))
+                                    setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
+                                    setCustomerSearchResults([])
+                                    fetchContacts(c.id)
+                                  }
+                                }
+                              }}
+                              placeholder="Müşteri ara..."
+                              className="h-9"
+                            />
+                          </div>
+                        </PopoverAnchor>
+                        <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0 max-h-[min(12rem,var(--radix-popover-content-available-height))] overflow-y-auto" onOpenAutoFocus={(e) => e.preventDefault()}>
+                          {customerSearchResults.map((c, i) => (
+                            <button
+                              key={c.id}
+                              ref={i === customerSearchHighlightIndex ? customerSearchHighlightRef : undefined}
+                              type="button"
+                              className={cn('w-full text-left px-3 py-2 text-sm', i === customerSearchHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
+                              onMouseDown={(e) => {
                                 e.preventDefault()
                                 setForm((f) => ({ ...f, customer_id: c.id, contact_id: '' }))
                                 setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
                                 setCustomerSearchResults([])
                                 fetchContacts(c.id)
-                              }
-                            }
-                          }}
-                          placeholder="Müşteri ara..."
-                          className="h-9"
-                        />
-                        {customerSearchResults.length > 0 && (
-                          <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-[100] max-h-48 overflow-y-auto">
-                            {customerSearchResults.map((c, i) => (
-                              <button
-                                key={c.id}
-                                ref={i === customerSearchHighlightIndex ? customerSearchHighlightRef : undefined}
-                                type="button"
-                                className={cn('w-full text-left px-3 py-2 text-sm', i === customerSearchHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
-                                onMouseDown={(e) => {
-                                  e.preventDefault()
-                                  setForm((f) => ({ ...f, customer_id: c.id, contact_id: '' }))
-                                  setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
-                                  setCustomerSearchResults([])
-                                  fetchContacts(c.id)
-                                }}
-                                onMouseEnter={() => setCustomerSearchHighlightIndex(i)}
-                              >
-                                {c.title} {c.code ? `(${c.code})` : ''}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                              }}
+                              onMouseEnter={() => setCustomerSearchHighlightIndex(i)}
+                            >
+                              {c.title} {c.code ? `(${c.code})` : ''}
+                            </button>
+                          ))}
+                        </PopoverContent>
+                      </Popover>
                       <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => { setForm((f) => ({ ...f, customer_id: '', contact_id: '' })); setCustomerInput('') }}>
                         İsimsiz
                       </Button>
@@ -1074,7 +1211,7 @@ export function TekliflerPage() {
                           <span className="w-px h-4 bg-border" aria-hidden />
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1" onClick={() => { setAddRowFormOpen(true); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); }}>
+                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1" onClick={() => { setAddRowFormOpen(true); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); setAddRowExpanded(false); }}>
                                 <Plus className="h-3.5 w-3.5" /> Satır ekle
                               </Button>
                             </TooltipTrigger>
@@ -1090,113 +1227,124 @@ export function TekliflerPage() {
                         <tr className="border-b">
                           <td className="p-2">
                             {!it.product_id ? (
-                              <div className="relative" onFocus={() => { setActiveProductSearchRow(idx); setRowProductSearchInput(it.description || ''); }}>
-                                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                                <Input
-                                  placeholder="Ürün ara veya açıklama..."
-                                  value={activeProductSearchRow === idx ? rowProductSearchInput : (it.description || '')}
-                                  onChange={(e) => {
-                                    setActiveProductSearchRow(idx)
-                                    const v = e.target.value
-                                    setRowProductSearchInput(v)
-                                    updateItem(idx, 'description', v || null)
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (activeProductSearchRow !== idx || rowProductResults.length === 0) return
-                                    if (e.key === 'ArrowDown') {
-                                      e.preventDefault()
-                                      setRowProductSearchHighlightIndex((i) => (i + 1) % rowProductResults.length)
-                                    } else if (e.key === 'ArrowUp') {
-                                      e.preventDefault()
-                                      setRowProductSearchHighlightIndex((i) => (i - 1 + rowProductResults.length) % rowProductResults.length)
-                                    } else if (e.key === 'Enter') {
-                                      const p = rowProductResults[rowProductSearchHighlightIndex]
-                                      if (p) {
-                                        e.preventDefault()
-                                        setForm((f) => ({
-                                          ...f,
-                                          items: f.items.map((item, i) =>
-                                            i === idx ? { ...item, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1, description: null } : item
-                                          ),
-                                        }))
-                                        setRowProductSearchInput('')
-                                        setRowProductResults([])
-                                        setActiveProductSearchRow(null)
-                                      }
-                                    }
-                                  }}
-                                  onBlur={() => setTimeout(() => setActiveProductSearchRow(null), 200)}
-                                  className="pl-8 h-8 text-sm"
-                                />
-                                {activeProductSearchRow === idx && rowProductResults.length > 0 && (
-                                  <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-[100] max-h-40 overflow-y-auto">
-                                    {rowProductResults.map((p, i) => (
-                                      <div
-                                        key={p.id}
-                                        ref={i === rowProductSearchHighlightIndex ? rowProductHighlightRef : undefined}
-                                        className={cn('px-3 py-2 text-sm cursor-pointer', i === rowProductSearchHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
-                                        onMouseDown={(e) => {
+                              <Popover open={activeProductSearchRow === idx && rowProductResults.length > 0}>
+                                <PopoverAnchor asChild>
+                                  <div className="relative" onFocus={() => { setActiveProductSearchRow(idx); setRowProductSearchInput(it.description || ''); }}>
+                                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                                    <Input
+                                      placeholder="Ürün ara veya açıklama..."
+                                      value={activeProductSearchRow === idx ? rowProductSearchInput : (it.description || '')}
+                                      onChange={(e) => {
+                                        setActiveProductSearchRow(idx)
+                                        const v = e.target.value
+                                        setRowProductSearchInput(v)
+                                        updateItem(idx, 'description', v || null)
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (activeProductSearchRow !== idx || rowProductResults.length === 0) return
+                                        if (e.key === 'ArrowDown') {
                                           e.preventDefault()
-                                          setForm((f) => ({
-                                            ...f,
-                                            items: f.items.map((item, ii) =>
-                                              ii === idx ? { ...item, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1, description: null } : item
-                                            ),
-                                          }))
-                                          setRowProductSearchInput('')
-                                          setRowProductResults([])
-                                          setActiveProductSearchRow(null)
-                                        }}
-                                        onMouseEnter={() => setRowProductSearchHighlightIndex(i)}
-                                      >
-                                        {p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} {p.currency_symbol || '₺'}
-                                      </div>
-                                    ))}
+                                          setRowProductSearchHighlightIndex((i) => (i + 1) % rowProductResults.length)
+                                        } else if (e.key === 'ArrowUp') {
+                                          e.preventDefault()
+                                          setRowProductSearchHighlightIndex((i) => (i - 1 + rowProductResults.length) % rowProductResults.length)
+                                        } else if (e.key === 'Enter') {
+                                          const p = rowProductResults[rowProductSearchHighlightIndex]
+                                          if (p) {
+                                            e.preventDefault()
+                                            setForm((f) => {
+                                              const oc = getOfferCurrencyInfo(f, currencies)
+                                              return {
+                                                ...f,
+                                                items: f.items.map((item, i) =>
+                                                  i === idx ? { ...item, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, currency_id: oc.currency_id, currency_symbol: oc.currency_symbol, unit_price: p.price, amount: 1, description: null, tax_rate: p.tax_rate ?? 0 } : item
+                                                ),
+                                              }
+                                            })
+                                            setRowProductSearchInput('')
+                                            setRowProductResults([])
+                                            setActiveProductSearchRow(null)
+                                            setFocusUnitPriceRow(idx)
+                                          }
+                                        }
+                                      }}
+                                      onBlur={() => setTimeout(() => setActiveProductSearchRow(null), 200)}
+                                      className="pl-8 h-8 text-sm"
+                                    />
                                   </div>
-                                )}
-                              </div>
+                                </PopoverAnchor>
+                                <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0 max-h-[min(16rem,var(--radix-popover-content-available-height))] overflow-y-auto" onOpenAutoFocus={(e) => e.preventDefault()}>
+                                  {groupProductsByItemGroup(rowProductResults).map((grp) => (
+                                    <div key={grp.groupKey} className="border-b border-border last:border-b-0">
+                                      <div
+                                        className={cn('px-3 py-1.5 text-xs font-medium sticky top-0 flex items-center gap-2', !grp.groupColor && 'bg-muted/50 text-muted-foreground')}
+                                        style={{
+                                          ...(grp.groupColor && { backgroundColor: `${grp.groupColor}15`, borderLeft: `3px solid ${grp.groupColor}` }),
+                                        }}
+                                      >
+                                        <span className="shrink-0 w-2.5 h-2.5 rounded-full border border-muted" style={{ backgroundColor: grp.groupColor || 'transparent' }} />
+                                        {grp.groupName}
+                                      </div>
+                                      {grp.items.map(({ product: p, flatIndex: i }) => (
+                                        <div
+                                          key={p.id}
+                                          ref={i === rowProductSearchHighlightIndex ? rowProductHighlightRef : undefined}
+                                          className={cn('flex items-center gap-2 px-3 py-2 text-sm cursor-pointer', i === rowProductSearchHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
+                                          onMouseDown={(e) => {
+                                            e.preventDefault()
+                                            setForm((f) => {
+                                              const oc = getOfferCurrencyInfo(f, currencies)
+                                              return {
+                                                ...f,
+                                                items: f.items.map((item, ii) =>
+                                                  ii === idx ? { ...item, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, currency_id: oc.currency_id, currency_symbol: oc.currency_symbol, unit_price: p.price, amount: 1, description: null, tax_rate: p.tax_rate ?? 0 } : item
+                                                ),
+                                              }
+                                            })
+                                            setRowProductSearchInput('')
+                                            setRowProductResults([])
+                                            setActiveProductSearchRow(null)
+                                            setFocusUnitPriceRow(idx)
+                                          }}
+                                          onMouseEnter={() => setRowProductSearchHighlightIndex(i)}
+                                        >
+                                          <span
+                                            className="shrink-0 w-2.5 h-2.5 rounded-full border border-muted"
+                                            style={{ backgroundColor: grp.groupColor || 'transparent' }}
+                                          />
+                                          <span className="min-w-0 truncate">
+                                            {p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} {p.currency_symbol || '₺'}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ))}
+                                </PopoverContent>
+                              </Popover>
                             ) : (
                               <span className="font-medium">{it.product_name || it.product_sku || it.description || '—'}</span>
                             )}
                           </td>
                           <td className="p-2">
-                            <Input type="text" inputMode="decimal" className="h-8 w-full min-w-14 text-right" value={it.amount === 0 ? '' : String(it.amount)} onChange={(e) => updateItem(idx, 'amount', parseDecimal(e.target.value) || 0)} placeholder="0" />
+                            <DecimalInput className="h-8 w-full min-w-14 text-right" value={it.amount} onChange={(n) => updateItem(idx, 'amount', n || 0)} placeholder="0" />
                           </td>
                           <td className="p-2 text-center text-muted-foreground text-sm">{it.unit_name || 'Adet'}</td>
                           <td className="p-2">
-                            <Input type="text" inputMode="decimal" className="h-8 w-full min-w-20 text-right" value={it.unit_price === 0 ? '' : it.unit_price.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} onChange={(e) => updateItem(idx, 'unit_price', parseDecimal(e.target.value))} placeholder="0,00" />
+                            <div className="relative">
+                              <DecimalInput
+                                ref={idx === focusUnitPriceRow ? unitPriceFocusRef : undefined}
+                                className="h-8 w-full min-w-20 text-right pr-8"
+                                value={it.unit_price}
+                                onChange={(n) => updateItem(idx, 'unit_price', n ?? 0)}
+                                placeholder="0,00"
+                                maxDecimals={2}
+                              />
+                              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{it.currency_symbol || '₺'}</span>
+                            </div>
                           </td>
-                          <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(it))} ₺</td>
+                          <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(it))} {it.currency_symbol || '₺'}</td>
                           <td className="p-2">
                             <div className="flex items-center justify-end gap-1">
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => {
-                                    if (idx < lastCommittedItemsRef.current.length) {
-                                      const committed = lastCommittedItemsRef.current[idx]
-                                      setForm((f) => ({ ...f, items: f.items.map((item, i) => (i === idx ? { ...committed } : item)) }))
-                                    } else {
-                                      removeItem(idx)
-                                    }
-                                  }}>
-                                    <X className="h-3.5 w-3.5" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>{idx < lastCommittedItemsRef.current.length ? 'Değişiklikleri geri al' : 'Satırı kaldır'}</TooltipContent>
-                              </Tooltip>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => {
-                                    const arr = [...lastCommittedItemsRef.current]
-                                    while (arr.length <= idx) arr.push({ ...emptyItem() })
-                                    arr[idx] = { ...form.items[idx] }
-                                    lastCommittedItemsRef.current = arr
-                                  }}>
-                                    <Save className="h-3.5 w-3.5" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Kaydet</TooltipContent>
-                              </Tooltip>
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setExpandedRowIndex(expandedRowIndex === idx ? null : idx)}>
@@ -1219,10 +1367,52 @@ export function TekliflerPage() {
                         {expandedRowIndex === idx && (
                           <tr className="border-b bg-muted/20">
                             <td colSpan={6} className="p-3">
-                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                                <div className="space-y-2">
+                                  <Label className="text-xs">Para Birimi</Label>
+                                  <select
+                                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                    value={it.currency_id ?? ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value === '' ? null : Number(e.target.value)
+                                      const cur = val ? currencies.find((c) => c.id === val) : null
+                                      const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
+                                      const oldId = it.currency_id
+                                      const newUnitPrice = convertBetweenCurrencies(it.unit_price, oldId, val, currencies, exchangeRates)
+                                      const newDiscountValue = it.discount_type === 'fixed' && it.discount_value != null
+                                        ? convertBetweenCurrencies(it.discount_value, oldId, val, currencies, exchangeRates)
+                                        : it.discount_value
+                                      setForm((f) => ({
+                                        ...f,
+                                        items: f.items.map((item, i) =>
+                                          i === idx
+                                            ? { ...item, currency_id: val, currency_symbol: symbol, unit_price: newUnitPrice, discount_value: newDiscountValue }
+                                            : item
+                                        ),
+                                      }))
+                                    }}
+                                  >
+                                    <option value="">TRY (₺)</option>
+                                    {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
+                                      <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
+                                    ))}
+                                  </select>
+                                </div>
                                 <div className="space-y-2">
                                   <Label className="text-xs">KDV (%)</Label>
-                                  <Input type="text" inputMode="decimal" className="h-8 text-sm" value={it.tax_rate === 0 ? '' : String(it.tax_rate)} onChange={(e) => updateItem(idx, 'tax_rate', parseDecimal(e.target.value) ?? 0)} placeholder="0" />
+                                  <select
+                                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                    value={it.tax_rate != null ? String(it.tax_rate) : ''}
+                                    onChange={(e) => updateItem(idx, 'tax_rate', e.target.value === '' ? 0 : parseFloat(e.target.value))}
+                                  >
+                                    <option value="">Seçin</option>
+                                    {taxRates.map((tr) => (
+                                      <option key={tr.id} value={String(tr.value)}>{tr.name} ({tr.value}%)</option>
+                                    ))}
+                                    {it.tax_rate != null && !taxRates.some((tr) => tr.value === it.tax_rate) && (
+                                      <option value={String(it.tax_rate)}>{it.tax_rate}%</option>
+                                    )}
+                                  </select>
                                 </div>
                                 <div className="space-y-2">
                                   <Label className="text-xs">İskonto</Label>
@@ -1233,8 +1423,8 @@ export function TekliflerPage() {
                                       <option value="fixed">Sabit</option>
                                     </select>
                                     <div className="relative flex-1 min-w-0">
-                                      <Input type="text" inputMode="decimal" className="h-8 text-right pr-8" value={it.discount_value != null && it.discount_value !== 0 ? String(it.discount_value) : ''} onChange={(e) => updateItem(idx, 'discount_value', parseDecimal(e.target.value))} placeholder="0" />
-                                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{it.discount_type === 'percent' ? '%' : it.discount_type === 'fixed' ? '₺' : ''}</span>
+                                      <DecimalInput className="h-8 text-right pr-8" value={it.discount_value ?? 0} onChange={(n) => updateItem(idx, 'discount_value', n ?? 0)} placeholder="0" maxDecimals={2} />
+                                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{it.discount_type === 'percent' ? '%' : it.discount_type === 'fixed' ? (it.currency_symbol || '₺') : ''}</span>
                                     </div>
                                   </div>
                                 </div>
@@ -1251,92 +1441,198 @@ export function TekliflerPage() {
                     {addRowFormOpen && (
                       <tr className="border-b bg-muted/20">
                         <td className="p-2">
-                          <div className="relative">
-                            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                            <Input
-                              placeholder="Ürün ara veya açıklama..."
-                              value={addRowProductInput || addRowDraft.product_name || addRowDraft.description || ''}
-                              onChange={(e) => {
-                                const v = e.target.value
-                                setAddRowProductInput(v)
-                                setAddRowDraft((d) => ({ ...d, description: v || null, ...(v ? { product_id: null, product_name: null, product_sku: null } : {}) }))
-                              }}
-                              onKeyDown={(e) => {
-                                if (addRowProductResults.length === 0) return
-                                if (e.key === 'ArrowDown') {
-                                  e.preventDefault()
-                                  setAddRowProductHighlightIndex((i) => (i + 1) % addRowProductResults.length)
-                                } else if (e.key === 'ArrowUp') {
-                                  e.preventDefault()
-                                  setAddRowProductHighlightIndex((i) => (i - 1 + addRowProductResults.length) % addRowProductResults.length)
-                                } else if (e.key === 'Enter') {
-                                  const p = addRowProductResults[addRowProductHighlightIndex]
-                                  if (p) {
-                                    e.preventDefault()
-                                    setAddRowDraft((d) => ({ ...d, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1 }))
-                                    setAddRowProductInput('')
-                                    setAddRowProductResults([])
-                                  }
-                                }
-                              }}
-                              className="pl-8 h-8 text-sm"
-                            />
-                            {addRowProductResults.length > 0 && (
-                              <div className="absolute top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg z-[100] max-h-40 overflow-y-auto">
-                                {addRowProductResults.map((p, i) => (
-                                  <div
-                                    key={p.id}
-                                    ref={i === addRowProductHighlightIndex ? addRowProductHighlightRef : undefined}
-                                    className={cn('px-3 py-2 text-sm cursor-pointer', i === addRowProductHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
-                                    onMouseDown={(e) => {
+                          <Popover open={addRowProductResults.length > 0}>
+                            <PopoverAnchor asChild>
+                              <div className="relative">
+                                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                                <Input
+                                  placeholder="Ürün ara veya açıklama..."
+                                  value={addRowProductInput || addRowDraft.product_name || addRowDraft.description || ''}
+                                  onChange={(e) => {
+                                    const v = e.target.value
+                                    setAddRowProductInput(v)
+                                    setAddRowDraft((d) => ({ ...d, description: v || null, ...(v ? { product_id: null, product_name: null, product_sku: null } : {}) }))
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (addRowProductResults.length === 0) return
+                                    if (e.key === 'ArrowDown') {
                                       e.preventDefault()
-                                      setAddRowDraft((d) => ({ ...d, product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, unit_price: p.price, amount: 1 }))
-                                      setAddRowProductInput('')
-                                      setAddRowProductResults([])
-                                    }}
-                                    onMouseEnter={() => setAddRowProductHighlightIndex(i)}
-                                  >
-                                    {p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} {p.currency_symbol || '₺'}
-                                  </div>
-                                ))}
+                                      setAddRowProductHighlightIndex((i) => (i + 1) % addRowProductResults.length)
+                                    } else if (e.key === 'ArrowUp') {
+                                      e.preventDefault()
+                                      setAddRowProductHighlightIndex((i) => (i - 1 + addRowProductResults.length) % addRowProductResults.length)
+                                    } else if (e.key === 'Enter') {
+                                      const p = addRowProductResults[addRowProductHighlightIndex]
+                                      if (p) {
+                                        e.preventDefault()
+                                        setForm((f) => {
+                                          const oc = getOfferCurrencyInfo(f, currencies)
+                                          const newItem: OfferItem = { ...emptyItem(), product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, currency_id: oc.currency_id, currency_symbol: oc.currency_symbol, unit_price: p.price, amount: 1, tax_rate: p.tax_rate ?? 0 }
+                                          const newIdx = f.items.length
+                                          queueMicrotask(() => setFocusUnitPriceRow(newIdx))
+                                          return { ...f, items: [...f.items, newItem] }
+                                        })
+                                        setAddRowDraft(emptyItem())
+                                        setAddRowProductInput('')
+                                        setAddRowProductResults([])
+                                        setAddRowExpanded(false)
+                                      } else if (addRowDraft.product_id || addRowDraft.description) {
+                                        e.preventDefault()
+                                        const name = addRowDraft.product_name || addRowDraft.description || 'Yeni satır'
+                                        const newItem = { ...addRowDraft, product_name: addRowDraft.product_name || name, description: addRowDraft.description || (addRowDraft.product_id ? null : name) }
+                                        setForm((f) => ({ ...f, items: [...f.items, newItem] }))
+                                        setAddRowDraft(emptyItem())
+                                        setAddRowProductInput('')
+                                        setAddRowProductResults([])
+                                        setAddRowExpanded(false)
+                                      }
+                                    }
+                                  }}
+                                  className="pl-8 h-8 text-sm"
+                                />
                               </div>
-                            )}
-                          </div>
+                            </PopoverAnchor>
+                            <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0 max-h-[min(16rem,var(--radix-popover-content-available-height))] overflow-y-auto" onOpenAutoFocus={(e) => e.preventDefault()}>
+                              {groupProductsByItemGroup(addRowProductResults).map((grp) => (
+                                <div key={grp.groupKey} className="border-b border-border last:border-b-0">
+                                  <div
+                                    className={cn('px-3 py-1.5 text-xs font-medium sticky top-0 flex items-center gap-2', !grp.groupColor && 'bg-muted/50 text-muted-foreground')}
+                                    style={{
+                                      ...(grp.groupColor && { backgroundColor: `${grp.groupColor}15`, borderLeft: `3px solid ${grp.groupColor}` }),
+                                    }}
+                                  >
+                                    <span className="shrink-0 w-2.5 h-2.5 rounded-full border border-muted" style={{ backgroundColor: grp.groupColor || 'transparent' }} />
+                                    {grp.groupName}
+                                  </div>
+                                  {grp.items.map(({ product: p, flatIndex: i }) => (
+                                    <div
+                                      key={p.id}
+                                      ref={i === addRowProductHighlightIndex ? addRowProductHighlightRef : undefined}
+                                      className={cn('flex items-center gap-2 px-3 py-2 text-sm cursor-pointer', i === addRowProductHighlightIndex ? 'bg-muted' : 'hover:bg-muted/70')}
+                                      onMouseDown={(e) => {
+                                        e.preventDefault()
+                                        setForm((f) => {
+                                          const oc = getOfferCurrencyInfo(f, currencies)
+                                          const newItem: OfferItem = { ...emptyItem(), product_id: p.id, product_name: p.name, product_sku: p.sku || null, unit_name: p.unit_name || null, currency_id: oc.currency_id, currency_symbol: oc.currency_symbol, unit_price: p.price, amount: 1, tax_rate: p.tax_rate ?? 0 }
+                                          const newIdx = f.items.length
+                                          queueMicrotask(() => setFocusUnitPriceRow(newIdx))
+                                          return { ...f, items: [...f.items, newItem] }
+                                        })
+                                        setAddRowDraft(emptyItem())
+                                        setAddRowProductInput('')
+                                        setAddRowProductResults([])
+                                        setAddRowExpanded(false)
+                                      }}
+                                      onMouseEnter={() => setAddRowProductHighlightIndex(i)}
+                                    >
+                                      <span
+                                        className="shrink-0 w-2.5 h-2.5 rounded-full border border-muted"
+                                        style={{ backgroundColor: grp.groupColor || 'transparent' }}
+                                      />
+                                      <span className="min-w-0 truncate">
+                                        {p.name} {p.sku ? `(${p.sku})` : ''} — {formatPrice(p.price)} {p.currency_symbol || '₺'}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ))}
+                            </PopoverContent>
+                          </Popover>
                         </td>
                         <td className="p-2">
-                          <Input type="text" inputMode="decimal" className="h-8 w-full min-w-14 text-right" value={addRowDraft.amount === 0 ? '' : String(addRowDraft.amount)} onChange={(e) => setAddRowDraft((d) => ({ ...d, amount: parseDecimal(e.target.value) || 0 }))} placeholder="1" />
+                          <DecimalInput className="h-8 w-full min-w-14 text-right" value={addRowDraft.amount} onChange={(n) => setAddRowDraft((d) => ({ ...d, amount: n || 0 }))} placeholder="1" />
                         </td>
                         <td className="p-2 text-center text-muted-foreground text-sm">{addRowDraft.unit_name || 'Adet'}</td>
                         <td className="p-2">
-                          <Input type="text" inputMode="decimal" className="h-8 w-full min-w-20 text-right" value={addRowDraft.unit_price === 0 ? '' : addRowDraft.unit_price.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} onChange={(e) => setAddRowDraft((d) => ({ ...d, unit_price: parseDecimal(e.target.value) ?? 0 }))} placeholder="0,00" />
+                          <div className="relative">
+                            <DecimalInput className="h-8 w-full min-w-20 text-right pr-8" value={addRowDraft.unit_price} onChange={(n) => setAddRowDraft((d) => ({ ...d, unit_price: n ?? 0 }))} placeholder="0,00" maxDecimals={2} />
+                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{addRowDraft.currency_symbol || '₺'}</span>
+                          </div>
                         </td>
-                        <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(addRowDraft))} ₺</td>
+                        <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(addRowDraft))} {addRowDraft.currency_symbol || '₺'}</td>
                         <td className="p-2">
                           <div className="flex items-center justify-end gap-1">
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => { setAddRowFormOpen(false); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); }}>
-                                  <X className="h-3.5 w-3.5" />
+                                <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setAddRowExpanded((v) => !v)}>
+                                  {addRowExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                                 </Button>
                               </TooltipTrigger>
-                              <TooltipContent>İptal</TooltipContent>
+                              <TooltipContent>{addRowExpanded ? 'Detayları kapat' : 'KDV, İskonto, Satır notu'}</TooltipContent>
                             </Tooltip>
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => {
-                                  const name = addRowDraft.product_name || addRowDraft.description || 'Yeni satır'
-                                  const newItem = { ...addRowDraft, product_name: addRowDraft.product_name || name, description: addRowDraft.description || (addRowDraft.product_id ? null : name) }
-                                  setForm((f) => ({ ...f, items: [...f.items, newItem] }))
-                                  setAddRowFormOpen(false)
-                                  setAddRowDraft(emptyItem())
-                                  setAddRowProductInput('')
-                                  setAddRowProductResults([])
-                                }}>
-                                  <Save className="h-3.5 w-3.5" />
+                                <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => { setAddRowFormOpen(false); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); setAddRowExpanded(false); }}>
+                                  <Trash2 className="h-3.5 w-3.5" />
                                 </Button>
                               </TooltipTrigger>
-                              <TooltipContent>Kaydet</TooltipContent>
+                              <TooltipContent>Satırı sil</TooltipContent>
                             </Tooltip>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    {addRowFormOpen && addRowExpanded && (
+                      <tr className="border-b bg-muted/20">
+                        <td colSpan={6} className="p-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="space-y-2">
+                              <Label className="text-xs">Para Birimi</Label>
+                              <select
+                                className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                value={addRowDraft.currency_id ?? ''}
+                                onChange={(e) => {
+                                  const val = e.target.value === '' ? null : Number(e.target.value)
+                                  const cur = val ? currencies.find((c) => c.id === val) : null
+                                  const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
+                                  const oldId = addRowDraft.currency_id
+                                  const newUnitPrice = convertBetweenCurrencies(addRowDraft.unit_price, oldId, val, currencies, exchangeRates)
+                                  const newDiscountValue = addRowDraft.discount_type === 'fixed' && addRowDraft.discount_value != null
+                                    ? convertBetweenCurrencies(addRowDraft.discount_value, oldId, val, currencies, exchangeRates)
+                                    : addRowDraft.discount_value
+                                  setAddRowDraft((d) => ({ ...d, currency_id: val, currency_symbol: symbol, unit_price: newUnitPrice, discount_value: newDiscountValue }))
+                                }}
+                              >
+                                <option value="">TRY (₺)</option>
+                                {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
+                                  <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-xs">KDV (%)</Label>
+                              <select
+                                className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                value={addRowDraft.tax_rate != null ? String(addRowDraft.tax_rate) : ''}
+                                onChange={(e) => setAddRowDraft((d) => ({ ...d, tax_rate: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
+                              >
+                                <option value="">Seçin</option>
+                                {taxRates.map((tr) => (
+                                  <option key={tr.id} value={String(tr.value)}>{tr.name} ({tr.value}%)</option>
+                                ))}
+                                {addRowDraft.tax_rate != null && !taxRates.some((tr) => tr.value === addRowDraft.tax_rate) && (
+                                  <option value={String(addRowDraft.tax_rate)}>{addRowDraft.tax_rate}%</option>
+                                )}
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-xs">İskonto</Label>
+                              <div className="flex items-center gap-2">
+                                <select className="h-8 rounded-md border border-input bg-transparent px-2 text-sm w-24 shrink-0" value={addRowDraft.discount_type ?? ''} onChange={(e) => setAddRowDraft((d) => ({ ...d, discount_type: e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed') }))}>
+                                  <option value="">—</option>
+                                  <option value="percent">Yüzde</option>
+                                  <option value="fixed">Sabit</option>
+                                </select>
+                                <div className="relative flex-1 min-w-0">
+                                  <DecimalInput className="h-8 text-right pr-8" value={addRowDraft.discount_value ?? 0} onChange={(n) => setAddRowDraft((d) => ({ ...d, discount_value: n ?? 0 }))} placeholder="0" maxDecimals={2} />
+                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{addRowDraft.discount_type === 'percent' ? '%' : addRowDraft.discount_type === 'fixed' ? (addRowDraft.currency_symbol || '₺') : ''}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="space-y-2 sm:col-span-1">
+                              <Label className="text-xs">Satır notu</Label>
+                              <Input className="h-8 text-sm" value={addRowDraft.description || ''} onChange={(e) => setAddRowDraft((d) => ({ ...d, description: e.target.value || null }))} placeholder="Satır notu" />
+                            </div>
                           </div>
                         </td>
                       </tr>
@@ -1347,38 +1643,81 @@ export function TekliflerPage() {
 
               {/* Toplamlar */}
               <div className="shrink-0 border rounded-lg p-4 bg-muted/10 space-y-2 max-w-xs ml-auto">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Ara Toplam</span>
-                  <span className="font-medium tabular-nums">{formatPrice(subtotal)} ₺</span>
-                </div>
-                <div className="flex justify-between text-sm items-center gap-2">
-                  <span className="text-muted-foreground">İskonto</span>
-                  {totalEditMode ? (
-                    <div className="flex items-center gap-1">
-                      <Input type="text" inputMode="decimal" className="h-8 w-16 text-right" value={offerDiscountPercent === 0 ? '' : String(offerDiscountPercent)} onChange={(e) => setForm((f) => ({ ...f, discount_1: parseDecimal(e.target.value) ?? 0 }))} placeholder="0" />
-                      <span className="text-muted-foreground">%</span>
+                {hasLineDiscount ? (
+                  <>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Toplam</span>
+                      <span className="font-medium tabular-nums">{formatPrice(grossTotal)} {offerCurrencySymbol}</span>
                     </div>
-                  ) : (
-                    <span className="font-medium tabular-nums">{offerDiscountPercent > 0 ? `%${offerDiscountPercent} (-${formatPrice(offerDiscountAmount)} ₺)` : '—'}</span>
-                  )}
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">İskonto</span>
+                      <span className="font-medium tabular-nums text-destructive">-{formatPrice(lineDiscountTotal)} {offerCurrencySymbol}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Ara Toplam</span>
+                      <span className="font-medium tabular-nums">{formatPrice(subtotal)} {offerCurrencySymbol}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Toplam</span>
+                    <span className="font-medium tabular-nums">{formatPrice(subtotal)} {offerCurrencySymbol}</span>
+                  </div>
+                )}
+                {(offerDiscountPercent > 0 || totalEditMode) && (
+                  <>
+                    <div className="flex justify-between text-sm items-center gap-2">
+                      <span className="text-muted-foreground">İskonto (Yüzde)</span>
+                      {totalEditMode ? (
+                        <div className="flex items-center gap-1">
+                          <Input type="text" inputMode="decimal" className="h-8 w-16 text-right" value={offerDiscountPercent === 0 ? '' : String(offerDiscountPercent)} onChange={(e) => setForm((f) => ({ ...f, discount_1: parseDecimal(e.target.value) ?? 0 }))} placeholder="0" />
+                          <span className="text-muted-foreground">%</span>
+                        </div>
+                      ) : (
+                        <span className="font-medium tabular-nums">%{offerDiscountPercent}</span>
+                      )}
+                    </div>
+                    {offerDiscountPercent > 0 && (
+                      <>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">İskonto Miktarı</span>
+                          <span className="font-medium tabular-nums text-destructive">-{formatPrice(offerDiscountAmount)} {offerCurrencySymbol}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Ara Toplam</span>
+                          <span className="font-medium tabular-nums">{formatPrice(araToplam)} {offerCurrencySymbol}</span>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">K.D.V.</span>
+                  <span className="font-medium tabular-nums">{formatPrice(totalVat)} {offerCurrencySymbol}</span>
                 </div>
                 <div className="flex justify-between text-sm pt-2 border-t">
-                  <span className="font-medium">Genel Toplam</span>
+                  <span className="font-bold text-destructive">Genel Toplam</span>
                   {totalEditMode ? (
                     <div className="flex items-center gap-1">
                       <Input type="text" inputMode="decimal" className="h-8 w-28 text-right font-medium" value={grandTotal === 0 ? '' : grandTotal.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} onChange={(e) => {
                         const v = parseDecimal(e.target.value)
                         if (v != null && subtotal > 0) {
-                          const pct = Math.max(0, Math.min(100, (1 - v / subtotal) * 100))
+                          const pct = Math.max(0, Math.min(100, (1 - (v - totalVat) / subtotal) * 100))
                           setForm((f) => ({ ...f, discount_1: pct }))
                         }
                       }} placeholder="0,00" />
-                      <span>₺</span>
+                      <span>{offerCurrencySymbol}</span>
                     </div>
                   ) : (
-                    <span className="font-semibold tabular-nums">{formatPrice(grandTotal)} ₺</span>
+                    <span className="font-bold text-destructive tabular-nums">{formatPrice(grandTotal)} {offerCurrencySymbol}</span>
                   )}
                 </div>
+                {!isTry && (
+                  <div className="flex justify-between text-xs pt-1 text-muted-foreground">
+                    <span>Yaklaşık TL karşılığı</span>
+                    <span className="tabular-nums">≈ {formatPrice(grandTotal * (form.exchange_rate || 1))} ₺</span>
+                  </div>
+                )}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button type="button" variant="ghost" size="sm" className="h-7 text-xs -mt-1" onClick={() => setTotalEditMode((v) => !v)}>

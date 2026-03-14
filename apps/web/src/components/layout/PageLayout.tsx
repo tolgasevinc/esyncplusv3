@@ -20,6 +20,8 @@ interface PageLayoutProps {
   footerActions?: ReactNode
   /** İçerik alanı ref (Sığdır hesaplaması için) */
   contentRef?: React.RefObject<HTMLDivElement>
+  /** İçerik alanı overflow - hidden: tablo gibi iç scroll için */
+  contentOverflow?: 'auto' | 'hidden'
   children: ReactNode
 }
 
@@ -34,6 +36,7 @@ export function PageLayout({
   footerContent,
   footerActions,
   contentRef,
+  contentOverflow = 'auto',
   children,
 }: PageLayoutProps) {
   return (
@@ -75,8 +78,8 @@ export function PageLayout({
         </div>
       </header>
 
-      {/* Scrollable Content */}
-      <div ref={contentRef} className="flex-1 overflow-auto p-4 theme-page-bg">
+      {/* Content */}
+      <div ref={contentRef} className={`flex-1 min-h-0 flex flex-col p-4 theme-page-bg ${contentOverflow === 'hidden' ? 'overflow-hidden' : 'overflow-auto'}`}>
         {children}
       </div>
 

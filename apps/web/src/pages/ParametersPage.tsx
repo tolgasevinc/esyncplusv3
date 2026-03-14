@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt, UsersRound, Scale } from 'lucide-react'
+import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt, UsersRound, Scale, Boxes } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -7,6 +7,7 @@ const productTables = [
   { id: 'urunler', title: 'Ürünler', icon: PackageSearch, path: '/products' },
   { id: 'markalar', title: 'Markalar', icon: Tag, path: '/parametreler/markalar' },
   { id: 'birimler', title: 'Birimler', icon: Ruler, path: '/parametreler/birimler' },
+  { id: 'urun-gruplari', title: 'Ürün Grupları', icon: Boxes, path: '/parametreler/urun-gruplari' },
   { id: 'gruplar', title: 'Gruplar', icon: FolderTree, path: '/parametreler/gruplar' },
   { id: 'kategoriler', title: 'Kategoriler', icon: Layers, path: '/parametreler/kategoriler' },
   { id: 'urun-tipleri', title: 'Ürün Tipleri', icon: Type, path: '/parametreler/urun-tipleri' },

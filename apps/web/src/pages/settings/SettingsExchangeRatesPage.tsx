@@ -4,6 +4,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
@@ -31,6 +39,9 @@ export function SettingsExchangeRatesPage() {
   const [page, setPage] = useState(1)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [deleting, setDeleting] = useState(false)
+  const [confirmModalOpen, setConfirmModalOpen] = useState(false)
+  const [confirmType, setConfirmType] = useState<'single' | 'bulk'>('single')
+  const [idToDelete, setIdToDelete] = useState<number | null>(null)
   const limit = 50
 
   const fetchData = useCallback(async () => {
@@ -74,41 +85,51 @@ export function SettingsExchangeRatesPage() {
     else setSelectedIds(new Set(data.map((r) => r.id)))
   }
 
-  const handleDeleteOne = async (id: number) => {
-    if (!confirm('Bu kaydı silmek istediğinize emin misiniz?')) return
-    setDeleting(true)
-    try {
-      const res = await fetch(`${API_URL}/api/exchange-rates/${id}`, { method: 'DELETE' })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'Silinemedi')
-      toastSuccess('Silindi', 'Kayıt silindi.')
-      fetchData()
-    } catch (err) {
-      toastError('Hata', err instanceof Error ? err.message : 'Silinemedi')
-    } finally {
-      setDeleting(false)
-    }
+  const openDeleteConfirm = (type: 'single' | 'bulk', id?: number) => {
+    setConfirmType(type)
+    setIdToDelete(id ?? null)
+    setConfirmModalOpen(true)
   }
 
-  const handleBulkDelete = async () => {
-    if (selectedIds.size === 0) return
-    if (!confirm(`${selectedIds.size} kaydı silmek istediğinize emin misiniz?`)) return
-    setDeleting(true)
-    try {
-      const res = await fetch(`${API_URL}/api/exchange-rates`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: Array.from(selectedIds) }),
-      })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'Silinemedi')
-      toastSuccess('Silindi', `${json.deleted ?? selectedIds.size} kayıt silindi.`)
-      setSelectedIds(new Set())
-      fetchData()
-    } catch (err) {
-      toastError('Hata', err instanceof Error ? err.message : 'Silinemedi')
-    } finally {
-      setDeleting(false)
+  const closeConfirmModal = () => {
+    setConfirmModalOpen(false)
+    setIdToDelete(null)
+  }
+
+  const executeDelete = async () => {
+    if (confirmType === 'single' && idToDelete != null) {
+      setDeleting(true)
+      try {
+        const res = await fetch(`${API_URL}/api/exchange-rates/${idToDelete}`, { method: 'DELETE' })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || 'Silinemedi')
+        toastSuccess('Silindi', 'Kayıt silindi.')
+        closeConfirmModal()
+        fetchData()
+      } catch (err) {
+        toastError('Hata', err instanceof Error ? err.message : 'Silinemedi')
+      } finally {
+        setDeleting(false)
+      }
+    } else if (confirmType === 'bulk' && selectedIds.size > 0) {
+      setDeleting(true)
+      try {
+        const res = await fetch(`${API_URL}/api/exchange-rates`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: Array.from(selectedIds) }),
+        })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error || 'Silinemedi')
+        toastSuccess('Silindi', `${json.deleted ?? selectedIds.size} kayıt silindi.`)
+        setSelectedIds(new Set())
+        closeConfirmModal()
+        fetchData()
+      } catch (err) {
+        toastError('Hata', err instanceof Error ? err.message : 'Silinemedi')
+      } finally {
+        setDeleting(false)
+      }
     }
   }
 
@@ -151,7 +172,7 @@ export function SettingsExchangeRatesPage() {
             </div>
             <div className="flex items-center gap-2">
               {selectedIds.size > 0 && (
-                <Button variant="destructive" onClick={handleBulkDelete} disabled={deleting}>
+                <Button variant="destructive" onClick={() => openDeleteConfirm('bulk')} disabled={deleting}>
                   <Trash2 className="h-4 w-4 mr-2" />
                   {deleting ? 'Siliniyor...' : `Seçilenleri Sil (${selectedIds.size})`}
                 </Button>
@@ -210,22 +231,39 @@ export function SettingsExchangeRatesPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-muted/50">
+                      <th className="w-10 p-3">
+                        <input
+                          type="checkbox"
+                          checked={data.length > 0 && selectedIds.size === data.length}
+                          onChange={toggleSelectAll}
+                          className="rounded border-input"
+                        />
+                      </th>
                       <th className="text-left p-3 font-medium">Döviz</th>
                       <th className="text-right p-3 font-medium">Kur (1 birim = X ₺)</th>
                       <th className="text-left p-3 font-medium">Kayıt Zamanı</th>
                       <th className="text-left p-3 font-medium">Kaynak</th>
+                      <th className="w-10 p-3" />
                     </tr>
                   </thead>
                   <tbody>
                     {data.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="p-8 text-center text-muted-foreground">
+                        <td colSpan={6} className="p-8 text-center text-muted-foreground">
                           Henüz kayıt yok. &quot;Anlık Kaydet&quot; ile TCMB&apos;den kurları çekebilirsiniz.
                         </td>
                       </tr>
                     ) : (
                       data.map((r) => (
                         <tr key={r.id} className="border-b hover:bg-muted/30">
+                          <td className="p-3">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(r.id)}
+                              onChange={() => toggleSelect(r.id)}
+                              className="rounded border-input"
+                            />
+                          </td>
                           <td className="p-3 font-medium">{r.currency_code}</td>
                           <td className="p-3 text-right tabular-nums">{formatPrice(r.rate)} ₺</td>
                           <td className="p-3">
@@ -234,6 +272,23 @@ export function SettingsExchangeRatesPage() {
                               : '—'}
                           </td>
                           <td className="p-3 text-muted-foreground">{r.source || 'tcmb'}</td>
+                          <td className="p-3">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-destructive hover:text-destructive"
+                                  onClick={() => openDeleteConfirm('single', r.id)}
+                                  disabled={deleting}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Sil</TooltipContent>
+                            </Tooltip>
+                          </td>
                         </tr>
                       ))
                     )}
@@ -272,6 +327,27 @@ export function SettingsExchangeRatesPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={confirmModalOpen} onOpenChange={(open) => !open && closeConfirmModal()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Silme Onayı</DialogTitle>
+            <DialogDescription>
+              {confirmType === 'single'
+                ? 'Bu döviz kuru kaydını silmek istediğinize emin misiniz?'
+                : `${selectedIds.size} kaydı silmek istediğinize emin misiniz?`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeConfirmModal} disabled={deleting}>
+              İptal
+            </Button>
+            <Button variant="destructive" onClick={executeDelete} disabled={deleting}>
+              {deleting ? 'Siliniyor...' : 'Sil'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </PageLayout>
   )
 }

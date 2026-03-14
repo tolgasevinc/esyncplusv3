@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Umbrella } from 'lucide-react'
+import { Umbrella, Sparkles } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
@@ -15,6 +16,11 @@ import {
   saveParasutSettings,
   type ParasutSettings,
 } from '@/lib/parasut-settings'
+import {
+  fetchOpenAISettings,
+  saveOpenAISettings,
+  type OpenAISettings,
+} from '@/lib/openai-settings'
 
 /** Sidebar menülerden entegrasyon ikon path'ini bul (label ile eşleşme) */
 function findIntegrationIconPath(menus: { label: string; iconPath?: string }[], keywords: string[]): string | undefined {
@@ -58,19 +64,26 @@ function TabIcon({
 }
 
 export function SettingsIntegrationsPage() {
+  const [activeTab, setActiveTab] = useState('parasut')
   const [parasutIconPath, setParasutIconPath] = useState<string | undefined>()
   const [parasutSettings, setParasutSettings] = useState<ParasutSettings>({})
+  const [openaiSettings, setOpenaiSettings] = useState<OpenAISettings>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [openaiSaving, setOpenaiSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
   const loadSettings = useCallback(async () => {
     setLoading(true)
     try {
-      const parasutData = await fetchParasutSettings()
+      const [parasutData, openaiData] = await Promise.all([
+        fetchParasutSettings(),
+        fetchOpenAISettings().catch(() => ({})),
+      ])
       setParasutSettings(parasutData)
+      setOpenaiSettings(openaiData)
     } catch (err) {
-      toastError('Yükleme hatası', err instanceof Error ? err.message : 'Paraşüt ayarları yüklenemedi')
+      toastError('Yükleme hatası', err instanceof Error ? err.message : 'Ayarlar yüklenemedi')
     } finally {
       setLoading(false)
     }
@@ -89,6 +102,18 @@ export function SettingsIntegrationsPage() {
       toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Kaydedilemedi')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function saveOpenAI() {
+    setOpenaiSaving(true)
+    try {
+      await saveOpenAISettings(openaiSettings)
+      toastSuccess('Kaydedildi', 'OpenAI ayarları güncellendi.')
+    } catch (err) {
+      toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setOpenaiSaving(false)
     }
   }
 
@@ -135,57 +160,105 @@ export function SettingsIntegrationsPage() {
       description="API entegrasyon ayarları"
       backTo="/ayarlar"
       footerActions={
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={handleTest} disabled={testing}>
-            {testing ? 'Test ediliyor...' : 'Test Et'}
+        activeTab === 'parasut' ? (
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleTest} disabled={testing}>
+              {testing ? 'Test ediliyor...' : 'Test Et'}
+            </Button>
+            <Button variant="save" onClick={saveParasut} disabled={saving}>
+              {saving ? 'Kaydediliyor...' : 'Kaydet'}
+            </Button>
+          </div>
+        ) : (
+          <Button variant="save" onClick={saveOpenAI} disabled={openaiSaving}>
+            {openaiSaving ? 'Kaydediliyor...' : 'Kaydet'}
           </Button>
-          <Button variant="save" onClick={saveParasut} disabled={saving}>
-            {saving ? 'Kaydediliyor...' : 'Kaydet'}
-          </Button>
-        </div>
+        )
       }
     >
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        <TabsList className="grid w-full max-w-md grid-cols-2">
+          <TabsTrigger value="parasut" className="flex items-center gap-2">
             <TabIcon
               iconPath={parasutIconPath}
               fallback={Umbrella}
               alt="Paraşüt"
-              className="h-5 w-5"
+              className="h-4 w-4"
             />
-            Paraşüt API Ayarları
-          </CardTitle>
-          <CardDescription>
-            Paraşüt muhasebe entegrasyonu
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {loading ? (
-            <p className="text-sm text-muted-foreground py-4">Yükleniyor...</p>
-          ) : (
-            <div className="space-y-4">
-              {PARASUT_SETTINGS_SCHEMA.map((field) => (
-                <div key={field.key} className="space-y-2">
-                  <Label htmlFor={`parasut-${field.key}`}>{field.label}</Label>
-                  <Input
-                    id={`parasut-${field.key}`}
-                    type={field.type}
-                    value={parasutSettings[field.key] ?? ''}
-                    onChange={(e) =>
-                      setParasutSettings((s) => ({ ...s, [field.key]: e.target.value }))
-                    }
-                    placeholder={field.placeholder}
-                  />
-                  {field.description && (
-                    <p className="text-xs text-muted-foreground">{field.description}</p>
-                  )}
+            Paraşüt
+          </TabsTrigger>
+          <TabsTrigger value="openai" className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4" />
+            OpenAI / ChatGPT
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="parasut" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Paraşüt API Ayarları</CardTitle>
+              <CardDescription>Paraşüt muhasebe entegrasyonu</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {loading ? (
+                <p className="text-sm text-muted-foreground py-4">Yükleniyor...</p>
+              ) : (
+                <div className="space-y-4">
+                  {PARASUT_SETTINGS_SCHEMA.map((field) => (
+                    <div key={field.key} className="space-y-2">
+                      <Label htmlFor={`parasut-${field.key}`}>{field.label}</Label>
+                      <Input
+                        id={`parasut-${field.key}`}
+                        type={field.type}
+                        value={parasutSettings[field.key] ?? ''}
+                        onChange={(e) =>
+                          setParasutSettings((s) => ({ ...s, [field.key]: e.target.value }))
+                        }
+                        placeholder={field.placeholder}
+                      />
+                      {field.description && (
+                        <p className="text-xs text-muted-foreground">{field.description}</p>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="openai" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>OpenAI / ChatGPT</CardTitle>
+              <CardDescription>
+                Ürün e-ticaret metinlerini (açıklama, SEO vb.) otomatik oluşturmak için API anahtarı
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {loading ? (
+                <p className="text-sm text-muted-foreground py-4">Yükleniyor...</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="openai-api_key">API Key</Label>
+                    <Input
+                      id="openai-api_key"
+                      type="password"
+                      value={openaiSettings.api_key ?? ''}
+                      onChange={(e) => setOpenaiSettings((s) => ({ ...s, api_key: e.target.value }))}
+                      placeholder="sk-..."
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      platform.openai.com adresinden API anahtarı alın. Ürün modalında E-Ticaret sekmesindeki &quot;ChatGPT ile Oluştur&quot; butonu bu anahtarı kullanır.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </PageLayout>
   )
 }

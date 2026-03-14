@@ -189,7 +189,7 @@ export function PackageContentsTab({
           <Label className="text-sm">Adet</Label>
           <Input
             type="number"
-            min="0.01"
+            min={1}
             step={1}
             value={newQuantity}
             onChange={(e) => setNewQuantity(e.target.value)}
@@ -220,10 +220,10 @@ export function PackageContentsTab({
                   </div>
                   <Input
                     type="number"
-                    min="0.01"
+                    min={1}
                     step={1}
                     value={item.quantity}
-                    onChange={(e) => handleQuantityChange(idx, parseFloat(e.target.value) || 0)}
+                    onChange={(e) => handleQuantityChange(idx, Math.max(1, parseFloat(e.target.value) || 0))}
                     className="w-20 h-7 text-sm"
                   />
                   <Button

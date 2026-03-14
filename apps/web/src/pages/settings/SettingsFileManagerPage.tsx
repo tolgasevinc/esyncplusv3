@@ -36,7 +36,7 @@ import {
 import { API_URL } from '@/lib/api'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { getImageDisplayUrl } from '@/components/ImageInput'
-import { cn } from '@/lib/utils'
+import { cn, normalizeForSearch } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
 
 interface ListItem {
@@ -283,12 +283,12 @@ export function SettingsFileManagerPage() {
     if (selectedFolder) fetchContents(selectedFolder)
   }, [fetchFolders, fetchContents, selectedFolder])
 
-  const searchLower = search.trim().toLowerCase()
-  const filteredSubfoldersRaw = searchLower
-    ? contents.subfolders.filter((n) => n.replace(/\/$/, '').toLowerCase().includes(searchLower))
+  const searchNorm = normalizeForSearch(search.trim())
+  const filteredSubfoldersRaw = searchNorm
+    ? contents.subfolders.filter((n) => normalizeForSearch(n.replace(/\/$/, '')).includes(searchNorm))
     : contents.subfolders
-  const filteredFilesRaw = searchLower
-    ? contents.files.filter((f) => (f.key || '').split('/').pop()?.toLowerCase().includes(searchLower))
+  const filteredFilesRaw = searchNorm
+    ? contents.files.filter((f) => normalizeForSearch((f.key || '').split('/').pop() || '').includes(searchNorm))
     : contents.files
 
   const sortSubfolders = (arr: string[]) => {

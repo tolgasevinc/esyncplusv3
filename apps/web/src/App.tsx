@@ -1,50 +1,58 @@
+import { lazy, Suspense } from 'react'
 import { Toaster } from 'sonner'
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { ThemeLoader } from '@/components/ThemeLoader'
 import { HomePage } from '@/pages/HomePage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ParametersPage } from '@/pages/ParametersPage'
-import { MarkalarPage } from '@/pages/parameters/MarkalarPage'
-import { BirimlerPage } from '@/pages/parameters/BirimlerPage'
-import { GruplarPage } from '@/pages/parameters/GruplarPage'
-import { KategorilerPage } from '@/pages/parameters/KategorilerPage'
-import { UrunTipleriPage } from '@/pages/parameters/UrunTipleriPage'
-import { ParaBirimleriPage } from '@/pages/parameters/ParaBirimleriPage'
-import { FiyatTipleriPage } from '@/pages/parameters/FiyatTipleriPage'
-import { VergiOranlariPage } from '@/pages/parameters/VergiOranlariPage'
-import { MusteriTipleriPage } from '@/pages/parameters/MusteriTipleriPage'
-import { MusteriGruplariPage } from '@/pages/parameters/MusteriGruplariPage'
-import { YasalTiplerPage } from '@/pages/parameters/YasalTiplerPage'
-import { SuppliersPage } from '@/pages/parameters/SuppliersPage'
-import { DiaPage } from '@/pages/DiaPage'
-import { DiaCariKartlarPage } from '@/pages/parameters/dia/DiaCariKartlarPage'
-import { DiaVergiDaireleriPage } from '@/pages/parameters/dia/DiaVergiDaireleriPage'
-import { CustomersPage } from '@/pages/customers/CustomersPage'
-import { TekliflerPage } from '@/pages/offers/TekliflerPage'
-import { ProductsPage } from '@/pages/products/ProductsPage'
-import { EDocumentsPage } from '@/pages/documents/EDocumentsPage'
-import { SettingsGeneralPage } from '@/pages/settings/SettingsGeneralPage'
-import { SettingsDatabasePage } from '@/pages/settings/SettingsDatabasePage'
-import { SettingsStoragePage } from '@/pages/settings/SettingsStoragePage'
-import { SettingsIntegrationsPage } from '@/pages/settings/SettingsIntegrationsPage'
-import { SettingsCalculationsPage } from '@/pages/settings/SettingsCalculationsPage'
-import { SettingsAccessPage } from '@/pages/settings/SettingsAccessPage'
-import { SettingsSuppliersPage } from '@/pages/settings/SettingsSuppliersPage'
-import { SettingsDataTransferPage } from '@/pages/settings/SettingsDataTransferPage'
-import { SettingsFileManagerPage } from '@/pages/settings/SettingsFileManagerPage'
-import { SettingsExchangeRatesPage } from '@/pages/settings/SettingsExchangeRatesPage'
-import { OpenCartPage } from '@/pages/opencart/OpenCartPage'
+import { ParasutPage } from '@/pages/ParasutPage'
+
+const MarkalarPage = lazy(() => import('@/pages/parameters/MarkalarPage').then((m) => ({ default: m.MarkalarPage })))
+const BirimlerPage = lazy(() => import('@/pages/parameters/BirimlerPage').then((m) => ({ default: m.BirimlerPage })))
+const GruplarPage = lazy(() => import('@/pages/parameters/GruplarPage').then((m) => ({ default: m.GruplarPage })))
+const KategorilerPage = lazy(() => import('@/pages/parameters/KategorilerPage').then((m) => ({ default: m.KategorilerPage })))
+const UrunTipleriPage = lazy(() => import('@/pages/parameters/UrunTipleriPage').then((m) => ({ default: m.UrunTipleriPage })))
+const UrunGruplariPage = lazy(() => import('@/pages/parameters/UrunGruplariPage').then((m) => ({ default: m.UrunGruplariPage })))
+const ParaBirimleriPage = lazy(() => import('@/pages/parameters/ParaBirimleriPage').then((m) => ({ default: m.ParaBirimleriPage })))
+const FiyatTipleriPage = lazy(() => import('@/pages/parameters/FiyatTipleriPage').then((m) => ({ default: m.FiyatTipleriPage })))
+const VergiOranlariPage = lazy(() => import('@/pages/parameters/VergiOranlariPage').then((m) => ({ default: m.VergiOranlariPage })))
+const MusteriTipleriPage = lazy(() => import('@/pages/parameters/MusteriTipleriPage').then((m) => ({ default: m.MusteriTipleriPage })))
+const MusteriGruplariPage = lazy(() => import('@/pages/parameters/MusteriGruplariPage').then((m) => ({ default: m.MusteriGruplariPage })))
+const YasalTiplerPage = lazy(() => import('@/pages/parameters/YasalTiplerPage').then((m) => ({ default: m.YasalTiplerPage })))
+const SuppliersPage = lazy(() => import('@/pages/parameters/SuppliersPage').then((m) => ({ default: m.SuppliersPage })))
+const DiaPage = lazy(() => import('@/pages/DiaPage').then((m) => ({ default: m.DiaPage })))
+const DiaCariKartlarPage = lazy(() => import('@/pages/parameters/dia/DiaCariKartlarPage').then((m) => ({ default: m.DiaCariKartlarPage })))
+const DiaVergiDaireleriPage = lazy(() => import('@/pages/parameters/dia/DiaVergiDaireleriPage').then((m) => ({ default: m.DiaVergiDaireleriPage })))
+const CustomersPage = lazy(() => import('@/pages/customers/CustomersPage').then((m) => ({ default: m.CustomersPage })))
+const TekliflerPage = lazy(() => import('@/pages/offers/TekliflerPage').then((m) => ({ default: m.TekliflerPage })))
+const ProductsPage = lazy(() => import('@/pages/products/ProductsPage').then((m) => ({ default: m.ProductsPage })))
+const EDocumentsPage = lazy(() => import('@/pages/documents/EDocumentsPage').then((m) => ({ default: m.EDocumentsPage })))
+const SettingsGeneralPage = lazy(() => import('@/pages/settings/SettingsGeneralPage').then((m) => ({ default: m.SettingsGeneralPage })))
+const SettingsDatabasePage = lazy(() => import('@/pages/settings/SettingsDatabasePage').then((m) => ({ default: m.SettingsDatabasePage })))
+const SettingsStoragePage = lazy(() => import('@/pages/settings/SettingsStoragePage').then((m) => ({ default: m.SettingsStoragePage })))
+const SettingsIntegrationsPage = lazy(() => import('@/pages/settings/SettingsIntegrationsPage').then((m) => ({ default: m.SettingsIntegrationsPage })))
+const SettingsCalculationsPage = lazy(() => import('@/pages/settings/SettingsCalculationsPage').then((m) => ({ default: m.SettingsCalculationsPage })))
+const SettingsAccessPage = lazy(() => import('@/pages/settings/SettingsAccessPage').then((m) => ({ default: m.SettingsAccessPage })))
+const SettingsSuppliersPage = lazy(() => import('@/pages/settings/SettingsSuppliersPage').then((m) => ({ default: m.SettingsSuppliersPage })))
+const SettingsDataTransferPage = lazy(() => import('@/pages/settings/SettingsDataTransferPage').then((m) => ({ default: m.SettingsDataTransferPage })))
+const SettingsFileManagerPage = lazy(() => import('@/pages/settings/SettingsFileManagerPage').then((m) => ({ default: m.SettingsFileManagerPage })))
+const SettingsExchangeRatesPage = lazy(() => import('@/pages/settings/SettingsExchangeRatesPage').then((m) => ({ default: m.SettingsExchangeRatesPage })))
+const SettingsMarketplacePage = lazy(() => import('@/pages/settings/SettingsMarketplacePage').then((m) => ({ default: m.SettingsMarketplacePage })))
+const OpenCartPage = lazy(() => import('@/pages/opencart/OpenCartPage').then((m) => ({ default: m.OpenCartPage })))
+const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPage').then((m) => ({ default: m.ParasutProductsPage })))
 function App() {
-  const location = useLocation()
   return (
     <>
       <ThemeLoader />
       <Toaster richColors position="top-center" />
       <AppLayout>
-      <div key={location.key} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+      <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground">Yükleniyor...</div>}>
       <Routes>
         <Route path="/" element={<HomePage />} />
+        <Route path="/parasut" element={<ParasutPage />} />
+        <Route path="/parasut/products" element={<ParasutProductsPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
         <Route path="/ayarlar/veritabani" element={<SettingsDatabasePage />} />
@@ -56,12 +64,14 @@ function App() {
         <Route path="/ayarlar/veri-aktarimi" element={<SettingsDataTransferPage />} />
         <Route path="/ayarlar/dosya-yoneticisi" element={<SettingsFileManagerPage />} />
         <Route path="/ayarlar/doviz-kurlari" element={<SettingsExchangeRatesPage />} />
+        <Route path="/ayarlar/marketplace" element={<SettingsMarketplacePage />} />
         <Route path="/parametreler" element={<ParametersPage />} />
         <Route path="/parametreler/markalar" element={<MarkalarPage />} />
         <Route path="/parametreler/birimler" element={<BirimlerPage />} />
         <Route path="/parametreler/gruplar" element={<GruplarPage />} />
         <Route path="/parametreler/kategoriler" element={<KategorilerPage />} />
         <Route path="/parametreler/urun-tipleri" element={<UrunTipleriPage />} />
+        <Route path="/parametreler/urun-gruplari" element={<UrunGruplariPage />} />
         <Route path="/parametreler/para-birimleri" element={<ParaBirimleriPage />} />
         <Route path="/parametreler/fiyat-tipleri" element={<FiyatTipleriPage />} />
         <Route path="/parametreler/vergi-oranlari" element={<VergiOranlariPage />} />
@@ -84,6 +94,7 @@ function App() {
         <Route path="/opencart" element={<OpenCartPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </Suspense>
       </div>
     </AppLayout>
     </>

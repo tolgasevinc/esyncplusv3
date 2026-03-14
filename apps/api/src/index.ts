@@ -270,6 +270,30 @@ app.get('/storage/prefixes', async (c) => {
   }
 });
 
+// ========== E-DOCUMENTS - Mevcut yıllar (filtre için) ==========
+app.get('/api/e-documents/years', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ years: [] });
+    // date (YYYY-MM-DD veya DD.MM.YYYY) veya directory (e-documents/xxx/YYYY/mm/) üzerinden yıl çıkar
+    const { results } = await c.env.DB.prepare(
+      `SELECT DISTINCT year FROM (
+        SELECT CAST(SUBSTR(date, 1, 4) AS INTEGER) as year FROM e_documents
+        WHERE is_deleted = 0 AND date IS NOT NULL AND date GLOB '[0-9][0-9][0-9][0-9]-*'
+        UNION
+        SELECT CAST(SUBSTR(date, 7, 4) AS INTEGER) as year FROM e_documents
+        WHERE is_deleted = 0 AND date IS NOT NULL AND date GLOB '[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9]'
+        UNION
+        SELECT CAST(SUBSTR(directory, 20, 4) AS INTEGER) as year FROM e_documents
+        WHERE is_deleted = 0 AND LENGTH(directory) >= 23 AND SUBSTR(directory, 20, 1) GLOB '[0-9]'
+      ) WHERE year >= 2000 AND year <= 2100 ORDER BY year DESC`
+    ).all();
+    const years = (results as { year: number }[]).map((r) => r.year);
+    return c.json({ years });
+  } catch {
+    return c.json({ years: [] });
+  }
+});
+
 // ========== E-DOCUMENTS (D1'den liste) ==========
 app.get('/api/e-documents', async (c) => {
   try {
@@ -293,13 +317,20 @@ app.get('/api/e-documents', async (c) => {
 
     let where = 'WHERE is_deleted = 0';
     const params: (string | number)[] = [];
-    if (filter !== 'tumu') {
+    const year = (c.req.query('year') || '').trim();
+    const month = (c.req.query('month') || '').trim();
+    let dirPrefix = filter !== 'tumu' ? `e-documents/${filter}/` : 'e-documents/%/';
+    if (year) {
+      dirPrefix += `${year}/`;
+      if (month) dirPrefix += `${month}/`;
+    }
+    if (filter !== 'tumu' || year) {
       where += ' AND directory LIKE ?';
-      params.push(`e-documents/${filter}/%`);
+      params.push(dirPrefix + '%');
     }
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
+      const pat = `%${escapeLikePattern(n)}%`;
       where += ` AND (${sqlNormalizeCol('invoice_no')} LIKE ? OR ${sqlNormalizeCol('seller_title')} LIKE ? OR ${sqlNormalizeCol('buyer_title')} LIKE ? OR ${sqlNormalizeCol('file_name')} LIKE ?)`;
       params.push(pat, pat, pat, pat);
     }
@@ -802,8 +833,8 @@ app.get('/api/product-brands', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
       params.push(pat, pat);
     }
 
@@ -978,11 +1009,14 @@ app.get('/api/products', async (c) => {
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
     const offset = (page - 1) * limit;
+    const priceTypeIdRaw = c.req.query('price_type_id');
+    const priceTypeId = priceTypeIdRaw ? parseInt(String(priceTypeIdRaw), 10) : 0;
+    const usePriceType = priceTypeId > 0;
     let where = 'WHERE p.is_deleted = 0';
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
+      const pat = `%${escapeLikePattern(n)}%`;
       const normName = sqlNormalizeCol('p.name');
       const normSku = sqlNormalizeCol('p.sku');
       const normBarcode = sqlNormalizeCol('p.barcode');
@@ -991,11 +1025,11 @@ app.get('/api/products', async (c) => {
     }
     if (filter_name) {
       where += ` AND ${sqlNormalizeCol('p.name')} LIKE ?`;
-      params.push(`%${normalizeForSearch(filter_name)}%`);
+      params.push(`%${escapeLikePattern(normalizeForSearch(filter_name))}%`);
     }
     if (filter_sku) {
       where += ` AND ${sqlNormalizeCol('p.sku')} LIKE ?`;
-      params.push(`%${normalizeForSearch(filter_sku)}%`);
+      params.push(`%${escapeLikePattern(normalizeForSearch(filter_sku))}%`);
     }
     if (filter_brand_id) {
       where += ' AND p.brand_id = ?';
@@ -1033,9 +1067,16 @@ app.get('/api/products', async (c) => {
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM products p ${where}`
     ).bind(...params).first<{ total: number }>();
+    const priceCol = usePriceType ? 'COALESCE(pp_offer.price, p.price)' : 'p.price';
+    const currencySymbolCol = usePriceType ? 'COALESCE(cur_offer.symbol, cur.symbol)' : 'cur.symbol';
+    const currencyIdCol = usePriceType ? 'COALESCE(pp_offer.currency_id, p.currency_id)' : 'p.currency_id';
+    const ppOfferJoin = usePriceType
+      ? `LEFT JOIN product_prices pp_offer ON pp_offer.product_id = p.id AND pp_offer.price_type_id = ${priceTypeId} AND pp_offer.is_deleted = 0 AND (pp_offer.status = 1 OR pp_offer.status IS NULL)
+       LEFT JOIN product_currencies cur_offer ON pp_offer.currency_id = cur_offer.id AND cur_offer.is_deleted = 0`
+      : '';
     const { results } = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.unit_id, p.currency_id,
-       p.price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
+      `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, ${currencyIdCol} as currency_id,
+       ${priceCol} as price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
        p.created_at, p.updated_at,
        b.name as brand_name, b.code as brand_code, b.image as brand_image,
        grp.code as group_code, grp.name as group_name, grp.color as group_color,
@@ -1043,8 +1084,10 @@ app.get('/api/products', async (c) => {
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.code END as subcategory_code,
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.name END as subcategory_name,
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.color END as subcategory_color,
-       t.name as type_name, t.color as type_color, u.name as unit_name, cur.symbol as currency_symbol
+       t.name as type_name, t.color as type_color, u.name as unit_name, ${currencySymbolCol} as currency_symbol,
+       pig.name as product_item_group_name, pig.code as product_item_group_code, pig.color as product_item_group_color, pig.sort_order as product_item_group_sort_order
        FROM products p
+       LEFT JOIN product_item_groups pig ON p.product_item_group_id = pig.id AND pig.is_deleted = 0
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
        LEFT JOIN product_categories sub ON p.category_id = sub.id AND sub.is_deleted = 0
        LEFT JOIN product_categories cat ON cat.id = COALESCE(sub.category_id, CASE WHEN sub.group_id IS NOT NULL AND sub.group_id > 0 THEN sub.id END) AND cat.is_deleted = 0
@@ -1052,6 +1095,7 @@ app.get('/api/products', async (c) => {
        LEFT JOIN product_types t ON p.type_id = t.id AND t.is_deleted = 0
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       ${ppOfferJoin}
        LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
        ${where} ORDER BY ${orderCol} ${sort_order}, p.id LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
@@ -1108,7 +1152,7 @@ app.get('/api/products/supplier-codes', async (c) => {
   }
 });
 
-/** Ana ürün tablosunda isimle kelime kelime arama (otomatik tamamlama için) */
+/** Ana ürün tablosunda isim veya SKU ile arama (otomatik tamamlama için) */
 app.get('/api/products/search-by-name', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -1118,21 +1162,44 @@ app.get('/api/products/search-by-name', async (c) => {
     const words = q.split(/\s+/).filter((w) => w.length > 0);
     if (words.length === 0) return c.json({ products: [] });
     const escapeClause = /[%_]/.test(q) ? " ESCAPE '\\'" : '';
-    const conditions = words
+    const nameConditions = words
       .map(() => `${sqlNormalizeCol('p.name')} LIKE ?${escapeClause}`)
       .join(' AND ');
-    const params = words.map((w) => `%${escapeLikePattern(normalizeForSearch(w))}%`);
+    const nameParams = words.map((w) => `%${escapeLikePattern(normalizeForSearch(w))}%`);
+    const skuCondition = `${sqlNormalizeCol("TRIM(COALESCE(p.sku, ''))")} LIKE ?${escapeClause}`;
+    const skuParam = `%${escapeLikePattern(normalizeForSearch(q))}%`;
+    const whereClause = `(${nameConditions}) OR (${skuCondition})`;
+    const params = [...nameParams, skuParam, limit];
     const { results } = await c.env.DB.prepare(
       `SELECT p.id, p.name, p.sku, p.barcode, b.name as brand_name
        FROM products p
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
-       WHERE p.is_deleted = 0 AND ${conditions}
+       WHERE p.is_deleted = 0 AND (${whereClause})
        ORDER BY p.sort_order, p.id
        LIMIT ?`
     )
-      .bind(...params, limit)
+      .bind(...params)
       .all<{ id: number; name: string; sku: string | null; barcode: string | null; brand_name: string | null }>();
     return c.json({ products: results ?? [] });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Verilen kodların products.sku ile eşleşenlerini döner (parasut code = products.sku) */
+app.get('/api/products/matched-skus', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const codesParam = (c.req.query('codes') || '').trim();
+    if (!codesParam) return c.json({ matched: [] });
+    const codes = codesParam.split(',').map((s) => s.trim()).filter(Boolean);
+    if (codes.length === 0) return c.json({ matched: [] });
+    const { results } = await c.env.DB.prepare(
+      `SELECT TRIM(COALESCE(sku, '')) as sku FROM products WHERE is_deleted = 0 AND TRIM(COALESCE(sku, '')) != ''`
+    ).all();
+    const dbSkus = new Set((results as { sku: string }[]).map((r) => normalizeForSearch(r.sku)));
+    const matched = codes.filter((code) => dbSkus.has(normalizeForSearch(code)));
+    return c.json({ matched });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -1143,13 +1210,13 @@ app.get('/api/products/by-sku', async (c) => {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const sku = (c.req.query('sku') || '').trim();
     if (!sku) return c.json(null);
-    const skuLower = sku.toLowerCase();
+    const skuNorm = normalizeForSearch(sku);
     const productRow = await c.env.DB.prepare(
       `SELECT id, name, sku, barcode, price, quantity, currency_id FROM products
-       WHERE is_deleted = 0 AND LOWER(TRIM(COALESCE(sku, ''))) = ?
+       WHERE is_deleted = 0 AND ${sqlNormalizeCol("TRIM(COALESCE(sku, ''))")} = ?
        ORDER BY id DESC LIMIT 1`
     )
-      .bind(skuLower)
+      .bind(skuNorm)
       .first<{ id: number; name: string; sku: string; barcode: string | null; price: number; quantity: number; currency_id: number | null }>();
     if (!productRow) return c.json(null);
     const priceTypeSetting = await c.env.DB.prepare(
@@ -1231,8 +1298,11 @@ app.get('/api/products/:id', async (c) => {
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.code END as subcategory_code,
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.name END as subcategory_name,
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.color END as subcategory_color,
-       t.name as type_name, t.color as type_color, u.name as unit_name, cur.name as currency_name, cur.symbol as currency_symbol
+       t.name as type_name, t.color as type_color, u.name as unit_name, cur.name as currency_name, cur.symbol as currency_symbol,
+       pig.name as product_item_group_name, pig.code as product_item_group_code, pig.color as product_item_group_color, pig.sort_order as product_item_group_sort_order,
+       pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
        FROM products p
+       LEFT JOIN product_item_groups pig ON p.product_item_group_id = pig.id AND pig.is_deleted = 0
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
        LEFT JOIN product_categories sub ON p.category_id = sub.id AND sub.is_deleted = 0
        LEFT JOIN product_categories cat ON cat.id = COALESCE(sub.category_id, CASE WHEN sub.group_id IS NOT NULL AND sub.group_id > 0 THEN sub.id END) AND cat.is_deleted = 0
@@ -1241,6 +1311,7 @@ app.get('/api/products/:id', async (c) => {
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
        LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
+       LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`
     ).bind(id).first();
     if (!row) return c.json({ error: 'Ürün bulunamadı' }, 404);
@@ -1264,19 +1335,20 @@ app.post('/api/products', async (c) => {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const body = await c.req.json<{
       name: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
-      type_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
+      type_id?: number; product_item_group_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
       ecommerce_price?: number; ecommerce_currency_id?: number;
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
+      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string;
     }>();
     const name = (body.name || '').trim();
     if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
     const sort_order = body.sort_order ?? 0;
     const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
     await c.env.DB.prepare(
-      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, product_item_group_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       name,
       body.sku?.trim() || null,
@@ -1284,6 +1356,7 @@ app.post('/api/products', async (c) => {
       body.brand_id || null,
       body.category_id || null,
       body.type_id || null,
+      body.product_item_group_id || null,
       body.unit_id || null,
       body.currency_id || null,
       body.price ?? 0,
@@ -1313,6 +1386,34 @@ app.post('/api/products', async (c) => {
          ON CONFLICT(product_id, price_type_id) DO UPDATE SET price = excluded.price, currency_id = excluded.currency_id, updated_at = datetime('now')`
       ).bind(productId, body.ecommerce_price ?? 0, body.ecommerce_currency_id || null).run();
     }
+    if (productId && (body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined)) {
+      const ecomName = body.ecommerce_name !== undefined ? (String(body.ecommerce_name).trim() || null) : null;
+      const mainDesc = body.main_description !== undefined ? (String(body.main_description).trim() || null) : null;
+      const seoSlug = body.seo_slug !== undefined ? (String(body.seo_slug).trim() || null) : null;
+      const seoTitle = body.seo_title !== undefined ? (String(body.seo_title).trim() || null) : null;
+      const seoDesc = body.seo_description !== undefined ? (String(body.seo_description).trim() || null) : null;
+      const hasDesc = true;
+      if (hasDesc) {
+        const existingDesc = await c.env.DB.prepare(`SELECT id FROM product_descriptions WHERE product_id = ?`).bind(productId).first();
+        if (existingDesc) {
+          const updates: string[] = [];
+          const vals: (string | null)[] = [];
+          if (body.ecommerce_name !== undefined) { updates.push('ecommerce_name = ?'); vals.push(ecomName); }
+          if (body.main_description !== undefined) { updates.push('main_description = ?'); vals.push(mainDesc); }
+          if (body.seo_slug !== undefined) { updates.push('seo_slug = ?'); vals.push(seoSlug); }
+          if (body.seo_title !== undefined) { updates.push('seo_title = ?'); vals.push(seoTitle); }
+          if (body.seo_description !== undefined) { updates.push('seo_description = ?'); vals.push(seoDesc); }
+          if (updates.length > 0) {
+            updates.push("updated_at = datetime('now')");
+            await c.env.DB.prepare(`UPDATE product_descriptions SET ${updates.join(', ')} WHERE product_id = ?`).bind(...vals, productId).run();
+          }
+        } else {
+          await c.env.DB.prepare(
+            `INSERT INTO product_descriptions (product_id, ecommerce_name, main_description, seo_slug, seo_title, seo_description) VALUES (?, ?, ?, ?, ?, ?)`
+          ).bind(productId, ecomName, mainDesc, seoSlug, seoTitle, seoDesc).run();
+        }
+      }
+    }
     const { results } = await c.env.DB.prepare(
       `SELECT * FROM products WHERE id = ?`
     ).bind(productId).all();
@@ -1328,11 +1429,12 @@ app.put('/api/products/:id', async (c) => {
     const id = c.req.param('id');
     const body = await c.req.json<{
       name?: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
-      type_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
+      type_id?: number; product_item_group_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
       ecommerce_price?: number; ecommerce_currency_id?: number;
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
+      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`).bind(id).first();
     if (!existing) return c.json({ error: 'Ürün bulunamadı' }, 404);
@@ -1344,6 +1446,7 @@ app.put('/api/products/:id', async (c) => {
     if (body.brand_id !== undefined) { updates.push('brand_id = ?'); values.push(body.brand_id || null); }
     if (body.category_id !== undefined) { updates.push('category_id = ?'); values.push(body.category_id || null); }
     if (body.type_id !== undefined) { updates.push('type_id = ?'); values.push(body.type_id || null); }
+    if (body.product_item_group_id !== undefined) { updates.push('product_item_group_id = ?'); values.push(body.product_item_group_id || null); }
     if (body.unit_id !== undefined) { updates.push('unit_id = ?'); values.push(body.unit_id || null); }
     if (body.currency_id !== undefined) { updates.push('currency_id = ?'); values.push(body.currency_id || null); }
     if (body.price !== undefined) { updates.push('price = ?'); values.push(body.price); }
@@ -1354,9 +1457,36 @@ app.put('/api/products/:id', async (c) => {
     if (body.gtip_code !== undefined) { updates.push('gtip_code = ?'); values.push(body.gtip_code?.trim() || null); }
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
-    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
-    updates.push("updated_at = datetime('now')");
-    await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run();
+    if (updates.length === 0 && !(body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined)) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    if (updates.length > 0) {
+      updates.push("updated_at = datetime('now')");
+      await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run();
+    }
+    if (body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined) {
+      const ecomName = body.ecommerce_name !== undefined ? (String(body.ecommerce_name).trim() || null) : null;
+      const mainDesc = body.main_description !== undefined ? (String(body.main_description).trim() || null) : null;
+      const seoSlug = body.seo_slug !== undefined ? (String(body.seo_slug).trim() || null) : null;
+      const seoTitle = body.seo_title !== undefined ? (String(body.seo_title).trim() || null) : null;
+      const seoDesc = body.seo_description !== undefined ? (String(body.seo_description).trim() || null) : null;
+      const existingDesc = await c.env.DB.prepare(`SELECT id FROM product_descriptions WHERE product_id = ? AND is_deleted = 0`).bind(id).first();
+      if (existingDesc) {
+        const descUpdates: string[] = [];
+        const descVals: (string | null)[] = [];
+        if (body.ecommerce_name !== undefined) { descUpdates.push('ecommerce_name = ?'); descVals.push(ecomName); }
+        if (body.main_description !== undefined) { descUpdates.push('main_description = ?'); descVals.push(mainDesc); }
+        if (body.seo_slug !== undefined) { descUpdates.push('seo_slug = ?'); descVals.push(seoSlug); }
+        if (body.seo_title !== undefined) { descUpdates.push('seo_title = ?'); descVals.push(seoTitle); }
+        if (body.seo_description !== undefined) { descUpdates.push('seo_description = ?'); descVals.push(seoDesc); }
+        if (descUpdates.length > 0) {
+          descUpdates.push("updated_at = datetime('now')");
+          await c.env.DB.prepare(`UPDATE product_descriptions SET ${descUpdates.join(', ')} WHERE product_id = ?`).bind(...descVals, id).run();
+        }
+      } else {
+        await c.env.DB.prepare(
+          `INSERT INTO product_descriptions (product_id, ecommerce_name, main_description, seo_slug, seo_title, seo_description) VALUES (?, ?, ?, ?, ?, ?)`
+        ).bind(id, ecomName, mainDesc, seoSlug, seoTitle, seoDesc).run();
+      }
+    }
     if (body.prices && Array.isArray(body.prices) && body.prices.length > 0) {
       for (const p of body.prices) {
         const priceTypeId = p.price_type_id;
@@ -1423,6 +1553,215 @@ app.delete('/api/products/:id', async (c) => {
     return c.json({ success: true });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Ürün E-Ticaret bilgilerini OpenCart veritabanına yayınla. Eşleşmeyen ürünler OpenCart'ta yeni oluşturulur. Varolan ürünler için update_price, update_description, update_images ile seçimli güncelleme. */
+app.post('/api/products/:id/publish/opencart', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{
+      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string;
+      images?: string[]; uploaded_image_paths?: string[];
+      update_price?: boolean; update_description?: boolean; update_images?: boolean;
+    }>().catch(() => null);
+    const productRow = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.sku, p.image, p.quantity, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
+       FROM products p
+       LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0`
+    ).bind(id).first<{ id: number; name: string; sku: string | null; image: string | null; quantity: number; ecommerce_name: string | null; main_description: string | null; seo_slug: string | null; seo_title: string | null; seo_description: string | null }>();
+    if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
+
+    const priceRow = await c.env.DB.prepare(
+      `SELECT price FROM product_prices WHERE product_id = ? AND price_type_id = 1 AND is_deleted = 0 LIMIT 1`
+    ).bind(id).first<{ price: number }>();
+    const productPrice = priceRow?.price ?? 0;
+
+    const ecommerceName = body?.ecommerce_name !== undefined ? String(body.ecommerce_name ?? '').trim() : (productRow.ecommerce_name ?? '').trim();
+    const mainDescription = body?.main_description !== undefined ? String(body.main_description ?? '').trim() : (productRow.main_description ?? '').trim();
+    const seoSlug = body?.seo_slug !== undefined ? String(body.seo_slug ?? '').trim() : (productRow.seo_slug ?? '').trim();
+    const seoTitle = body?.seo_title !== undefined ? String(body.seo_title ?? '').trim() : (productRow.seo_title ?? '').trim();
+    const seoDescription = body?.seo_description !== undefined ? String(body.seo_description ?? '').trim() : (productRow.seo_description ?? '').trim();
+    const uploadedPaths = body?.uploaded_image_paths && Array.isArray(body.uploaded_image_paths)
+      ? body.uploaded_image_paths.filter((x): x is string => typeof x === 'string' && (x.startsWith('catalog/') || x.startsWith('data/')))
+      : null;
+
+    const updatePrice = body?.update_price !== false;
+    const updateDescription = body?.update_description !== false;
+    const updateImages = body?.update_images !== false;
+
+    let imagePaths: string[] = [];
+    if (uploadedPaths && uploadedPaths.length > 0) {
+      imagePaths = uploadedPaths;
+    } else if (body?.images && Array.isArray(body.images)) {
+      imagePaths = body.images.filter((x): x is string => typeof x === 'string');
+    } else {
+      try {
+        const imgVal = productRow.image;
+        if (imgVal) {
+          const parsed = JSON.parse(imgVal);
+          imagePaths = Array.isArray(parsed) ? parsed.filter((x: unknown) => typeof x === 'string') : [String(imgVal)];
+        }
+      } catch {
+        if (productRow.image) imagePaths = [String(productRow.image)];
+      }
+    }
+
+    const sku = (productRow.sku ?? '').trim();
+    if (!sku) return c.json({ error: 'Ürün SKU\'su boş. OpenCart eşleşmesi/oluşturma için SKU gerekli.' }, 400);
+
+    const config = await getOpencartMysqlConfig(c);
+    if (!config) return c.json({ error: 'OpenCart MySQL bağlantı ayarları yapılandırılmalı. Ayarlar > Veri Aktarımı.' }, 400);
+    const settings = await getOpencartMysqlSettings(c);
+    if (!settings) return c.json({ error: 'OpenCart ayarları alınamadı' }, 500);
+
+    const languageId = parseInt(settings.language_id ?? '1') || 1;
+    const storeId = parseInt(settings.store_id ?? '0') || 0;
+    const prefix = settings.table_prefix ?? 'oc_';
+    const tblProduct = prefix + 'product';
+    const tblDesc = prefix + 'product_description';
+    const tblImage = prefix + 'product_image';
+    const tblProductToCategory = prefix + 'product_to_category';
+    const tblProductToStore = prefix + 'product_to_store';
+    const ocSettings = settings as Record<string, string>;
+    const imageUploadUrl = ocSettings.image_upload_url?.trim();
+
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+
+      const [ocRows] = await conn.execute(
+        `SELECT product_id FROM ${tblProduct} WHERE TRIM(COALESCE(model, '')) = ? LIMIT 1`,
+        [sku]
+      );
+      let ocProductId = (ocRows as { product_id?: number }[])[0]?.product_id;
+      const isNewProduct = !ocProductId;
+
+      if (isNewProduct) {
+        const [catRows] = await conn.execute(
+          `SELECT category_id FROM ${prefix}category WHERE status = 1 ORDER BY sort_order ASC, category_id ASC LIMIT 1`
+        );
+        const defaultCategoryId = (catRows as { category_id?: number }[])[0]?.category_id ?? 0;
+        const defaultCat = parseInt(ocSettings.default_category_id ?? '') || defaultCategoryId;
+
+        const ocName = ecommerceName || productRow.name;
+        const ocDesc = mainDescription;
+        const ocMetaTitle = seoTitle;
+        const ocMetaDesc = seoDescription;
+        const ocMetaKeyword = seoSlug;
+
+        await conn.execute(
+          `INSERT INTO ${tblProduct} (model, sku, quantity, stock_status_id, image, manufacturer_id, shipping, price, weight, weight_class_id, length_class_id, subtract, minimum, sort_order, status, viewed, date_added, date_modified, tax_class_id)
+           VALUES (?, ?, ?, 5, '', 0, 1, ?, 0, 1, 1, 1, 1, 0, 1, 0, NOW(), NOW(), 0)`,
+          [sku, sku, productRow.quantity ?? 0, productPrice]
+        );
+        const [insertRows] = await conn.execute(`SELECT LAST_INSERT_ID() as id`);
+        ocProductId = (insertRows as { id?: number }[])[0]?.id ?? 0;
+        if (!ocProductId) return c.json({ error: 'OpenCart ürün oluşturulamadı' }, 500);
+
+        await conn.execute(
+          `INSERT INTO ${tblDesc} (product_id, language_id, name, description, meta_title, meta_description, meta_keyword) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [ocProductId, languageId, ocName, ocDesc, ocMetaTitle, ocMetaDesc, ocMetaKeyword]
+        );
+        await conn.execute(
+          `INSERT INTO ${tblProductToCategory} (product_id, category_id) VALUES (?, ?)`,
+          [ocProductId, defaultCat]
+        );
+        await conn.execute(
+          `INSERT INTO ${tblProductToStore} (product_id, store_id) VALUES (?, ?)`,
+          [ocProductId, storeId]
+        );
+      }
+
+      const ocName = ecommerceName || productRow.name;
+      const ocDesc = mainDescription;
+      const ocMetaTitle = seoTitle;
+      const ocMetaDesc = seoDescription;
+      const ocMetaKeyword = seoSlug;
+
+      if (!isNewProduct) {
+        if (updateDescription) {
+          await conn.execute(
+            `UPDATE ${tblDesc} SET name = ?, description = ?, meta_title = ?, meta_description = ?, meta_keyword = ? WHERE product_id = ? AND language_id = ?`,
+            [ocName, ocDesc, ocMetaTitle, ocMetaDesc, ocMetaKeyword, ocProductId, languageId]
+          );
+        }
+        if (updatePrice) {
+          await conn.execute(`UPDATE ${tblProduct} SET price = ? WHERE product_id = ?`, [productPrice, ocProductId]);
+        }
+      }
+
+      let ocImagePaths: string[] = [];
+      const shouldUpdateImages = isNewProduct || updateImages;
+      if (shouldUpdateImages) {
+        if (uploadedPaths && uploadedPaths.length > 0) {
+          ocImagePaths = uploadedPaths;
+        } else {
+          const toOcPath = async (r2Key: string): Promise<string> => {
+            if (r2Key.startsWith('catalog/') || r2Key.startsWith('data/')) return r2Key;
+            if (!imageUploadUrl || !c.env.STORAGE) return `catalog/${r2Key.replace(/^\/+/, '')}`;
+            const obj = await c.env.STORAGE.get(r2Key);
+            if (!obj) return `catalog/${r2Key.replace(/^\/+/, '')}`;
+            const buf = await obj.arrayBuffer();
+            const ext = r2Key.split('.').pop()?.toLowerCase() || 'webp';
+            const filename = `product_${ocProductId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+            const formData = new FormData();
+            formData.append('file', new Blob([buf], { type: obj.httpMetadata?.contentType || 'image/webp' }), filename);
+            formData.append('product_id', String(ocProductId));
+            const uploadRes = await fetch(imageUploadUrl, { method: 'POST', body: formData });
+            const uploadJson = (await uploadRes.json().catch(() => ({}))) as { path?: string; error?: string };
+            if (uploadJson.path) return uploadJson.path;
+            return `catalog/${r2Key.replace(/^\/+/, '')}`;
+          };
+          for (const path of imagePaths) {
+            const p = (path ?? '').trim();
+            if (!p || p.startsWith('http')) continue;
+            try {
+              ocImagePaths.push(await toOcPath(p));
+            } catch {
+              ocImagePaths.push(`catalog/${p.replace(/^\/+/, '')}`);
+            }
+          }
+        }
+
+        const mainOcPath = ocImagePaths[0];
+        if (mainOcPath) {
+          await conn.execute(`UPDATE ${tblProduct} SET image = ? WHERE product_id = ?`, [mainOcPath, ocProductId]);
+        }
+        await conn.execute(`DELETE FROM ${tblImage} WHERE product_id = ?`, [ocProductId]);
+        for (let i = 1; i < ocImagePaths.length; i++) {
+          const ocPath = ocImagePaths[i];
+          if (!ocPath) continue;
+          await conn.execute(`INSERT INTO ${tblImage} (product_id, image, sort_order) VALUES (?, ?, ?)`, [ocProductId, ocPath, i]);
+        }
+      }
+
+      const imagesUploaded = (!!uploadedPaths && uploadedPaths.length > 0) || (!!imageUploadUrl && ocImagePaths.length > 0);
+      return c.json({
+        ok: true,
+        message: isNewProduct ? 'OpenCart\'ta yeni ürün oluşturuldu' : 'OpenCart\'a yayınlandı',
+        created: isNewProduct,
+        opencart_product_id: ocProductId,
+        updated: {
+          name: ocName,
+          description: !!ocDesc,
+          meta_title: !!ocMetaTitle,
+          meta_description: !!ocMetaDesc,
+          price: productPrice,
+          images: ocImagePaths.length,
+          images_uploaded: imagesUploaded,
+        },
+        image_upload_hint: !imagesUploaded && imagePaths.length > 0 && shouldUpdateImages
+          ? 'Görseller OpenCart sunucusuna yüklenmedi. Ayarlar > app_settings opencart_mysql kategorisine image_upload_url ekleyin. scripts/opencart-image-upload.php dosyasını OpenCart image/catalog/ klasörüne yükleyin.'
+          : undefined,
+      });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Yayınlama başarısız' }, 500);
   }
 });
 
@@ -1517,8 +1856,8 @@ app.get('/api/product-units', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
       params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -1625,8 +1964,8 @@ app.get('/api/product-types', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
       params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -1723,6 +2062,116 @@ app.delete('/api/product-types/:id', async (c) => {
   }
 });
 
+// ========== PRODUCT ITEM GROUPS (Ürün Grupları: Ürün, Yedek Parça, Aksesuar) ==========
+app.get('/api/product-item-groups', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const search = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1'));
+    const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
+    const offset = (page - 1) * limit;
+    let where = 'WHERE is_deleted = 0 AND status = 1';
+    const params: (string | number)[] = [];
+    if (search) {
+      const n = normalizeForSearch(search);
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
+      params.push(pat, pat);
+    }
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total FROM product_item_groups ${where}`
+    ).bind(...params).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, code, description, color, sort_order, status, created_at FROM product_item_groups ${where}
+       ORDER BY sort_order, name LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.get('/api/product-item-groups/next-sort-order', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const row = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM product_item_groups WHERE is_deleted = 0`
+    ).first<{ next: number }>();
+    return c.json({ next: row?.next ?? 1 });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/product-item-groups', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ name: string; code?: string; description?: string; color?: string; sort_order?: number; status?: number }>();
+    const name = (body.name || '').trim();
+    if (!name) return c.json({ error: 'Ürün grubu adı gerekli' }, 400);
+    const code = (body.code || name.slice(0, 2).toUpperCase()).trim();
+    const description = body.description?.trim() || null;
+    const sort_order = body.sort_order ?? 0;
+    const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM product_item_groups WHERE code = ? AND is_deleted = 0`
+    ).bind(code).first();
+    if (existing) return c.json({ error: 'Bu kod zaten kullanılıyor' }, 409);
+    const color = body.color?.trim() || null;
+    await c.env.DB.prepare(
+      `INSERT INTO product_item_groups (name, code, description, color, sort_order, status) VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(name, code, description, color, sort_order, status).run();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, code, description, color, sort_order, status, created_at FROM product_item_groups WHERE id = last_insert_rowid()`
+    ).all();
+    return c.json(results![0], 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/product-item-groups/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ name?: string; code?: string; description?: string; color?: string; sort_order?: number; status?: number }>();
+    const existing = await c.env.DB.prepare(`SELECT id FROM product_item_groups WHERE id = ? AND is_deleted = 0`).bind(id).first();
+    if (!existing) return c.json({ error: 'Ürün grubu bulunamadı' }, 404);
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name.trim()); }
+    if (body.code !== undefined) { updates.push('code = ?'); values.push(body.code.trim()); }
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
+    if (body.color !== undefined) { updates.push('color = ?'); values.push(body.color?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE product_item_groups SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(
+      `SELECT id, name, code, description, color, sort_order, status, created_at, updated_at FROM product_item_groups WHERE id = ?`
+    ).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/product-item-groups/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const res = await c.env.DB.prepare(
+      `UPDATE product_item_groups SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+    ).bind(id).run();
+    if (res.meta.changes === 0) return c.json({ error: 'Ürün grubu bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 // ========== PRODUCT CURRENCIES (Para Birimleri) ==========
 app.get('/api/product-currencies', async (c) => {
   try {
@@ -1735,8 +2184,8 @@ app.get('/api/product-currencies', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ? OR symbol LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ? OR ${sqlNormalizeCol('symbol')} LIKE ?)`;
       params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -1854,8 +2303,8 @@ app.get('/api/product-price-types', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
       params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -1961,8 +2410,8 @@ app.get('/api/product-tax-rates', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR description LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('description')} LIKE ?)`;
       params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -2065,8 +2514,8 @@ app.get('/api/customer-types', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ? OR description LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ? OR ${sqlNormalizeCol('description')} LIKE ?)`;
       params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -2177,8 +2626,8 @@ app.get('/api/customer-groups', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ? OR description LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ? OR ${sqlNormalizeCol('description')} LIKE ?)`;
       params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -2287,8 +2736,8 @@ app.get('/api/customer-legal-types', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR description LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('description')} LIKE ?)`;
       params.push(pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -2784,8 +3233,8 @@ app.get('/api/offers', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (o.order_no LIKE ? OR c.title LIKE ? OR o.description LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('o.order_no')} LIKE ? OR ${sqlNormalizeCol('c.title')} LIKE ? OR ${sqlNormalizeCol('o.description')} LIKE ?)`;
       params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -2884,10 +3333,11 @@ app.get('/api/offers/:id', async (c) => {
     ).bind(id).first();
     if (!row) return c.json({ error: 'Teklif bulunamadı' }, 404);
     const { results: items } = await c.env.DB.prepare(
-      `SELECT oi.*, p.name as product_name, p.sku as product_sku, u.name as unit_name
+      `SELECT oi.*, p.name as product_name, p.sku as product_sku, u.name as unit_name, p.currency_id as currency_id, cur.symbol as currency_symbol
        FROM offer_items oi
        LEFT JOIN products p ON oi.product_id = p.id AND p.is_deleted = 0
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
        WHERE oi.offer_id = ? AND oi.is_deleted = 0 ORDER BY oi.sort_order, oi.id`
     ).bind(id).all();
     return c.json({ ...row, items: items || [] });
@@ -3032,8 +3482,8 @@ app.get('/api/common-tax-offices', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ? OR city LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ? OR ${sqlNormalizeCol('city')} LIKE ?)`;
       params.push(pat, pat, pat);
     }
     const countRes = await c.env.DB.prepare(
@@ -3144,8 +3594,8 @@ app.get('/api/product-categories', async (c) => {
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
-      const pat = `%${n}%`;
-      where += ' AND (name LIKE ? OR code LIKE ?)';
+      const pat = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
       params.push(pat, pat);
     }
     if (groupId !== undefined && groupId !== '') {
@@ -3307,8 +3757,9 @@ app.get('/api/suppliers', async (c) => {
     let where = 'WHERE s.is_deleted = 0 AND (s.status = 1 OR s.status IS NULL)';
     const params: (string | number)[] = [];
     if (search) {
-      where += ' AND s.name LIKE ?';
-      params.push(`%${normalizeForSearch(search)}%`);
+      const n = normalizeForSearch(search);
+      where += ` AND ${sqlNormalizeCol('s.name')} LIKE ?`;
+      params.push(`%${escapeLikePattern(n)}%`);
     }
     if (brand_id) {
       where += ' AND s.brand_id = ?';
@@ -3911,7 +4362,7 @@ app.get('/api/opencart-mysql/products', async (c) => {
 
       const searchTerm = search || filterName;
       if (searchTerm) {
-        const p = `%${escapeLikePattern(searchTerm)}%`;
+        const p = `%${escapeLikePattern(normalizeForSearch(searchTerm))}%`;
         where.push('(pd.name LIKE ? OR pd.description LIKE ? OR p.model LIKE ? OR p.sku LIKE ?)');
         params.push(p, p, p, p);
       }
@@ -4338,8 +4789,9 @@ app.get('/api/dia/vergidaireleri', async (c) => {
     let where = '1=1';
     const params: unknown[] = [];
     if (search) {
-      where += ` AND (vergidairesiadi LIKE ? OR sehir LIKE ? OR CAST(vdkod AS TEXT) LIKE ?)`;
-      const p = `%${escapeLikePattern(search)}%`;
+      const n = normalizeForSearch(search);
+      const p = `%${escapeLikePattern(n)}%`;
+      where += ` AND (${sqlNormalizeCol('vergidairesiadi')} LIKE ? OR ${sqlNormalizeCol('sehir')} LIKE ? OR ${sqlNormalizeCol("CAST(vdkod AS TEXT)")} LIKE ?)`;
       params.push(p, p, p);
     }
     const countRes = await c.env.DB.prepare(
@@ -4366,22 +4818,126 @@ app.get('/api/dia/cari-kartlar', async (c) => {
     let where = '1=1';
     const params: unknown[] = [];
     if (search) {
-      where += ` AND (unvan LIKE ? OR carikartkodu LIKE ? OR verginumarasi LIKE ? OR tckimlikno LIKE ? OR eposta LIKE ?)`;
-      const p = `%${escapeLikePattern(search)}%`;
+      const p = `%${escapeLikePattern(normalizeForSearch(search))}%`;
+      where += ` AND (${sqlNormalizeCol('c.unvan')} LIKE ? OR ${sqlNormalizeCol('c.carikartkodu')} LIKE ? OR ${sqlNormalizeCol('c.verginumarasi')} LIKE ? OR ${sqlNormalizeCol('c.tckimlikno')} LIKE ? OR ${sqlNormalizeCol('c.eposta')} LIKE ?)`;
       params.push(p, p, p, p, p);
     }
     const countRes = await c.env.DB.prepare(
-      `SELECT COUNT(*) as total FROM dia_carikartlar WHERE ${where}`
+      `SELECT COUNT(*) as total FROM dia_carikartlar c WHERE ${where}`
     ).bind(...params).first() as { total: number } | null;
     const total = countRes?.total ?? 0;
     const { results } = await c.env.DB.prepare(
       `SELECT c.*, v.vergidairesiadi as vergidairesi_adi
        FROM dia_carikartlar c
        LEFT JOIN dia_vergidaireleri v ON c.vergidairesi = v.vdkod
-       WHERE ${where.replace(/unvan|carikartkodu|verginumarasi|tckimlikno|eposta/g, (m) => `c.${m}`)}
+       WHERE ${where}
        ORDER BY c.id DESC LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total, page, limit });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/** dia_carikartlar -> Paraşüt contact aktarımı */
+app.post('/api/dia/cari-kartlar/:id/transfer-parasut', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const idNum = parseInt(id, 10);
+    if (!id || isNaN(idNum)) return c.json({ error: 'Geçersiz cari kart id' }, 400);
+
+    const row = await c.env.DB.prepare(
+      `SELECT c.*, v.vergidairesiadi as vergidairesi_adi
+       FROM dia_carikartlar c
+       LEFT JOIN dia_vergidaireleri v ON c.vergidairesi = v.vdkod
+       WHERE c.id = ?`
+    ).bind(idNum).first() as {
+      id: number; unvan?: string | null; eposta?: string | null; verginumarasi?: string | null;
+      tckimlikno?: string | null; vergidairesi_adi?: string | null; adresler_adres_adres1?: string | null;
+      adresler_adres_sehir?: string | null; adresler_adres_ilce?: string | null;
+      adresler_adres_telefon1?: string | null; adresler_adres_ceptel?: string | null;
+    } | null;
+    if (!row) return c.json({ error: 'Cari kart bulunamadı' }, 404);
+
+    const name = (row.unvan || '').trim();
+    if (!name) return c.json({ error: 'Ünvan boş, Paraşüt\'e aktarılamaz' }, 400);
+
+    const { results: settingsRows } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'parasut' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+    ).all();
+    const settings: Record<string, string> = {};
+    for (const r of settingsRows as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    const clientId = settings.PARASUT_CLIENT_ID?.trim();
+    const clientSecret = settings.PARASUT_CLIENT_SECRET?.trim();
+    const username = settings.PARASUT_USERNAME?.trim();
+    const password = settings.PARASUT_PASSWORD?.trim();
+    const companyId = settings.PARASUT_COMPANY_ID?.trim();
+    if (!clientId || !clientSecret || !username || !password || !companyId) {
+      return c.json({ error: 'Paraşüt ayarları eksik. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
+    }
+
+    const base = 'https://api.parasut.com';
+    const tokenRes = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'password',
+        client_id: clientId,
+        client_secret: clientSecret,
+        username,
+        password,
+        redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+      }).toString(),
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    const token = (tokenData as { access_token?: string }).access_token;
+    if (!token) {
+      const err = (tokenData as { error_description?: string }).error_description || 'Token alınamadı';
+      return c.json({ error: `Paraşüt bağlantı hatası: ${err}` }, 400);
+    }
+
+    const taxNumber = (row.verginumarasi || row.tckimlikno || '').trim().replace(/\s/g, '');
+    const contactType = taxNumber.length === 11 ? 'person' : 'company';
+    const attributes: Record<string, string> = {
+      name,
+      contact_type: contactType,
+      account_type: 'customer',
+    };
+    if ((row.eposta || '').trim()) attributes.email = (row.eposta || '').trim();
+    if (taxNumber) attributes.tax_number = taxNumber;
+    if ((row.vergidairesi_adi || '').trim()) attributes.tax_office = (row.vergidairesi_adi || '').trim();
+    if ((row.adresler_adres_adres1 || '').trim()) attributes.address = (row.adresler_adres_adres1 || '').trim();
+    if ((row.adresler_adres_sehir || '').trim()) attributes.city = (row.adresler_adres_sehir || '').trim();
+    if ((row.adresler_adres_ilce || '').trim()) attributes.district = (row.adresler_adres_ilce || '').trim();
+    const phone = (row.adresler_adres_telefon1 || row.adresler_adres_ceptel || '').trim();
+    if (phone) attributes.phone = phone;
+
+    const createRes = await fetch(`${base}/v4/${companyId}/contacts`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'contacts',
+          attributes,
+        },
+      }),
+    });
+    const createJson = await createRes.json().catch(() => ({}));
+    if (!createRes.ok) {
+      const errMsg = (createJson as { errors?: Array<{ detail?: string; title?: string }> }).errors?.[0]?.detail
+        || (createJson as { errors?: Array<{ title?: string }> }).errors?.[0]?.title
+        || (createJson as { error?: string }).error
+        || `HTTP ${createRes.status}`;
+      return c.json({ error: `Paraşüt müşteri oluşturulamadı: ${errMsg}` }, 400);
+    }
+    const contactId = (createJson as { data?: { id?: string } }).data?.id;
+    return c.json({ ok: true, parasut_contact_id: contactId, message: 'Paraşüt\'e müşteri olarak aktarıldı.' });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -4902,7 +5458,363 @@ app.put('/api/sidebar-menu-items', async (c) => {
   }
 });
 
+// ========== AI / OPENAI ==========
+/** HTML'den metin çıkarır (script/style temizlenir, boşluklar sıkıştırılır) */
+function extractTextFromHtml(html: string, maxLen = 4000): string {
+  let text = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .trim();
+  if (text.length > maxLen) text = text.slice(0, maxLen) + '...';
+  return text;
+}
+
+/** ChatGPT ile e-ticaret metinleri oluştur. SKU ile otomatikkapimarketim.com ürün sayfasından referans alınır. */
+app.post('/api/ai/generate-ecommerce', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ name?: string; brand_name?: string; category_path?: string; sku?: string }>().catch(() => null);
+    const name = (body?.name ?? '').trim();
+    if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'openai' AND "key" = 'api_key' AND is_deleted = 0 LIMIT 1`
+    ).all();
+    const apiKey = (results as { value: string | null }[])[0]?.value?.trim();
+    if (!apiKey) return c.json({ error: 'OpenAI API anahtarı tanımlı değil. Ayarlar > Entegrasyonlar sayfasından ekleyin.' }, 400);
+
+    const brandName = (body?.brand_name ?? '').trim();
+    const categoryPath = (body?.category_path ?? '').trim();
+    const sku = (body?.sku ?? '').trim();
+
+    let siteContent = '';
+    const settings = await getOpencartMysqlSettings(c);
+    const storeUrl = (settings?.store_url ?? '').trim().replace(/\/+$/, '');
+    if (sku && storeUrl) {
+      try {
+        const config = await getOpencartMysqlConfig(c);
+        if (config) {
+          const connection = await createMysqlConnection(config);
+          try {
+            const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+            const prefix = (settings?.table_prefix ?? 'oc_').replace(/[^a-zA-Z0-9_]/g, '') || 'oc';
+            const tbl = prefix.endsWith('_') ? prefix + 'product' : prefix + '_product';
+            const [rows] = await conn.execute(
+              `SELECT product_id FROM ${tbl} WHERE TRIM(COALESCE(model, '')) = ? LIMIT 1`,
+              [sku]
+            );
+            const productId = (rows as { product_id?: number }[])[0]?.product_id;
+            if (productId) {
+              const productUrl = `${storeUrl}/index.php?route=product/product&product_id=${productId}`;
+              const pageRes = await fetch(productUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; eSyncPlus/1.0)' },
+                signal: AbortSignal.timeout(10000),
+              });
+              if (pageRes.ok) {
+                const html = await pageRes.text();
+                siteContent = extractTextFromHtml(html, 4000);
+              }
+            }
+          } finally {
+            await connection.end();
+          }
+        }
+      } catch {
+        /* OpenCart veya fetch hatası – referans olmadan devam et */
+      }
+    }
+
+    const userPrompt = `Ürün: ${name}${brandName ? `, Marka: ${brandName}` : ''}${categoryPath ? `, Kategori: ${categoryPath}` : ''}${sku ? `, SKU: ${sku}` : ''}`;
+
+    let systemPrompt = `Sen bir e-ticaret metin yazarısın. Verilen ürün bilgilerine göre Türkçe e-ticaret metinleri oluştur.`;
+    if (siteContent) {
+      systemPrompt += `
+
+Mevcut otomatikkapimarketim.com sitesindeki aynı ürün sayfasından referans içerik:
+---
+${siteContent}
+---
+
+Bu içeriği referans alarak daha iyi, satış odaklı metinler üret. Aynı bilgileri tekrarlamak yerine genişlet ve zenginleştir.`;
+    }
+    systemPrompt += `
+
+Yanıtını SADECE aşağıdaki JSON formatında ver, başka hiçbir açıklama ekleme:
+{"ecommerce_name":"...","main_description":"...","seo_slug":"...","seo_title":"...","seo_description":"..."}
+
+Kurallar:
+- ecommerce_name: E-ticaret sitelerinde görünecek çekici ürün adı (max 100 karakter)
+- main_description: Ürün açıklaması, HTML etiketleri kullanabilirsin (p, ul, li, strong). 2-3 paragraf, satış odaklı
+- seo_slug: URL-safe, sadece küçük harf, tire ile kelimeler (örn: urun-adi-seo)
+- seo_title: Meta başlık, max 60 karakter
+- seo_description: Meta açıklama, max 160 karakter`;
+
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.7,
+      }),
+    });
+
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+    if (!res.ok) {
+      const errMsg = data?.error?.message ?? (await res.text()).slice(0, 200);
+      return c.json({ error: `OpenAI: ${errMsg}` }, 400);
+    }
+
+    const content = data?.choices?.[0]?.message?.content?.trim();
+    if (!content) return c.json({ error: 'OpenAI yanıt vermedi' }, 500);
+
+    let parsed: { ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string };
+    try {
+      const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      parsed = JSON.parse(cleaned) as typeof parsed;
+    } catch {
+      return c.json({ error: 'OpenAI yanıtı parse edilemedi' }, 500);
+    }
+
+    return c.json({
+      ecommerce_name: parsed.ecommerce_name ?? '',
+      main_description: parsed.main_description ?? '',
+      seo_slug: parsed.seo_slug ?? '',
+      seo_title: parsed.seo_title ?? '',
+      seo_description: parsed.seo_description ?? '',
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
+  }
+});
+
 // ========== APP SETTINGS ==========
+/** Kategori listesi (opsiyonel prefix ile filtreleme) */
+app.get('/api/app-settings-categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const prefix = (c.req.query('prefix') ?? '').trim();
+    const sql = prefix
+      ? `SELECT DISTINCT category FROM app_settings WHERE is_deleted = 0 AND category LIKE ? ORDER BY category`
+      : `SELECT DISTINCT category FROM app_settings WHERE is_deleted = 0 ORDER BY category`;
+    const { results } = prefix
+      ? await c.env.DB.prepare(sql).bind(prefix + '%').all()
+      : await c.env.DB.prepare(sql).all();
+    const categories = (results as { category: string }[]).map((r) => r.category).filter(Boolean);
+    return c.json(categories);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Marketplace bağlantı testi - category ile platform belirlenir */
+app.post('/api/marketplace/test', async (c) => {
+  try {
+    const body = await c.req.json<{ category: string; settings: Record<string, string> }>().catch(() => null);
+    if (!body?.category?.trim() || !body?.settings || typeof body.settings !== 'object') {
+      return c.json({ error: 'category ve settings gerekli' }, 400);
+    }
+    const { category, settings } = body;
+    const type = category.replace(/^marketplace_/, '').toLowerCase();
+    const apiUrl = settings.api_url?.trim();
+
+    if (type === 'trendyol') {
+      const supplierId = settings.supplier_id?.trim();
+      const apiKey = settings.api_key?.trim();
+      const apiSecret = settings.api_secret?.trim();
+      if (!supplierId || !apiKey || !apiSecret) return c.json({ ok: false, error: 'Satıcı ID, API Key ve API Secret gerekli' }, 400);
+      const userAgent = (settings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+      const env = settings.environment?.trim().toLowerCase();
+      const base = apiUrl
+        ? apiUrl.replace(/\/+$/, '')
+        : env === 'stage'
+          ? 'https://stageapigw.trendyol.com'
+          : 'https://apigw.trendyol.com';
+      const auth = btoa(`${apiKey}:${apiSecret}`);
+      const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+      const trendyolHeaders = {
+        Authorization: 'Basic ' + auth,
+        'User-Agent': `${supplierId} - ${userAgent}`,
+        'Content-Type': 'application/json',
+        'x-clientip': clientIp,
+        'x-correlationid': crypto.randomUUID(),
+        'x-agentname': userAgent,
+      };
+      const res = await fetch(`${base}/integration/product/sellers/${supplierId}/products?page=0&size=1`, {
+        headers: trendyolHeaders,
+      });
+      if (res.ok || res.status === 404) return c.json({ ok: true });
+      const errText = await res.text();
+      const errPreview = errText.slice(0, 200);
+      return c.json({ ok: false, error: `Trendyol: ${res.status} ${errPreview}` }, 400);
+    }
+    if (type === 'hepsiburada') {
+      const token = settings.bearer_token?.trim();
+      if (!token) return c.json({ ok: false, error: 'Bearer Token gerekli' }, 400);
+      const base = (apiUrl || 'https://api.hepsiglobal.com').replace(/\/+$/, '');
+      const res = await fetch(`${base}/api/v1/marketplaces/list`, {
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      });
+      if (res.ok || res.status === 401) return c.json({ ok: true });
+      return c.json({ ok: false, error: `Hepsiburada: ${res.status}` }, 400);
+    }
+    if (type === 'n11') {
+      const clientId = settings.client_id?.trim();
+      const clientSecret = settings.client_secret?.trim();
+      if (!clientId || !clientSecret) return c.json({ ok: false, error: 'Client ID ve Client Secret gerekli' }, 400);
+      const base = (apiUrl || 'https://api-sandbox.n1co.shop').replace(/\/+$/, '');
+      const res = await fetch(`${base}/api/v3/Token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId, clientSecret }),
+      });
+      if (res.ok) return c.json({ ok: true });
+      return c.json({ ok: false, error: `N11: ${res.status} ${(await res.text()).slice(0, 150)}` }, 400);
+    }
+    if (type === 'idefix') {
+      const supplierId = settings.supplier_id?.trim();
+      const apiKey = settings.api_key?.trim();
+      const apiSecret = settings.api_secret?.trim();
+      if (!supplierId || !apiKey || !apiSecret) return c.json({ ok: false, error: 'Satıcı ID, API Key ve API Secret gerekli' }, 400);
+      const base = (apiUrl || 'https://merchantapi.idefix.com').replace(/\/+$/, '');
+      const token = btoa(`${apiKey}:${apiSecret}`);
+      const res = await fetch(`${base}/pim/product-category`, {
+        headers: { 'X-API-KEY': token, 'Content-Type': 'application/json' },
+      });
+      if (res.ok || res.status === 401) return c.json({ ok: true });
+      return c.json({ ok: false, error: `Idefix: ${res.status}` }, 400);
+    }
+
+    return c.json({ ok: true });
+  } catch (err: unknown) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : 'Test başarısız' }, 500);
+  }
+});
+
+/** Marketplace kategori listesi */
+app.post('/api/marketplace/categories', async (c) => {
+  try {
+    const body = await c.req.json<{ category: string; settings: Record<string, string> }>().catch(() => null);
+    if (!body?.category?.trim() || !body?.settings || typeof body.settings !== 'object') {
+      return c.json({ error: 'category ve settings gerekli' }, 400);
+    }
+    const { category, settings } = body;
+    const type = category.replace(/^marketplace_/, '').toLowerCase();
+    const apiUrl = settings.api_url?.trim();
+
+    const flatten = (items: { id?: number; name?: string; subCategories?: unknown }[], parentId: number | null = null): { id: number; name: string; parentId: number | null }[] => {
+      const result: { id: number; name: string; parentId: number | null }[] = [];
+      for (const cat of items) {
+        const id = cat.id ?? 0;
+        result.push({ id, name: cat.name ?? '', parentId });
+        const subs = Array.isArray(cat.subCategories) ? cat.subCategories : [];
+        if (subs.length) result.push(...flatten(subs as { id?: number; name?: string; subCategories?: unknown }[], id));
+      }
+      return result;
+    };
+
+    if (type === 'trendyol') {
+      const supplierId = settings.supplier_id?.trim();
+      const apiKey = settings.api_key?.trim();
+      const apiSecret = settings.api_secret?.trim();
+      if (!supplierId || !apiKey || !apiSecret) return c.json({ error: 'Satıcı ID, API Key ve API Secret gerekli' }, 400);
+      const userAgent = (settings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+      const env = settings.environment?.trim().toLowerCase();
+      const base = apiUrl
+        ? apiUrl.replace(/\/+$/, '')
+        : env === 'stage'
+          ? 'https://stageapigw.trendyol.com'
+          : 'https://apigw.trendyol.com';
+      const auth = btoa(`${apiKey}:${apiSecret}`);
+      const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+      const trendyolHeaders: Record<string, string> = {
+        Authorization: 'Basic ' + auth,
+        'User-Agent': `${supplierId} - ${userAgent}`,
+        'x-clientip': clientIp,
+        'x-correlationid': crypto.randomUUID(),
+        'x-agentname': userAgent,
+      };
+      const res = await fetch(`${base}/integration/product/product-categories`, {
+        method: 'GET',
+        headers: trendyolHeaders,
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        return c.json({ error: `Trendyol ${res.status}: ${errText.slice(0, 400)}` }, 400);
+      }
+      const raw = (await res.json()) as unknown;
+      let data: unknown[] = [];
+      if (Array.isArray(raw)) {
+        data = raw;
+      } else if (raw && typeof raw === 'object' && 'categories' in raw) {
+        data = Array.isArray((raw as { categories?: unknown }).categories) ? (raw as { categories: unknown[] }).categories : [];
+      } else if (raw && typeof raw === 'object' && 'id' in raw) {
+        data = [raw];
+      }
+      const categories = Array.isArray(data) ? flatten(data) : [];
+      return c.json({ categories });
+    }
+    if (type === 'hepsiburada') {
+      const token = settings.bearer_token?.trim();
+      if (!token) return c.json({ error: 'Bearer Token gerekli' }, 400);
+      const base = (apiUrl || 'https://api.hepsiglobal.com').replace(/\/+$/, '');
+      const res = await fetch(`${base}/api/v1/marketplaces/list`, {
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) return c.json({ error: `Hepsiburada: ${res.status}` }, 400);
+      const data = (await res.json()) as { data?: { id?: number; name?: string }[] };
+      const cats = (data?.data ?? []).map((cat) => ({ id: cat.id ?? 0, name: cat.name ?? '', parentId: null as number | null }));
+      return c.json({ categories: cats });
+    }
+    if (type === 'idefix') {
+      const supplierId = settings.supplier_id?.trim();
+      const apiKey = settings.api_key?.trim();
+      const apiSecret = settings.api_secret?.trim();
+      if (!supplierId || !apiKey || !apiSecret) return c.json({ error: 'Satıcı ID, API Key ve API Secret gerekli' }, 400);
+      const base = (apiUrl || 'https://merchantapi.idefix.com').replace(/\/+$/, '');
+      const token = btoa(`${apiKey}:${apiSecret}`);
+      const res = await fetch(`${base}/pim/product-category`, {
+        headers: { 'X-API-KEY': token, 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) return c.json({ error: `Idefix: ${res.status}` }, 400);
+      const data = (await res.json()) as { id?: number; name?: string; subCategories?: unknown[] }[];
+      return c.json({ categories: Array.isArray(data) ? flatten(data) : [] });
+    }
+
+    return c.json({ categories: [], message: 'Bu pazaryeri için kategori API henüz desteklenmiyor.' });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kategoriler alınamadı' }, 500);
+  }
+});
+
+/** Kategori sil (soft delete) */
+app.delete('/api/app-settings-category', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const category = c.req.query('category');
+    if (!category?.trim()) return c.json({ error: 'category gerekli' }, 400);
+    await c.env.DB.prepare(
+      `UPDATE app_settings SET is_deleted = 1, updated_at = datetime('now') WHERE category = ?`
+    ).bind(category.trim()).run();
+    return c.json({ ok: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 app.get('/api/app-settings', async (c) => {
   try {
     if (!c.env.DB) {
@@ -5025,6 +5937,327 @@ app.post('/api/integrations/test/parasut', async (c) => {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+/** Paraşüt API ürün listesi - app_settings parasut ayarları ile */
+app.get('/api/parasut/products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results: settingsRows } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'parasut' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+    ).all();
+    const settings: Record<string, string> = {};
+    for (const r of settingsRows as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    const clientId = settings.PARASUT_CLIENT_ID?.trim();
+    const clientSecret = settings.PARASUT_CLIENT_SECRET?.trim();
+    const username = settings.PARASUT_USERNAME?.trim();
+    const password = settings.PARASUT_PASSWORD?.trim();
+    const companyId = settings.PARASUT_COMPANY_ID?.trim();
+    if (!clientId || !clientSecret || !username || !password || !companyId) {
+      return c.json({ error: 'Paraşüt ayarları eksik. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
+    }
+
+    const base = 'https://api.parasut.com';
+    const tokenRes = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'password',
+        client_id: clientId,
+        client_secret: clientSecret,
+        username,
+        password,
+        redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+      }).toString(),
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    const token = (tokenData as { access_token?: string }).access_token;
+    if (!token) {
+      const err = (tokenData as { error_description?: string }).error_description || 'Token alınamadı';
+      return c.json({ error: `Paraşüt bağlantı hatası: ${err}` }, 400);
+    }
+
+    const filterName = (c.req.query('filter_name') || '').trim();
+    const filterCode = (c.req.query('filter_code') || '').trim();
+    const pageNum = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const pageSize = Math.min(25, Math.max(1, parseInt(c.req.query('limit') || '25', 10)));
+    const sort = (c.req.query('sort') || '-id').trim();
+
+    const params = new URLSearchParams();
+    if (filterName) params.set('filter[name]', filterName);
+    if (filterCode) params.set('filter[code]', filterCode);
+    params.set('page[number]', String(pageNum));
+    params.set('page[size]', String(pageSize));
+    params.set('sort', sort);
+    params.set('include', 'category');
+
+    const res = await fetch(`${base}/v4/${companyId}/products?${params.toString()}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json',
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errMsg = (json as { errors?: Array<{ detail?: string; title?: string }> }).errors?.[0]?.detail
+        || (json as { errors?: Array<{ title?: string }> }).errors?.[0]?.title
+        || (json as { error?: string }).error
+        || `HTTP ${res.status}`;
+      return c.json({ error: `Paraşüt API hatası: ${errMsg}` }, 400);
+    }
+
+    const data = (json as { data?: unknown[] }).data ?? [];
+    const meta = (json as { meta?: { total_count?: number; current_page?: number; total_pages?: number } }).meta ?? {};
+    const included = (json as { included?: unknown[] }).included ?? [];
+
+    return c.json({
+      data: data.map((item: unknown) => {
+        const d = item as { id?: string; type?: string; attributes?: Record<string, unknown>; relationships?: Record<string, unknown> };
+        return {
+          id: d.id,
+          type: d.type,
+          ...(d.attributes ?? {}),
+        };
+      }),
+      meta: {
+        total: meta.total_count ?? data.length,
+        page: meta.current_page ?? pageNum,
+        total_pages: meta.total_pages ?? 1,
+        per_page: pageSize,
+      },
+      included,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Paraşüt ürünleri alınamadı' }, 500);
+  }
+});
+
+/** Paraşüt ayarları ve token al */
+async function getParasutAuth(c: { env: Bindings }): Promise<{ token: string; companyId: string } | null> {
+  if (!c.env.DB) return null;
+  const { results: settingsRows } = await c.env.DB.prepare(
+    `SELECT key, value FROM app_settings WHERE category = 'parasut' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+  ).all();
+  const settings: Record<string, string> = {};
+  for (const r of settingsRows as { key: string; value: string | null }[]) {
+    if (r.key) settings[r.key] = r.value ?? '';
+  }
+  const clientId = settings.PARASUT_CLIENT_ID?.trim();
+  const clientSecret = settings.PARASUT_CLIENT_SECRET?.trim();
+  const username = settings.PARASUT_USERNAME?.trim();
+  const password = settings.PARASUT_PASSWORD?.trim();
+  const companyId = settings.PARASUT_COMPANY_ID?.trim();
+  if (!clientId || !clientSecret || !username || !password || !companyId) return null;
+  const base = 'https://api.parasut.com';
+  const tokenRes = await fetch(`${base}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'password',
+      client_id: clientId,
+      client_secret: clientSecret,
+      username,
+      password,
+      redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+    }).toString(),
+  });
+  const tokenData = await tokenRes.json().catch(() => ({}));
+  const token = (tokenData as { access_token?: string }).access_token;
+  return token && companyId ? { token, companyId } : null;
+}
+
+/** Paraşüt → Master çek */
+app.post('/api/parasut/products/:id/pull', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const parasutId = c.req.param('id');
+    const body = await c.req.json<{ selected_fields?: Array<{ parasut: string; master: string }> }>().catch(() => ({}));
+    const selected = body?.selected_fields ?? [];
+    if (selected.length === 0) return c.json({ error: 'En az bir alan seçin' }, 400);
+
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+
+    const res = await fetch(`https://api.parasut.com/v4/${auth.companyId}/products/${parasutId}`, {
+      headers: { 'Authorization': `Bearer ${auth.token}`, 'Accept': 'application/json' },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errMsg = (json as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${res.status}`;
+      return c.json({ error: `Paraşüt: ${errMsg}` }, 400);
+    }
+    const attrs = (json as { data?: { attributes?: Record<string, unknown> } }).data?.attributes ?? {};
+    const p = attrs as Record<string, unknown>;
+
+    const mapVal = (parasutKey: string): string | number | null => {
+      const v = p[parasutKey];
+      if (v == null) return null;
+      if (typeof v === 'number') return v;
+      return String(v).trim() || null;
+    };
+
+    let name = '';
+    let sku: string | null = null;
+    let barcode: string | null = null;
+    let price = 0;
+    let quantity = 0;
+    let tax_rate: number | null = null;
+    let unit_id: number | null = null;
+    let currency_id: number | null = null;
+    let supplier_code: string | null = null;
+    let gtip_code: string | null = null;
+
+    for (const { parasut, master } of selected) {
+      const val = mapVal(parasut);
+      if (val === null && typeof val !== 'number') continue;
+      if (master === 'name') name = String(val ?? '');
+      else if (master === 'sku') sku = val != null ? String(val) : null;
+      else if (master === 'barcode') barcode = val != null ? String(val) : null;
+      else if (master === 'price') price = typeof val === 'number' ? val : parseFloat(String(val)) || 0;
+      else if (master === 'quantity') quantity = typeof val === 'number' ? val : parseFloat(String(val)) || 0;
+      else if (master === 'tax_rate') tax_rate = typeof val === 'number' ? val : parseFloat(String(val)) ?? null;
+      else if (master === 'supplier_code') supplier_code = val != null ? String(val) : null;
+      else if (master === 'gtip_code') gtip_code = val != null ? String(val) : null;
+      else if (master === 'unit_id' && val != null) {
+        const code = String(val).toUpperCase().slice(0, 20);
+        const u = await c.env.DB.prepare(`SELECT id FROM product_unit WHERE (UPPER(TRIM(code)) = ? OR UPPER(TRIM(name)) = ?) AND is_deleted = 0 LIMIT 1`).bind(code, code).first();
+        unit_id = (u as { id: number } | null)?.id ?? null;
+      } else if (master === 'currency_id' && val != null) {
+        const code = String(val).toUpperCase().replace(/^TL$/, 'TRY').slice(0, 10);
+        const cur = await c.env.DB.prepare(`SELECT id FROM product_currencies WHERE UPPER(TRIM(code)) = ? AND is_deleted = 0 LIMIT 1`).bind(code).first();
+        currency_id = (cur as { id: number } | null)?.id ?? null;
+      }
+    }
+
+    if (!name.trim()) name = (p.name as string) || (p.code as string) || 'Ürün';
+
+    const existing = sku && String(sku).trim() ? await c.env.DB.prepare(
+      `SELECT id FROM products WHERE TRIM(COALESCE(sku, '')) = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(String(sku).trim()).first() : null;
+
+    if (existing) {
+      const updates: string[] = ['name = ?', 'updated_at = datetime(\'now\')'];
+      const vals: (string | number | null)[] = [name];
+      const masterSet = new Set(selected.map((s) => s.master));
+      if (masterSet.has('sku')) { updates.push('sku = ?'); vals.push(sku); }
+      if (masterSet.has('barcode')) { updates.push('barcode = ?'); vals.push(barcode); }
+      if (masterSet.has('price')) { updates.push('price = ?'); vals.push(price); }
+      if (masterSet.has('quantity')) { updates.push('quantity = ?'); vals.push(quantity); }
+      if (masterSet.has('tax_rate')) { updates.push('tax_rate = ?'); vals.push(tax_rate ?? 0); }
+      if (masterSet.has('unit_id')) { updates.push('unit_id = ?'); vals.push(unit_id); }
+      if (masterSet.has('currency_id')) { updates.push('currency_id = ?'); vals.push(currency_id); }
+      if (masterSet.has('supplier_code')) { updates.push('supplier_code = ?'); vals.push(supplier_code); }
+      if (masterSet.has('gtip_code')) { updates.push('gtip_code = ?'); vals.push(gtip_code); }
+      vals.push((existing as { id: number }).id);
+      await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...vals).run();
+      return c.json({ ok: true, product_id: (existing as { id: number }).id, action: 'updated' });
+    }
+
+    const nextSort = await c.env.DB.prepare(`SELECT COALESCE(MAX(sort_order), 0) + 1 as n FROM products`).first();
+    const sortOrder = (nextSort as { n: number } | null)?.n ?? 1;
+    await c.env.DB.prepare(
+      `INSERT INTO products (name, sku, barcode, price, quantity, tax_rate, unit_id, currency_id, supplier_code, gtip_code, sort_order, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(name, sku ?? '', barcode ?? '', price, quantity, tax_rate ?? 0, unit_id, currency_id, supplier_code ?? '', gtip_code ?? '', sortOrder).run();
+    const inserted = await c.env.DB.prepare(`SELECT id FROM products WHERE id = last_insert_rowid()`).first();
+    return c.json({ ok: true, product_id: (inserted as { id: number }).id, action: 'created' });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Çekme hatası' }, 500);
+  }
+});
+
+/** Master → Paraşüt gönder */
+app.post('/api/parasut/products/push', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      parasut_id: string;
+      product_id: number;
+      selected_fields?: Array<{ parasut: string; master: string }>;
+    }>();
+    const parasutId = body?.parasut_id?.trim();
+    const productId = body?.product_id;
+    const selected = body?.selected_fields ?? [];
+    if (!parasutId || !productId || selected.length === 0) {
+      return c.json({ error: 'parasut_id, product_id ve selected_fields gerekli' }, 400);
+    }
+
+    const productRow = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.unit_id, p.currency_id, p.supplier_code, p.gtip_code, p.image,
+       u.code as unit_code, cur.code as currency_code
+       FROM products p
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0`
+    ).bind(productId).first() as {
+      id: number; name: string; sku: string | null; barcode: string | null; price: number; quantity: number;
+      tax_rate: number | null; unit_id: number | null; currency_id: number | null; supplier_code: string | null; gtip_code: string | null; image: string | null;
+      unit_code: string | null; currency_code: string | null;
+    } | null;
+    if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
+
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+
+    const isEmpty = (v: unknown): boolean => v == null || (typeof v === 'string' && !v.trim());
+    const attrs: Record<string, unknown> = { name: productRow.name };
+    const apiOrigin = new URL(c.req.url).origin;
+    const parseImageToFirstPath = (img: unknown): string | null => {
+      if (!img || typeof img !== 'string') return null;
+      const t = img.trim();
+      if (!t || t === '[]') return null;
+      try {
+        const parsed = JSON.parse(t);
+        if (Array.isArray(parsed)) {
+          const first = parsed.find((x: unknown): x is string => typeof x === 'string' && !!x.trim());
+          return first?.trim() ?? null;
+        }
+        return t;
+      } catch {
+        return t;
+      }
+    };
+    const getImageFullUrl = (path: string): string =>
+      path.startsWith('http') ? path : `${apiOrigin}/storage/serve?key=${encodeURIComponent(path)}`;
+    for (const { parasut, master } of selected) {
+      if (master === 'name') attrs.name = productRow.name;
+      else if (master === 'sku' && !isEmpty(productRow.sku)) attrs.code = productRow.sku!.trim();
+      else if (master === 'barcode' && !isEmpty(productRow.barcode)) attrs.barcode = productRow.barcode!.trim();
+      else if (master === 'price') attrs.list_price = productRow.price;
+      else if (master === 'quantity') attrs.initial_stock_count = productRow.quantity;
+      else if (master === 'tax_rate') attrs.vat_rate = productRow.tax_rate ?? 0;
+      else if (master === 'supplier_code' && !isEmpty(productRow.supplier_code)) attrs.supplier_code = productRow.supplier_code!.trim();
+      else if (master === 'gtip_code' && !isEmpty(productRow.gtip_code)) attrs.gtip = productRow.gtip_code!.trim();
+      else if (master === 'unit_id' && !isEmpty(productRow.unit_code)) attrs.unit = productRow.unit_code!.trim();
+      else if (master === 'currency_id') attrs.currency = (productRow.currency_code || 'TRY').toUpperCase();
+      else if (master === 'image') {
+        const path = parseImageToFirstPath(productRow.image);
+        if (path) attrs[parasut] = getImageFullUrl(path);
+      }
+    }
+
+    const base = 'https://api.parasut.com';
+    const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        data: {
+          id: parasutId,
+          type: 'products',
+          attributes: attrs,
+        },
+      }),
+    });
+    const updateJson = await updateRes.json().catch(() => ({}));
+    if (!updateRes.ok) {
+      const errMsg = (updateJson as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${updateRes.status}`;
+      return c.json({ error: `Paraşüt: ${errMsg}` }, 400);
+    }
+    return c.json({ ok: true, message: 'Paraşüt\'e gönderildi' });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Gönderme hatası' }, 500);
   }
 });
 

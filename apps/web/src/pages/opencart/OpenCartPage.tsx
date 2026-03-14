@@ -777,11 +777,11 @@ export function OpenCartPage() {
             Fiyat güncelle
           </Button>
           <div className="flex items-center gap-1">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
                 placeholder="Ad veya model ara..."
-                value={search}
+              value={search}
                 onChange={(e) => setListState({ search: e.target.value })}
                 className="pl-8 w-56 h-9"
               />
@@ -810,12 +810,12 @@ export function OpenCartPage() {
             <DropdownMenuContent align="start">
               {TABLES_MENU.map((item) => {
                 const Icon = item.icon
-                return (
+                        return (
                   <DropdownMenuItem key={item.id} onClick={() => setTableModal(item.id)}>
                     <Icon className="h-4 w-4 mr-2" />
                     {item.label}
-                  </DropdownMenuItem>
-                )
+                          </DropdownMenuItem>
+                        )
               })}
             </DropdownMenuContent>
           </DropdownMenu>
@@ -1057,34 +1057,34 @@ function PriceUpdateModal({
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-md">
-        <DialogHeader>
+          <DialogHeader>
           <DialogTitle>Fiyat güncelle</DialogTitle>
-          <DialogDescription>
+            <DialogDescription>
             Ana ürünlerden e-ticaret fiyatlarını alıp yüzde uygulayarak OpenCart fiyatlarını günceller. Sadece model (ana ürün SKU ile eşleşen) ürünler güncellenir.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
+            </DialogDescription>
+          </DialogHeader>
+            <div className="space-y-4">
+                  <div className="space-y-2">
             <Label htmlFor="price-update-pct">Güncelleme yüzdesi</Label>
             <div className="flex items-center gap-2">
-              <Input
+                    <Input
                 id="price-update-pct"
-                type="number"
+                        type="number"
                 step="0.5"
                 min={-100}
                 max={500}
                 value={percentage}
                 onChange={(e) => setPercentage(e.target.value)}
-                placeholder="0"
+                        placeholder="0"
                 className="text-right tabular-nums w-24"
                 disabled={running}
-              />
+                      />
               <span className="text-muted-foreground">%</span>
               <span className="text-sm text-muted-foreground">
                 ({Number(percentage) >= 0 ? '+' : ''}{percentage}% uygulanacak)
               </span>
-            </div>
-          </div>
+                    </div>
+                    </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           {result && (
             <div className="rounded-lg border bg-muted/50 p-3 text-sm space-y-1">
@@ -1092,20 +1092,20 @@ function PriceUpdateModal({
               <p>Güncellenen: {result.updated}</p>
               <p>Eşleşmeyen (atlandı): {result.failed}</p>
               <p>Toplam: {result.total}</p>
-            </div>
+                  </div>
           )}
-        </div>
+                  </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={running}>
             İptal
-          </Button>
+                  </Button>
           <Button onClick={handleStart} disabled={running} className="gap-2">
             {running && <Loader2 className="h-4 w-4 animate-spin" />}
             Başlat
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+                  </Button>
+              </DialogFooter>
+        </DialogContent>
+      </Dialog>
   )
 }
 
@@ -1192,12 +1192,12 @@ function MatchProductModal({
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-lg">
-        <DialogHeader>
+            <DialogHeader>
           <DialogTitle>Ana ürünle eşleştir</DialogTitle>
-          <DialogDescription>
+              <DialogDescription>
             {ocProduct?.name} — {ocProduct?.model ?? 'Model yok'}. Ürün adını kelime kelime yazarak arayın.
-          </DialogDescription>
-        </DialogHeader>
+              </DialogDescription>
+            </DialogHeader>
         <div className="space-y-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -1208,7 +1208,7 @@ function MatchProductModal({
               onChange={(e) => setSearch(e.target.value)}
               className="pl-9"
             />
-          </div>
+              </div>
           {error && (
             <p className="text-sm text-destructive">{error}</p>
           )}
@@ -1343,20 +1343,20 @@ function TableModal({
           <p className="text-destructive py-4">{error}</p>
         ) : type === 'categories' ? (
           <div className="overflow-auto flex-1">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-muted/50">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b bg-muted/50">
                   <th className="text-left p-2 font-medium w-16">ID</th>
-                  <th className="text-left p-2 font-medium">Ad</th>
+                        <th className="text-left p-2 font-medium">Ad</th>
                   <th className="text-left p-2 font-medium w-16">Üst</th>
                   <th className="text-left p-2 font-medium w-16">Durum</th>
-                </tr>
-              </thead>
-              <tbody>
+                      </tr>
+                    </thead>
+                    <tbody>
                 {buildCategoryTree(data as { category_id: number; parent_id?: number; name?: string; status?: number }[])}
               </tbody>
             </table>
-          </div>
+                            </div>
         ) : (
           <div className="overflow-auto flex-1">
             <table className="w-full text-sm">
@@ -1373,13 +1373,13 @@ function TableModal({
                     {columns.map((col) => (
                       <td key={col} className="p-2">{String(row[col] ?? '—')}</td>
                     ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+              </div>
         )}
-      </DialogContent>
-    </Dialog>
+          </DialogContent>
+        </Dialog>
   )
 }

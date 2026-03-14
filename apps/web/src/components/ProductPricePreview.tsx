@@ -4,7 +4,7 @@ import { API_URL } from '@/lib/api'
 import { formatPrice } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess } from '@/lib/toast'
-import { applyCalculation, type CalculationRule } from '@/lib/calculations'
+import { applyCalculation, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
 
 interface PriceRow {
   label: string
@@ -62,6 +62,7 @@ export function ProductPricePreview({
       const product = json as {
         price?: number
         currency_id?: number | null
+        brand_id?: number | null
         prices?: { price_type_id: number; price?: number; currency_id?: number | null }[]
       }
       const curById = Object.fromEntries(currencies.map((c) => [c.id, c]))
@@ -99,7 +100,11 @@ export function ProductPricePreview({
             currencyCode: cur?.code ?? '',
           })
         } else {
-          const rule = calculationRules.find((r) => r.source === 'price' && String(r.target) === String(pt.id))
+          const rule = findRuleForBrand(
+            calculationRules.filter((r) => r.source === 'price'),
+            String(pt.id),
+            product.brand_id ?? null
+          )
           if (rule?.operations?.length) {
             const computed = applyCalculation(basePrice, rule.operations)
             const ruleCurId = rule.result_currency_id != null && rule.result_currency_id > 0 ? rule.result_currency_id : baseCurId

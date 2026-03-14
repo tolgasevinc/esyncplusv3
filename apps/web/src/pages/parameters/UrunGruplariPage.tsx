@@ -17,28 +17,31 @@ import {
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ColorPresetPicker } from '@/components/ColorPresetPicker'
 import { toastSuccess, toastError } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 
 import { API_URL } from '@/lib/api'
 
-interface ProductPriceType {
+interface ProductItemGroup {
   id: number
   name: string
   code: string
+  description?: string
+  color?: string | null
   sort_order: number
   status?: number
   created_at?: string
 }
 
-const emptyForm = { name: '', code: '', sort_order: 0, status: 1 }
+const emptyForm = { name: '', code: '', description: '', color: '', sort_order: 0, status: 1 }
 
-const fiyatTipleriListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
+const urunGruplariListDefaults = { search: '', page: 1, pageSize: 'fit' as PageSizeValue, fitLimit: 10 }
 
-export function FiyatTipleriPage() {
-  const [listState, setListState] = usePersistedListState('fiyat-tipleri', fiyatTipleriListDefaults)
+export function UrunGruplariPage() {
+  const [listState, setListState] = usePersistedListState('urun-gruplari', urunGruplariListDefaults)
   const { search, page, pageSize, fitLimit } = listState
-  const [data, setData] = useState<ProductPriceType[]>([])
+  const [data, setData] = useState<ProductItemGroup[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
@@ -57,7 +60,7 @@ export function FiyatTipleriPage() {
     try {
       const params = new URLSearchParams({ page: String(page), limit: String(limit) })
       if (search) params.set('search', search)
-      const res = await fetch(`${API_URL}/api/product-price-types?${params}`)
+      const res = await fetch(`${API_URL}/api/product-item-groups?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
       setData(json.data || [])
@@ -81,17 +84,19 @@ export function FiyatTipleriPage() {
     setForm(emptyForm)
     setModalOpen(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-price-types/next-sort-order`)
+      const res = await fetch(`${API_URL}/api/product-item-groups/next-sort-order`)
       const json = await res.json()
       if (res.ok && json.next != null) setForm((f) => ({ ...f, sort_order: json.next }))
     } catch { /* ignore */ }
   }
 
-  const openEdit = (item: ProductPriceType) => {
+  const openEdit = (item: ProductItemGroup) => {
     setEditingId(item.id)
     setForm({
       name: item.name,
       code: item.code,
+      description: item.description || '',
+      color: item.color || '',
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
     })
@@ -115,13 +120,14 @@ export function FiyatTipleriPage() {
     setSaving(true)
     setError(null)
     try {
-      const url = editingId ? `${API_URL}/api/product-price-types/${editingId}` : `${API_URL}/api/product-price-types`
+      const url = editingId ? `${API_URL}/api/product-item-groups/${editingId}` : `${API_URL}/api/product-item-groups`
+      const method = editingId ? 'PUT' : 'POST'
       const res = await fetch(url, {
-        method: editingId ? 'PUT' : 'POST',
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...form,
-          code: form.code || form.name.slice(0, 2).toUpperCase(),
+          code: form.code || form.name.slice(0, 6).toUpperCase().replace(/\s/g, ''),
           status: form.status,
         }),
       })
@@ -129,7 +135,7 @@ export function FiyatTipleriPage() {
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       closeModal()
       fetchData()
-      toastSuccess(editingId ? 'Fiyat tipi güncellendi' : 'Fiyat tipi eklendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess(editingId ? 'Ürün grubu güncellendi' : 'Ürün grubu eklendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -148,11 +154,11 @@ export function FiyatTipleriPage() {
     if (!id) return
     setDeleting(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-price-types/${id}`, { method: 'DELETE' })
+      const res = await fetch(`${API_URL}/api/product-item-groups/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
-      toastSuccess('Fiyat tipi silindi', 'Fiyat tipi başarıyla silindi.')
+      toastSuccess('Ürün grubu silindi', 'Ürün grubu başarıyla silindi.')
       setDeleteConfirm({ open: false, id: null })
       onSuccess?.()
     } catch (err) {
@@ -164,8 +170,8 @@ export function FiyatTipleriPage() {
 
   return (
     <PageLayout
-      title="Fiyat Tipleri"
-      description="Fiyat tiplerini yönetin (Genel, E-Ticaret vb.)"
+      title="Ürün Grupları"
+      description="Ürün, yedek parça ve aksesuar gruplarını yönetin"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -190,7 +196,7 @@ export function FiyatTipleriPage() {
                 <Plus className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Yeni fiyat tipi</TooltipContent>
+            <TooltipContent>Yeni ürün grubu</TooltipContent>
           </Tooltip>
           {hasFilter && (
             <Tooltip>
@@ -224,16 +230,17 @@ export function FiyatTipleriPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium">Fiyat Tipi Adı</th>
+                  <th className="text-left p-3 font-medium w-12">Renk</th>
+                  <th className="text-left p-3 font-medium">Grup Adı</th>
                   <th className="text-left p-3 font-medium">Kod</th>
-                  <th className="text-left p-3 font-medium">Sıra</th>
+                  <th className="text-left p-3 font-medium">Açıklama</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">Yükleniyor...</td></tr>
                 ) : data.length === 0 ? (
-                  <tr><td colSpan={3} className="p-8 text-center text-muted-foreground">{error || 'Henüz fiyat tipi kaydı yok.'}</td></tr>
+                  <tr><td colSpan={4} className="p-8 text-center text-muted-foreground">{error || 'Henüz ürün grubu kaydı yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
                     <tr
@@ -241,9 +248,16 @@ export function FiyatTipleriPage() {
                       className="border-b hover:bg-muted/30 cursor-pointer"
                       onClick={() => openEdit(item)}
                     >
+                      <td className="p-3">
+                        {item.color ? (
+                          <span className="inline-block w-6 h-6 rounded border" style={{ backgroundColor: item.color }} />
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{item.code}</td>
-                      <td className="p-3">{item.sort_order}</td>
+                      <td className="p-3">{item.description || '—'}</td>
                     </tr>
                   ))
                 )}
@@ -256,21 +270,30 @@ export function FiyatTipleriPage() {
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingId ? 'Fiyat Tipi Düzenle' : 'Yeni Fiyat Tipi'}</DialogTitle>
-            <DialogDescription>Fiyat tipi bilgilerini girin.</DialogDescription>
+            <DialogTitle>{editingId ? 'Ürün Grubu Düzenle' : 'Yeni Ürün Grubu'}</DialogTitle>
+            <DialogDescription>Ürün grubu bilgilerini girin (Ürün, Yedek Parça, Aksesuar vb.).</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="grid grid-cols-12 gap-4">
               <div className="col-span-9 space-y-2">
-                <Label htmlFor="name">Fiyat Tipi Adı *</Label>
-                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: E-Ticaret Fiyatı" required />
+                <Label htmlFor="name">Grup Adı *</Label>
+                <Input id="name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Örn: Ürün, Yedek Parça, Aksesuar" required />
               </div>
               <div className="col-span-3 space-y-2">
                 <Label htmlFor="code">Kod</Label>
-                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: EC" />
+                <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: URUN" />
               </div>
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="description">Açıklama</Label>
+              <Input id="description" value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="Kısa açıklama" />
+            </div>
+            <ColorPresetPicker
+              value={form.color}
+              onChange={(color) => setForm((f) => ({ ...f, color }))}
+              label="Renk"
+            />
             <DialogFooter className="flex-row justify-between gap-4 sm:justify-between">
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">
@@ -293,7 +316,7 @@ export function FiyatTipleriPage() {
                 </div>
               </div>
               <div className="flex items-center gap-1">
-                {editingId && editingId !== 1 && (
+                {editingId && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-block">
@@ -332,7 +355,7 @@ export function FiyatTipleriPage() {
       <ConfirmDeleteDialog
         open={deleteConfirm.open}
         onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
-        description="Bu fiyat tipini silmek istediğinize emin misiniz?"
+        description="Bu ürün grubunu silmek istediğinize emin misiniz?"
         onConfirm={executeDelete}
         loading={deleting}
       />

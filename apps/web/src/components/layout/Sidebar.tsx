@@ -35,7 +35,7 @@ export function Sidebar() {
   const { toggle, isDark } = useTheme()
 
   useEffect(() => {
-    const collapsePaths = ['/products', '/customers', '/teklifler']
+    const collapsePaths = ['/products', '/customers', '/teklifler', '/parasut/products']
     if (collapsePaths.includes(location.pathname)) {
       setCollapsed(true)
     }
@@ -67,7 +67,7 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex flex-col h-screen theme-sidebar-bg theme-sidebar-text border-r border-border transition-all duration-300',
+        'relative z-10 flex shrink-0 flex-col h-screen theme-sidebar-bg theme-sidebar-text border-r border-border transition-all duration-300',
         collapsed ? 'w-[60px]' : 'w-64'
       )}
     >

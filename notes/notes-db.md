@@ -72,6 +72,27 @@ updated_at
 - description
 - sort_order
 
+**product_price_types**
+- name
+  
+**product_prices**
+- producs_id
+- price_type_id
+- price
+- currency
+
+**e_documents**
+- date
+- uuid
+- invoice_no
+- seller_title
+- buyer_title
+- directory
+- file_name
+- total_price
+- tax_value
+- tax_rate
+
 **app_settings**
 
 - category
@@ -102,3 +123,92 @@ updated_at
 - record_count
 - column_mappings
 - column_types
+
+**CUSTOMER TABLOLARI**
+
+**customer_groups**
+- name (unique)
+- code
+- description
+- 
+**customer_types**
+- name
+- code
+- type (şahıs, firma)
+- description
+- 
+**customer_legal_types**
+- name (TEMELFATURA, TICARIFATURA, IHRACAT, EARSIV)
+- description
+
+**customers**
+- title
+- code
+- group_id
+- type_id
+- legal_type_id
+- tags (json)
+- sales_user_id
+- identity_id
+- tax_no
+- tax_office
+- e-mail
+- phone
+- phone2
+- phone_mobil
+- external_refs (json) - (parasut_id, dia_code, opencart_code, vs)
+
+**customer_addresses**
+- customer_id
+- type (enum=Fatura, Sevkiyat, Project, Other)
+- title
+- contact_name
+- phone
+- e-mail
+- phone_mobile
+- country_code (default=TR)
+- city
+- district
+- post_code
+- address_line_1
+- address_line_2
+- latitude, longitude
+- googlemaplink
+- is_default
+
+**customer_contacts**
+- customer_id
+- full_name
+- role (satıanlam, muhasebe, şantiye şefi, firma sahibi, yönetici)
+- phone
+- phone_mobile
+- e-mail
+- is_primary
+- notes
+
+**offers**
+- date
+- order_no
+- uuid
+- customer_id
+- contact_id
+- description
+- notes
+- discount_1
+- discount_2
+- discount_3
+- discount_4
+- discount_15
+
+**offer_items**
+- offer_id
+- product_id
+- amount
+- unit_price
+- line_discount
+- tax_rate
+
+**offer_notes**
+- title
+- description
+- sort_order

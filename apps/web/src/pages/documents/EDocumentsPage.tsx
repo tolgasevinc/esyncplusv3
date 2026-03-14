@@ -51,12 +51,21 @@ type SortOrder = 'asc' | 'desc'
 const docFilterDefaults = {
   search: '',
   filter: 'tumu' as DocFilter,
+  filterYear: '' as string,
+  filterMonth: '' as string,
   sortBy: 'date' as SortBy,
   sortOrder: 'desc' as SortOrder,
   page: 1,
   pageSize: 'fit' as PageSizeValue,
   fitLimit: 10,
 }
+
+const MONTHS = [
+  { value: '01', label: 'Ocak' }, { value: '02', label: 'Şubat' }, { value: '03', label: 'Mart' },
+  { value: '04', label: 'Nisan' }, { value: '05', label: 'Mayıs' }, { value: '06', label: 'Haziran' },
+  { value: '07', label: 'Temmuz' }, { value: '08', label: 'Ağustos' }, { value: '09', label: 'Eylül' },
+  { value: '10', label: 'Ekim' }, { value: '11', label: 'Kasım' }, { value: '12', label: 'Aralık' },
+]
 
 interface PreviewItem {
   header: InvoiceHeaderInfo
@@ -100,7 +109,7 @@ function wrapInvoiceHtmlWithFallbacks(html: string): string {
 
 export function EDocumentsPage() {
   const [listState, setListState] = usePersistedListState('e-documents', docFilterDefaults)
-  const { search, filter, sortBy, sortOrder, page, pageSize, fitLimit } = listState
+  const { search, filter, filterYear, filterMonth, sortBy, sortOrder, page, pageSize, fitLimit } = listState
   const [data, setData] = useState<EDocument[]>([])
   const [total, setTotal] = useState(0)
   const [totalAmountTry, setTotalAmountTry] = useState(0)
@@ -126,6 +135,7 @@ export function EDocumentsPage() {
   }[]>([])
   const [overwriteModalOpen, setOverwriteModalOpen] = useState(false)
   const [existingFiles, setExistingFiles] = useState<string[]>([])
+  const existingKeysRef = useRef<string[]>([])
   const [viewModalOpen, setViewModalOpen] = useState(false)
   const [selectedDoc, setSelectedDoc] = useState<EDocument | null>(null)
   const [viewHtml, setViewHtml] = useState<string | null>(null)
@@ -142,9 +152,25 @@ export function EDocumentsPage() {
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const uploadModalCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
-  const hasFilter = search.length > 0 || filter !== 'tumu'
+  const [availableYears, setAvailableYears] = useState<number[]>([])
+  const hasFilter = search.length > 0 || filter !== 'tumu' || filterYear !== '' || filterMonth !== ''
   const limit = pageSize === 'fit' ? fitLimit : pageSize
+
+  const fetchAvailableYears = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/e-documents/years`).catch(() => null)
+      if (res?.ok) {
+        const json = await res.json()
+        setAvailableYears(Array.isArray(json.years) ? json.years : [])
+      } else {
+        setAvailableYears([])
+      }
+    } catch {
+      setAvailableYears([])
+    }
+  }, [])
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -152,6 +178,8 @@ export function EDocumentsPage() {
       const params = new URLSearchParams({ page: String(page), limit: String(limit), sort_by: sortBy, sort_order: sortOrder })
       if (search) params.set('search', search)
       if (filter !== 'tumu') params.set('filter', filter)
+      if (filterYear) params.set('year', filterYear)
+      if (filterMonth) params.set('month', filterMonth)
       const res = await fetch(`${API_URL}/api/e-documents?${params}`).catch(() => null)
       if (res?.ok) {
         const json = await res.json()
@@ -170,18 +198,22 @@ export function EDocumentsPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, search, filter, limit, sortBy, sortOrder])
+  }, [page, search, filter, filterYear, filterMonth, limit, sortBy, sortOrder])
 
   useEffect(() => {
     fetchData()
   }, [fetchData])
+
+  useEffect(() => {
+    fetchAvailableYears()
+  }, [fetchAvailableYears])
 
   useEffect(() => () => {
     highlightTimeoutRef.current && clearTimeout(highlightTimeoutRef.current)
   }, [])
 
   const handleRefresh = () => {
-    setListState({ search: '', filter: 'tumu', page: 1 })
+    setListState({ search: '', filter: 'tumu', filterYear: '', filterMonth: '', page: 1 })
     setSelectedIds(new Set())
     fetchData()
   }
@@ -293,11 +325,12 @@ export function EDocumentsPage() {
     setIsDragOver(false)
   }
 
-  const performUpload = async () => {
-    if (previewItems.length === 0 || uploading) return
+  const performUpload = async (itemsToUpload?: PreviewItem[]) => {
+    const source = itemsToUpload ?? previewItems
+    if (source.length === 0 || uploading) return
     setOverwriteModalOpen(false)
     setUploading(true)
-    const uploadItems = previewItems.filter((i) => !i.header.rawError)
+    const uploadItems = source.filter((i) => !i.header.rawError)
     const total = uploadItems.length
     let success = 0
     let failed = 0
@@ -351,6 +384,7 @@ export function EDocumentsPage() {
         setPreviewModalOpen(false)
         setPreviewItems([])
         fetchData()
+        fetchAvailableYears()
       }
       if (failed > 0 && success === 0) {
         toastError('Yükleme hatası', 'Dosyalar yüklenemedi.')
@@ -392,6 +426,7 @@ export function EDocumentsPage() {
       const json = await res.json()
       const existing: string[] = json?.existing ?? []
       if (existing.length > 0) {
+        existingKeysRef.current = existing
         setExistingFiles(existing.map((k: string) => k.split('/').pop() ?? k))
         setOverwriteModalOpen(true)
         return
@@ -429,6 +464,10 @@ export function EDocumentsPage() {
       queue.push({ header, xmlFile: entry.xml, xsltFile: entry.xslt })
     }
 
+    if (uploadModalCloseTimeoutRef.current) {
+      clearTimeout(uploadModalCloseTimeoutRef.current)
+      uploadModalCloseTimeoutRef.current = null
+    }
     const initialResults = queue.map((q) => ({ name: q.xmlFile.name, status: 'pending' as const }))
     setUploadFileResults(initialResults)
     setUploadModalOpen(true)
@@ -451,10 +490,9 @@ export function EDocumentsPage() {
         const json = await res.json()
         const existing: string[] = json?.existing ?? []
         if (existing.length > 0) {
+          existingKeysRef.current = existing
           setExistingFiles(existing.map((k: string) => k.split('/').pop() ?? k))
           setOverwriteModalOpen(true)
-          // Onay bekleniyor; overwrite modal onaylandığında performDirectUpload çağrılacak
-          // queue'yu ref'e al
           pendingDirectUploadRef.current = queue
           return
         }
@@ -535,9 +573,15 @@ export function EDocumentsPage() {
     setUploading(false)
     setUploadProgress(null)
 
+    uploadModalCloseTimeoutRef.current = setTimeout(() => {
+      uploadModalCloseTimeoutRef.current = null
+      setUploadModalOpen(false)
+    }, 5000)
+
     if (success > 0) {
       toastSuccess('Yükleme tamamlandı', `${success} dosya kaydedildi.${failed > 0 ? ` ${failed} başarısız.` : ''}`)
       fetchData()
+      fetchAvailableYears()
     }
     if (failed > 0 && success === 0) {
       toastError('Yükleme hatası', 'Hiçbir dosya yüklenemedi.')
@@ -707,10 +751,6 @@ export function EDocumentsPage() {
             <Upload className="h-4 w-4 shrink-0" />
             <span className="text-sm font-medium">{isDragOver ? 'Bırakın...' : 'Sürükle bırak'}</span>
           </div>
-          <Button type="button" variant="default" size="sm" className="gap-2" onClick={handleUploadClick}>
-            <Upload className="h-4 w-4" />
-            Yükle
-          </Button>
           <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
             {filterButtons.map(({ value, label, icon }) => (
               <Button
@@ -729,6 +769,27 @@ export function EDocumentsPage() {
               </Button>
             ))}
           </div>
+          <select
+            className="h-9 rounded-md border border-input bg-background px-2 text-sm min-w-[90px]"
+            value={filterYear}
+            onChange={(e) => setListState({ filterYear: e.target.value, filterMonth: '', page: 1 })}
+          >
+            <option value="">Yıl</option>
+            {availableYears.map((y) => (
+              <option key={y} value={String(y)}>{y}</option>
+            ))}
+          </select>
+          <select
+            className={cn('h-9 rounded-md border border-input bg-background px-2 text-sm min-w-[100px]', !filterYear && 'opacity-60 cursor-not-allowed')}
+            value={filterMonth}
+            onChange={(e) => setListState({ filterMonth: e.target.value, page: 1 })}
+            disabled={!filterYear}
+          >
+            <option value="">Ay</option>
+            {MONTHS.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </select>
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -1380,7 +1441,7 @@ export function EDocumentsPage() {
           <DialogHeader>
             <DialogTitle>Mevcut Dosya Uyarısı</DialogTitle>
             <DialogDescription>
-              Aşağıdaki dosyalar storage'da zaten mevcut. Üzerine yazmak istediğinize emin misiniz?
+              Aşağıdaki dosyalar storage'da zaten mevcut. Üzerine yazmak veya atlamak istediğinizi seçin.
             </DialogDescription>
           </DialogHeader>
           <ul className="py-2 space-y-1 text-sm text-muted-foreground max-h-40 overflow-auto">
@@ -1393,6 +1454,44 @@ export function EDocumentsPage() {
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOverwriteModalOpen(false)}>
               İptal Et
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setOverwriteModalOpen(false)
+                const existingSet = new Set(existingKeysRef.current)
+                if (pendingDirectUploadRef.current.length > 0) {
+                  const queue = pendingDirectUploadRef.current
+                  const filtered = queue.filter((q) => {
+                    if (q.header.rawError) return false
+                    const folder = getEdocumentStoragePath(q.header.invoiceType, q.header.issueDate)
+                    const xmlKey = getTargetKey(folder, q.xmlFile.name)
+                    return !existingSet.has(xmlKey)
+                  })
+                  pendingDirectUploadRef.current = []
+                  if (filtered.length > 0) performDirectUpload(filtered)
+                  else {
+                    setUploadModalOpen(false)
+                    toastSuccess('Atlandı', 'Mevcut dosyalar atlandı, yüklenecek yeni dosya yok.')
+                  }
+                } else {
+                  const filtered = previewItems.filter((item) => {
+                    if (item.header.rawError) return false
+                    const folder = getEdocumentStoragePath(item.header.invoiceType, item.header.issueDate)
+                    const xmlKey = getTargetKey(folder, item.xmlFile.name)
+                    return !existingSet.has(xmlKey)
+                  })
+                  if (filtered.length > 0) performUpload(filtered)
+                  else {
+                    setPreviewModalOpen(false)
+                    setPreviewItems([])
+                    toastSuccess('Atlandı', 'Mevcut dosyalar atlandı, yüklenecek yeni dosya yok.')
+                  }
+                }
+              }}
+            >
+              Atla
             </Button>
             <Button
               type="button"

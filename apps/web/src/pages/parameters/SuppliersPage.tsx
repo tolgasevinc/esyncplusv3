@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
 import * as XLSX from 'xlsx'
-import { Search, Plus, X, Trash2, Pencil, FileSpreadsheet, RefreshCw, Play, List, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Search, Plus, X, Trash2, Pencil, FileSpreadsheet, RefreshCw, Play, List, ChevronLeft, ChevronRight, Upload } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,6 +21,9 @@ import { toastSuccess, toastError } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 
 import { API_URL } from '@/lib/api'
+import { normalizeForSearch } from '@/lib/utils'
+import { lookupFromSupplier } from '@/lib/supplierSource'
+import { applyCalculation, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
 
 /** products tablosu sütunları - column_mappings eşleştirmesi için */
 const PRODUCT_COLUMNS = [
@@ -146,11 +149,21 @@ async function fetchSourceHeaders(
 
   if (sourceType === 'excel' || sourceType === 'xlsx' || sourceType === 'xls') {
     const wb = XLSX.read(buf, { type: 'array' })
-    const sheet = wb.Sheets[wb.SheetNames[0]]
-    if (!sheet) return []
-    const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
-    const targetRow = data[rowIndex] || []
-    return targetRow.map((c) => String(c ?? '').trim()).filter(Boolean)
+    const seen = new Set<string>()
+    const headers: string[] = []
+    for (const sheetName of wb.SheetNames) {
+      const sheet = wb.Sheets[sheetName]
+      if (!sheet) continue
+      const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
+      const targetRow = (data[rowIndex] || []).map((c) => String(c ?? '').trim()).filter(Boolean)
+      for (const h of targetRow) {
+        if (h && !seen.has(h)) {
+          seen.add(h)
+          headers.push(h)
+        }
+      }
+    }
+    return headers
   }
 
   if (sourceType === 'xml') {
@@ -221,20 +234,24 @@ async function fetchSourceRecords(
 
   if (sourceType === 'excel' || sourceType === 'xlsx' || sourceType === 'xls') {
     const wb = XLSX.read(buf, { type: 'array' })
-    const sheet = wb.Sheets[wb.SheetNames[0]]
-    if (!sheet) return []
-    const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
-    const headers = (data[rowIndex] || []).map((c) => String(c ?? '').trim())
-    const colIndexes = sourceCols.map((col) => headers.indexOf(col))
     const out: Record<string, string>[] = []
-    for (let i = rowIndex + 1; i < Math.min(data.length, rowIndex + 1 + limit); i++) {
-      const row = data[i] || []
-      const rec: Record<string, string> = {}
-      sourceCols.forEach((srcCol, idx) => {
-        const productCol = columnMappings[srcCol]
-        if (productCol) rec[productCol] = String(row[colIndexes[idx]] ?? '').trim()
-      })
-      out.push(rec)
+    for (const sheetName of wb.SheetNames) {
+      if (out.length >= limit) break
+      const sheet = wb.Sheets[sheetName]
+      if (!sheet) continue
+      const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
+      const headers = (data[rowIndex] || []).map((c) => String(c ?? '').trim())
+      const colIndexes = sourceCols.map((col) => headers.indexOf(col))
+      const remaining = limit - out.length
+      for (let i = rowIndex + 1; i < Math.min(data.length, rowIndex + 1 + remaining); i++) {
+        const row = data[i] || []
+        const rec: Record<string, string> = {}
+        sourceCols.forEach((srcCol, idx) => {
+          const productCol = columnMappings[srcCol]
+          if (productCol) rec[productCol] = String(row[colIndexes[idx]] ?? '').trim()
+        })
+        out.push(rec)
+      }
     }
     return out
   }
@@ -299,14 +316,17 @@ export function SuppliersPage() {
   const [listSearch, setListSearch] = useState('')
   const [listPage, setListPage] = useState(1)
   const [listMatchFilter, setListMatchFilter] = useState<'all' | 'matched' | 'unmatched'>('all')
+  const [updatingSupplierId, setUpdatingSupplierId] = useState<number | null>(null)
+  const [updateProgressOpen, setUpdateProgressOpen] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState({ total: 0, processed: 0, updated: 0, current: '', supplierName: '' })
   const LIST_PAGE_SIZE = 50
 
   const listFilteredData = useMemo(() => {
     if (listRecords.length === 0) return { filtered: [], totalPages: 1, currentPage: 1, pageRecords: [] }
-    const searchLower = listSearch.trim().toLowerCase()
-    let filtered = searchLower
+    const searchNorm = normalizeForSearch(listSearch.trim())
+    let filtered = searchNorm
       ? listRecords.filter((rec) =>
-          Object.values(rec).some((v) => String(v || '').toLowerCase().includes(searchLower))
+          Object.values(rec).some((v) => normalizeForSearch(String(v || '')).includes(searchNorm))
         )
       : listRecords
     if (listMatchFilter === 'matched') {
@@ -401,6 +421,119 @@ export function SuppliersPage() {
       setListRecords([])
     } finally {
       setListLoading(false)
+    }
+  }, [])
+
+  const handleGuncelle = useCallback(async (item: Supplier) => {
+    const mappings = parseColumnMappings(item.column_mappings)
+    if (Object.keys(mappings).length === 0) {
+      toastError('Eşleştirme yok', 'Önce sütun eşleştirmesi yapın.')
+      return
+    }
+    if (!item.source_file?.trim()) {
+      toastError('Dosya yok', 'Kaynak dosya tanımlanmamış.')
+      return
+    }
+    const brandId = typeof item.brand_id === 'number' ? item.brand_id : null
+    if (!brandId) {
+      toastError('Marka gerekli', 'Tedarikçiye marka atayın.')
+      return
+    }
+    setUpdatingSupplierId(item.id)
+    try {
+      const [settingsRes, ptRes, productsRes] = await Promise.all([
+        fetch(`${API_URL}/api/app-settings?category=hesaplamalar`),
+        fetch(`${API_URL}/api/product-price-types?limit=9999`),
+        fetch(`${API_URL}/api/products?filter_brand_id=${brandId}&limit=9999`),
+      ])
+      const settings = await settingsRes.json()
+      const ptJson = await ptRes.json()
+      const productsJson = await productsRes.json()
+      let calculationRules: CalculationRule[] = []
+      try {
+        const parsed = settings?.calculations ? JSON.parse(settings.calculations) : []
+        calculationRules = Array.isArray(parsed) ? parsed : []
+        calculationRules = calculationRules.map((r: CalculationRule) => ({
+          ...r,
+          target: r.target === 'ecommerce_price' ? '1' : r.target,
+        }))
+      } catch {
+        /* ignore */
+      }
+      const priceTypes = (ptJson?.data ?? []).map((x: { id: number; name: string }) => ({ id: x.id, name: x.name }))
+      const products = productsJson?.data ?? []
+      const productsWithCode = products.filter((p: { supplier_code?: string }) => (p.supplier_code ?? '').trim())
+      if (productsWithCode.length === 0) {
+        toastError('Eşleşen ürün yok', 'Bu markada tedarikçi kodu olan ürün bulunamadı.')
+        return
+      }
+      setUpdateProgressOpen(true)
+      setUpdateProgress({ total: productsWithCode.length, processed: 0, updated: 0, current: '', supplierName: item.name })
+      let updated = 0
+      const computeEcom = (price: number) => {
+        const rule = findRuleForBrand(calculationRules, '1', brandId)
+        return rule?.operations?.length ? applyCalculation(price, rule.operations) : price
+      }
+      for (let i = 0; i < productsWithCode.length; i++) {
+        const product = productsWithCode[i]
+        const code = (product.supplier_code ?? '').trim()
+        setUpdateProgress((p) => ({ ...p, processed: i + 1, current: (product.name ?? product.sku ?? code) || `Ürün ${i + 1}` }))
+        if (!code) continue
+        const result = await lookupFromSupplier(item, code, API_URL)
+        if (!result || result.price <= 0) continue
+        const { price, currency_id } = result
+        const priceRule = findRuleForBrand(calculationRules, 'price', brandId)
+        const effectivePrice =
+          priceRule?.source === 'price' && priceRule?.operations?.length
+            ? applyCalculation(price, priceRule.operations)
+            : price
+        const curId = currency_id ?? product.currency_id
+        const prices: Record<number, { price: number; currency_id: number | null; status: number }> = {}
+        const sortedTypes = [...priceTypes].sort((a: { id: number }, b: { id: number }) => a.id - b.id)
+        for (const pt of sortedTypes) {
+          if (pt.id < 1) continue
+          const rule = findRuleForBrand(calculationRules, String(pt.id), brandId)
+          if (!rule || !rule.operations?.length) continue
+          const sourceVal = rule.source === 'price' ? effectivePrice : (prices[Number(rule.source)]?.price ?? effectivePrice)
+          const computed = applyCalculation(sourceVal, rule.operations)
+          const ruleCurId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : null
+          prices[pt.id] = {
+            price: computed,
+            currency_id: ruleCurId ?? (curId ? Number(curId) : null),
+            status: 1,
+          }
+        }
+        const ecomRule = findRuleForBrand(calculationRules, '1', brandId)
+        const ecomCurId = ecomRule?.result_currency_id != null && ecomRule.result_currency_id > 0
+          ? Number(ecomRule.result_currency_id)
+          : (curId ? Number(curId) : null)
+        const computed = prices[1]?.price ?? computeEcom(effectivePrice)
+        prices[1] = { price: computed, currency_id: ecomCurId, status: 1 }
+        const pricesPayload = Object.entries(prices).map(([id, p]) => ({
+          price_type_id: Number(id),
+          price: p.price,
+          currency_id: p.currency_id,
+          status: p.status,
+        }))
+        const res = await fetch(`${API_URL}/api/products/${product.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            price: effectivePrice,
+            currency_id: curId ?? undefined,
+            prices: pricesPayload,
+          }),
+        })
+        if (res.ok) updated++
+        setUpdateProgress((p) => ({ ...p, updated }))
+      }
+      setUpdateProgress((p) => ({ ...p, current: 'Tamamlandı' }))
+      toastSuccess('Fiyatlar güncellendi', `${updated} ürünün fiyatı hesaplamalara göre kaydedildi.`)
+    } catch (err) {
+      toastError('Güncelleme hatası', err instanceof Error ? err.message : 'Fiyatlar güncellenemedi')
+    } finally {
+      setUpdateProgressOpen(false)
+      setUpdatingSupplierId(null)
     }
   }, [])
 
@@ -668,6 +801,20 @@ export function SuppliersPage() {
                     <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                       {mappingCount > 0 && item.source_file && (
                         <>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                onClick={() => handleGuncelle(item)}
+                                disabled={!item.brand_id || updatingSupplierId === item.id}
+                              >
+                                <Upload className={`h-4 w-4 ${updatingSupplierId === item.id ? 'animate-pulse' : ''}`} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Güncelle – eşleşen ürünlerin fiyatlarını hesaplamalara göre kaydet</TooltipContent>
+                          </Tooltip>
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
@@ -1141,6 +1288,35 @@ export function SuppliersPage() {
               Kapat
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={updateProgressOpen} onOpenChange={(open) => !updatingSupplierId && setUpdateProgressOpen(open)}>
+        <DialogContent className="max-w-sm" onPointerDownOutside={(e) => updatingSupplierId && e.preventDefault()} onEscapeKeyDown={(e) => updatingSupplierId && e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>Fiyat Güncelleniyor</DialogTitle>
+            <DialogDescription>
+              {updateProgress.supplierName} – {updateProgress.processed} / {updateProgress.total} işlendi ({updateProgress.updated} güncellendi)
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="h-2 rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all duration-300"
+                style={{ width: updateProgress.total > 0 ? `${(updateProgress.processed / updateProgress.total) * 100}%` : '0%' }}
+              />
+            </div>
+            {updateProgress.current && (
+              <p className="text-sm text-muted-foreground truncate" title={updateProgress.current}>
+                {updateProgress.current}
+              </p>
+            )}
+          </div>
+          {!updatingSupplierId && (
+            <DialogFooter>
+              <Button onClick={() => setUpdateProgressOpen(false)}>Kapat</Button>
+            </DialogFooter>
+          )}
         </DialogContent>
       </Dialog>
     </PageLayout>

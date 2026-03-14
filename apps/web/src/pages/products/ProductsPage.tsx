@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image } from 'lucide-react'
+import { Plus, X, Trash2, Copy, Save, ChevronDown, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { DecimalInput } from '@/components/DecimalInput'
 import { Label } from '@/components/ui/label'
 import {
   Dialog,
@@ -26,12 +27,19 @@ import { ProductPricePreview } from '@/components/ProductPricePreview'
 import { buildProductCode } from '@/lib/productCode'
 import { Switch } from '@/components/ui/switch'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { toastSuccess, toastError } from '@/lib/toast'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { toastSuccess, toastError, toastWarning } from '@/lib/toast'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 
 import { API_URL } from '@/lib/api'
 import { lookupFromSupplierSource, fetchMatchedSupplierCodesFromBrand } from '@/lib/supplierSource'
-import { cn, formatPrice, formatPriceWithSymbol } from '@/lib/utils'
-import { applyCalculation, formatOperationsAsFormula, type CalculationRule } from '@/lib/calculations'
+import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/utils'
+import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
 
 interface Product {
   id: number
@@ -69,6 +77,9 @@ interface Product {
   type_color?: string
   unit_name?: string
   currency_symbol?: string
+  product_item_group_id?: number
+  product_item_group_name?: string
+  product_item_group_code?: string
 }
 
 interface SelectOption {
@@ -224,6 +235,7 @@ const emptyForm = {
   brand_id: '' as number | '',
   category_id: '' as number | '',
   type_id: '' as number | '',
+  product_item_group_id: '' as number | '',
   unit_id: '' as number | '',
   currency_id: '' as number | '',
   price: 0,
@@ -237,6 +249,11 @@ const emptyForm = {
   gtip_code: '',
   sort_order: 0,
   status: 1,
+  ecommerce_name: '',
+  main_description: '',
+  seo_slug: '',
+  seo_title: '',
+  seo_description: '',
 }
 
 interface PackageItem {
@@ -279,12 +296,15 @@ export function ProductsPage() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: number | null; onSuccess?: () => void }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
 
   const [brands, setBrands] = useState<BrandOption[]>([])
   const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
   const [categories, setCategories] = useState<CategoryItem[]>([])
   const [types, setTypes] = useState<{ id: number; name: string; code?: string; color?: string; sort_order: number }[]>([])
+  const [itemGroups, setItemGroups] = useState<{ id: number; name: string; code?: string; sort_order: number }[]>([])
   const [units, setUnits] = useState<SelectOption[]>([])
   const [currencies, setCurrencies] = useState<CurrencyOption[]>([])
   const [priceTypes, setPriceTypes] = useState<{ id: number; name: string; code?: string; sort_order: number }[]>([])
@@ -296,6 +316,10 @@ export function ProductsPage() {
   const [imageUploadProduct, setImageUploadProduct] = useState<Product | null>(null)
   const [imageUploadImages, setImageUploadImages] = useState<string[]>([])
   const [imageUploadSaving, setImageUploadSaving] = useState(false)
+  const [publishLoading, setPublishLoading] = useState<string | null>(null)
+  const [aiGenerateLoading, setAiGenerateLoading] = useState(false)
+  const [openCartPublishOpen, setOpenCartPublishOpen] = useState(false)
+  const [openCartUpdateOptions, setOpenCartUpdateOptions] = useState({ update_price: true, update_description: true, update_images: true })
   const [filterCategorySearch, setFilterCategorySearch] = useState('')
   const [filterBrandSearch, setFilterBrandSearch] = useState('')
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
@@ -381,8 +405,8 @@ export function ProductsPage() {
     return filterTypeId
   }, [filterTypeId, types])
 
-  const computeEcommercePrice = useCallback((price: number) => {
-    const rule = calculationRules.find((r) => String(r.target) === '1')
+  const computeEcommercePrice = useCallback((price: number, brandId?: number | null) => {
+    const rule = findRuleForBrand(calculationRules, '1', brandId)
     if (!rule || !rule.operations?.length) {
       return price
     }
@@ -430,39 +454,59 @@ export function ProductsPage() {
         const { price, currency_id } = result
         setSupplierCodeMatch(true)
         const newCurrencyId = currency_id ?? form.currency_id
-        const computed = computeEcommercePrice(price)
-        const ecomRule = calculationRules.find((r) => String(r.target) === '1')
+        const curId = newCurrencyId ?? form.currency_id
+        const brandId = typeof form.brand_id === 'number' ? form.brand_id : null
+        const priceRule = findRuleForBrand(calculationRules, 'price', brandId)
+        const effectivePrice =
+          priceRule?.source === 'price' && priceRule?.operations?.length
+            ? applyCalculation(price, priceRule.operations)
+            : price
+        const prices: Record<number, { price: number; currency_id: number | null; status: number }> = { ...form.prices }
+        if (calculationRules.length > 0) {
+          const sortedTypes = [...priceTypes].sort((a, b) => a.id - b.id)
+          for (const pt of sortedTypes) {
+            const targetId = pt.id
+            if (targetId < 1) continue
+            const rule = findRuleForBrand(calculationRules, String(targetId), brandId)
+            if (!rule || !rule.operations?.length) continue
+            const sourceVal = rule.source === 'price' ? effectivePrice : (prices[Number(rule.source)]?.price ?? effectivePrice)
+            const computed = applyCalculation(sourceVal, rule.operations)
+            const ruleCurrencyId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : null
+            const priceCurrencyId = ruleCurrencyId ?? (curId ? Number(curId) : null)
+            prices[targetId] = {
+              ...(prices[targetId] ?? { price: 0, currency_id: null, status: 1 }),
+              price: computed,
+              currency_id: priceCurrencyId,
+              status: form.prices[targetId]?.status ?? 1,
+            }
+          }
+        }
+        const ecomRule = findRuleForBrand(calculationRules, '1', brandId)
         const ecomCurrencyId = ecomRule?.result_currency_id != null && ecomRule.result_currency_id > 0
           ? Number(ecomRule.result_currency_id)
           : (newCurrencyId ? Number(newCurrencyId) : null)
-        setForm((f) => {
-          const prices = { ...f.prices }
-          prices[1] = {
-            price: computed,
-            currency_id: ecomCurrencyId,
-            status: f.prices[1]?.status ?? 1,
-          }
-          return {
-            ...f,
-            price,
-            currency_id: newCurrencyId ?? f.currency_id,
-            ecommerce_price: computed,
-            ecommerce_currency_id: newCurrencyId ?? f.ecommerce_currency_id,
-            prices,
-          }
-        })
+        const computed = prices[1]?.price ?? computeEcommercePrice(effectivePrice, brandId)
+        prices[1] = { ...(prices[1] ?? { price: 0, currency_id: null, status: 1 }), price: computed, currency_id: ecomCurrencyId, status: form.prices[1]?.status ?? 1 }
+        setForm((f) => ({
+          ...f,
+          price: effectivePrice,
+          currency_id: newCurrencyId ?? f.currency_id,
+          ecommerce_price: computed,
+          ecommerce_currency_id: newCurrencyId ?? f.ecommerce_currency_id,
+          prices,
+        }))
         const cur = currencies.find((c) => c.id === (newCurrencyId ?? currency_id))
-        const priceStr = formatPrice(price)
+        const priceStr = formatPrice(effectivePrice)
         const curLabel = cur?.name ?? ''
         toastSuccess('Fiyat çekildi (tedarikçi kaynağı)', `${priceStr} ${curLabel}`.trim() || 'Fiyat ve para birimi otomatik dolduruldu.')
         if (editingId) {
-          const pricesPayload = Object.entries({ ...form.prices, 1: { price: computed, currency_id: ecomCurrencyId, status: form.prices[1]?.status ?? 1 } }).map(
+          const pricesPayload = Object.entries(prices).map(
             ([id, p]) => ({ price_type_id: Number(id), price: p.price, currency_id: p.currency_id, status: p.status })
           )
           const res = await fetch(`${API_URL}/api/products/${editingId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ price, currency_id: newCurrencyId ?? undefined, prices: pricesPayload }),
+            body: JSON.stringify({ price: effectivePrice, currency_id: newCurrencyId ?? undefined, prices: pricesPayload }),
           })
           const updated = await res.json()
           if (res.ok) {
@@ -482,7 +526,7 @@ export function ProductsPage() {
     } finally {
       setSupplierCodeLookupLoading(false)
     }
-  }, [form.supplier_code, form.brand_id, form.currency_id, form.prices, skipSupplierCode, currencies, computeEcommercePrice, calculationRules, editingId, fetchData])
+  }, [form.supplier_code, form.brand_id, form.currency_id, form.prices, skipSupplierCode, currencies, computeEcommercePrice, calculationRules, priceTypes, editingId, fetchData])
   lookupSupplierCodeRef.current = lookupSupplierCode
 
   const isPackageType = useMemo(() => {
@@ -514,10 +558,11 @@ export function ProductsPage() {
 
   const fetchOptions = useCallback(async () => {
     try {
-      const [bRes, cRes, tRes, uRes, curRes, taxRes, ptRes, settingsRes] = await Promise.all([
+      const [bRes, cRes, tRes, igRes, uRes, curRes, taxRes, ptRes, settingsRes] = await Promise.all([
         fetch(`${API_URL}/api/product-brands?limit=9999`),
         fetch(`${API_URL}/api/product-categories?limit=9999`),
         fetch(`${API_URL}/api/product-types?limit=9999`),
+        fetch(`${API_URL}/api/product-item-groups?limit=9999`),
         fetch(`${API_URL}/api/product-units?limit=9999`),
         fetch(`${API_URL}/api/product-currencies?limit=9999`),
         fetch(`${API_URL}/api/product-tax-rates?limit=9999`),
@@ -527,6 +572,7 @@ export function ProductsPage() {
       const b = await bRes.json()
       const c = await cRes.json()
       const t = await tRes.json()
+      const ig = await igRes.json()
       const u = await uRes.json()
       const cur = await curRes.json()
       const tax = await taxRes.json()
@@ -560,6 +606,14 @@ export function ProductsPage() {
           name: x.name,
           code: x.code,
           color: x.color,
+          sort_order: x.sort_order ?? 0,
+        }))
+      )
+      setItemGroups(
+        (ig.data || []).map((x: { id: number; name: string; code?: string; sort_order?: number }) => ({
+          id: x.id,
+          name: x.name,
+          code: x.code,
           sort_order: x.sort_order ?? 0,
         }))
       )
@@ -641,16 +695,26 @@ export function ProductsPage() {
     fetchData()
   }
 
-  const handlePriceChange = useCallback((value: number) => {
+  const handlePriceChange = useCallback((value: number, options?: { skipSameTargetRule?: boolean }) => {
+    const skipSameTargetRule = options?.skipSameTargetRule ?? false
     setForm((f) => {
       const curId = f.currency_id || f.ecommerce_currency_id
+      const brandId = typeof f.brand_id === 'number' ? f.brand_id : null
+      const priceRule = findRuleForBrand(calculationRules, 'price', brandId)
+      const effectivePrice =
+        !skipSameTargetRule && priceRule?.source === 'price' && priceRule?.operations?.length
+          ? applyCalculation(value, priceRule.operations)
+          : value
       const prices = { ...f.prices }
       if (calculationRules.length > 0) {
-        for (const rule of calculationRules) {
-          if (!rule.target || !rule.operations?.length) continue
-          const targetId = Number(rule.target)
-          if (isNaN(targetId) || targetId < 1) continue
-          const computed = applyCalculation(value, rule.operations)
+        const sortedTypes = [...priceTypes].sort((a, b) => a.id - b.id)
+        for (const pt of sortedTypes) {
+          const targetId = pt.id
+          if (targetId < 1) continue
+          const rule = findRuleForBrand(calculationRules, String(targetId), brandId)
+          if (!rule || !rule.operations?.length) continue
+          const sourceVal = rule.source === 'price' ? effectivePrice : (prices[Number(rule.source)]?.price ?? effectivePrice)
+          const computed = applyCalculation(sourceVal, rule.operations)
           const ruleCurrencyId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : null
           const priceCurrencyId = ruleCurrencyId ?? (curId ? Number(curId) : null)
           const existing = prices[targetId]
@@ -661,16 +725,23 @@ export function ProductsPage() {
           }
         }
       }
-      const ecomPrice = prices[1]?.price ?? computeEcommercePrice(value)
+      const ecomPrice = prices[1]?.price ?? computeEcommercePrice(effectivePrice, brandId)
       return {
         ...f,
-        price: value,
+        price: effectivePrice,
         ecommerce_price: ecomPrice,
         ecommerce_currency_id: curId,
         prices,
       }
     })
-  }, [calculationRules, computeEcommercePrice])
+  }, [calculationRules, computeEcommercePrice, priceTypes])
+
+  const handlePriceBlur = useCallback(() => {
+    const el = document.getElementById('price') as HTMLInputElement | null
+    const raw = el?.value != null && el.value !== '' ? el.value : ''
+    const parsed = parseDecimal(raw)
+    handlePriceChange(parsed, { skipSameTargetRule: false })
+  }, [handlePriceChange])
 
   const handleCurrencyChange = useCallback((currencyId: number | '') => {
     setForm((f) => {
@@ -748,11 +819,12 @@ export function ProductsPage() {
         brand_id: product?.brand_id ?? item.brand_id ?? '',
         category_id: product?.category_id ?? item.category_id ?? '',
         type_id: product?.type_id ?? item.type_id ?? '',
+        product_item_group_id: product?.product_item_group_id ?? item.product_item_group_id ?? '',
         unit_id: product?.unit_id ?? item.unit_id ?? '',
         currency_id: product?.currency_id ?? item.currency_id ?? defCur,
         price: product?.price ?? basePrice,
         quantity: product?.quantity ?? item.quantity ?? 0,
-        ecommerce_price: itemEcomPrice ?? computeEcommercePrice(basePrice),
+        ecommerce_price: itemEcomPrice ?? computeEcommercePrice(basePrice, product?.brand_id ?? item.brand_id ?? null),
         ecommerce_currency_id: (itemEcomCur ?? item.currency_id ?? defCur) || null,
         prices: pricesMap,
         images: parseImageToArray(product?.image ?? item.image),
@@ -761,6 +833,11 @@ export function ProductsPage() {
         gtip_code: product?.gtip_code ?? item.gtip_code ?? '',
         sort_order: product?.sort_order ?? item.sort_order ?? 0,
         status: product?.status ?? item.status ?? 1,
+        ecommerce_name: product?.ecommerce_name ?? '',
+        main_description: product?.main_description ?? '',
+        seo_slug: product?.seo_slug ?? '',
+        seo_title: product?.seo_title ?? '',
+        seo_description: product?.seo_description ?? '',
       })
       const json = await itemsRes.json()
       if (itemsRes.ok && json.data) {
@@ -852,6 +929,126 @@ export function ProductsPage() {
     }
   }, [])
 
+  async function handleGenerateEcommerce() {
+    const name = form.name?.trim()
+    if (!name) {
+      toastError('Ürün adı gerekli', 'Önce ürün adını girin.')
+      return
+    }
+    setAiGenerateLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ai/generate-ecommerce`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
+          category_path: categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '',
+          sku: form.sku ?? '',
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'İstek başarısız')
+      setForm((f) => ({
+        ...f,
+        ecommerce_name: json.ecommerce_name ?? '',
+        main_description: json.main_description ?? '',
+        seo_slug: json.seo_slug ?? '',
+        seo_title: json.seo_title ?? '',
+        seo_description: json.seo_description ?? '',
+      }))
+      toastSuccess('Oluşturuldu', 'E-ticaret metinleri ChatGPT ile üretildi.')
+    } catch (err) {
+      toastError('Oluşturulamadı', err instanceof Error ? err.message : 'Metinler üretilemedi')
+    } finally {
+      setAiGenerateLoading(false)
+    }
+  }
+
+  async function handlePublish(platform: 'opencart' | 'okm' | 'trendyol', opencartOptions?: { update_price: boolean; update_description: boolean; update_images: boolean }) {
+    const productId = editingId
+    if (!productId) {
+      toastError('Önce kaydedin', 'Ürünü yayınlamak için önce kaydedin.')
+      return
+    }
+    setPublishLoading(platform)
+    try {
+      if (platform === 'opencart') {
+        const images = (form.images ?? []).filter((x): x is string => typeof x === 'string' && !!x.trim() && !x.startsWith('http'))
+        let uploadedPaths: string[] = []
+        if (images.length > 0) {
+          const settingsRes = await fetch(`${API_URL}/api/app-settings?category=opencart_mysql`)
+          const settings = settingsRes.ok ? await settingsRes.json() : {}
+          const imageUploadUrl = settings.image_upload_url?.trim()
+          if (!imageUploadUrl) {
+            toastWarning('Görsel yükleme ayarlanmadı', 'Ayarlar > Veri Aktarımı > OpenCart Ayarları bölümünde "Görsel Yükleme URL\'si" alanını doldurun. scripts/opencart-image-upload.php dosyasını OpenCart image/catalog/ klasörüne yükleyin.')
+          } else {
+            for (const r2Key of images) {
+              try {
+                const imgRes = await fetch(`${API_URL}/storage/serve?key=${encodeURIComponent(r2Key)}`)
+                if (!imgRes.ok) continue
+                const blob = await imgRes.blob()
+                const ext = r2Key.split('.').pop()?.toLowerCase() || 'webp'
+                const formData = new FormData()
+                formData.append('file', blob, `product.${ext}`)
+                formData.append('product_id', String(productId))
+                const uploadRes = await fetch(imageUploadUrl, { method: 'POST', body: formData })
+                const uploadJson = await uploadRes.json().catch(() => ({}))
+                if (uploadJson?.path) uploadedPaths.push(uploadJson.path)
+              } catch {
+                /* skip */
+              }
+            }
+            if (uploadedPaths.length < images.length && images.length > 0) {
+              toastWarning('Bazı görseller yüklenemedi', `${uploadedPaths.length}/${images.length} görsel OpenCart sunucusuna iletildi. PHP script'in doğru konumda olduğunu ve CORS ayarlarının geçerli olduğunu kontrol edin.`)
+            }
+          }
+        }
+        const opts = opencartOptions ?? { update_price: true, update_description: true, update_images: true }
+        const res = await fetch(`${API_URL}/api/products/${productId}/publish/opencart`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ecommerce_name: form.ecommerce_name ?? '',
+            main_description: form.main_description ?? '',
+            seo_slug: form.seo_slug ?? '',
+            seo_title: form.seo_title ?? '',
+            seo_description: form.seo_description ?? '',
+            images: form.images ?? [],
+            ...(uploadedPaths.length > 0 && { uploaded_image_paths: uploadedPaths }),
+            update_price: opts.update_price,
+            update_description: opts.update_description,
+            update_images: opts.update_images,
+          }),
+        })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error ?? 'Yayınlama başarısız')
+        const msg = json.message ?? (json.created ? 'OpenCart\'ta yeni ürün oluşturuldu' : 'OpenCart\'a yayınlandı')
+        const u = json.updated
+        const imgStatus = u?.images
+          ? u.images_uploaded
+            ? `Görsel: ${u.images} adet yüklendi ✓`
+            : `Görsel: ${u.images} adet (sunucuya yüklenmedi - image_upload_url ayarlayın)`
+          : ''
+        const detail = u
+          ? `Ad: ${u.name ? '✓' : '—'}, Açıklama: ${u.description ? '✓' : '—'}, Fiyat: ${u.price != null ? '✓' : '—'}, Meta: ${u.meta_title || u.meta_description ? '✓' : '—'}${imgStatus ? `, ${imgStatus}` : ''}`
+          : ''
+        toastSuccess(msg, detail || `Ürün #${json.opencart_product_id} ${json.created ? 'oluşturuldu' : 'güncellendi'}`)
+        if (json.image_upload_hint) {
+          toastWarning('Görsel OpenCart\'a yüklenmedi', json.image_upload_hint)
+        }
+      } else {
+        const labels = { okm: 'OKM', trendyol: 'Trendyol' }
+        await new Promise((r) => setTimeout(r, 800))
+        toastSuccess('Yayınlandı', `${labels[platform]}'a ürün yayınlandı.`)
+      }
+    } catch (err) {
+      toastError('Yayınlama hatası', err instanceof Error ? err.message : 'Yayınlanamadı')
+    } finally {
+      setPublishLoading(null)
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.name.trim()) return
@@ -883,6 +1080,7 @@ export function ProductsPage() {
         brand_id: form.brand_id || undefined,
         category_id: form.category_id || undefined,
         type_id: form.type_id || undefined,
+        product_item_group_id: form.product_item_group_id || undefined,
         unit_id: form.unit_id || undefined,
         currency_id: (form.currency_id !== '' && form.currency_id != null) ? form.currency_id : undefined,
         price: isPackageType ? (calculatedPackagePrice ?? 0) : (form.price ?? 0),
@@ -939,8 +1137,14 @@ export function ProductsPage() {
     }
   }
 
-  async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu ürünü silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: number, onSuccess?: () => void) {
+    setDeleteConfirm({ open: true, id, onSuccess })
+  }
+
+  async function executeDelete() {
+    const { id, onSuccess } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
       const res = await fetch(`${API_URL}/api/products/${id}`, { method: 'DELETE' })
       const json = await res.json()
@@ -948,9 +1152,12 @@ export function ProductsPage() {
       setData((prev) => prev.filter((p) => p.id !== id))
       setTotal((t) => Math.max(0, t - 1))
       toastSuccess('Ürün silindi', 'Ürün başarıyla silindi.')
+      setDeleteConfirm({ open: false, id: null })
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -960,6 +1167,7 @@ export function ProductsPage() {
       description="Ürün listesini yönetin"
       backTo="/"
       contentRef={contentRef}
+      contentOverflow="hidden"
       showRefresh
       onRefresh={handleRefresh}
       headerActions={
@@ -1064,11 +1272,11 @@ export function ProductsPage() {
         />
       }
     >
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
+      <Card className="flex-1 min-h-0 overflow-hidden flex flex-col">
+        <CardContent className="p-0 flex-1 min-h-0 overflow-hidden flex flex-col">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto">
             <table className="w-full text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-muted/95 backdrop-blur">
                 <tr className="border-b bg-muted/50">
                   <th className="text-center p-2 font-medium w-16">Görsel</th>
                   <th className="text-center p-2 font-medium min-w-[140px]">
@@ -1206,7 +1414,7 @@ export function ProductsPage() {
                       <TooltipContent>Eşleşmeler</TooltipContent>
                     </Tooltip>
                   </th>
-                  <th className="text-center p-2 font-medium min-w-[120px]">
+                  <th className="text-center p-2 font-medium min-w-[180px]">
                     <div className="inline-flex items-center gap-1">
                       <button
                         type="button"
@@ -1458,37 +1666,33 @@ export function ProductsPage() {
                           )
                         })()}
                       </td>
-                      <td className="p-3 text-center">
-                        {item.group_code || item.category_code || item.subcategory_code ? (
-                          <div className="flex flex-wrap items-center justify-center gap-1">
-                            {[
-                              { code: item.group_code, name: item.group_name },
-                              { code: item.category_code, name: item.category_name },
-                              { code: item.subcategory_code, name: item.subcategory_name },
-                            ]
-                              .filter((x) => x.code)
-                              .map((x, i) => {
-                                const colors = [item.group_color, item.category_color, item.subcategory_color]
-                                const color = colors[i] || '#6b7280'
-                                const label = x.name || x.code
-                                return (
-                                  <Tooltip key={i}>
-                                    <TooltipTrigger asChild>
-                                      <span
-                                        className="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold text-white border border-white/20"
-                                        style={{ backgroundColor: color }}
-                                      >
-                                        {String(x.code).slice(0, 4).toUpperCase()}
-                                      </span>
-                                    </TooltipTrigger>
-                                    <TooltipContent>{label}</TooltipContent>
-                                  </Tooltip>
-                                )
-                              })}
-                          </div>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
+                      <td className="p-3">
+                        {(() => {
+                          const pathFromHierarchy = getCategoryPath(categories, item.category_id ?? '')
+                          const fullPath =
+                            pathFromHierarchy.length > 0
+                              ? pathFromHierarchy.map((p) => p.name).join(' › ')
+                              : [
+                                  item.group_name || item.group_code,
+                                  item.category_name || item.category_code,
+                                  item.subcategory_name || item.subcategory_code,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' › ')
+                          if (!fullPath) return <span className="text-muted-foreground">—</span>
+                          return (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="block text-left text-sm break-words min-w-0 max-w-[220px]" title={fullPath}>
+                                  {fullPath}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-sm">
+                                <p className="whitespace-normal break-words">{fullPath}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          )
+                        })()}
                       </td>
                       <td className="p-3 text-center text-muted-foreground">
                         {item.unit_name ?? '—'}
@@ -1517,7 +1721,7 @@ export function ProductsPage() {
       </Card>
 
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader className="flex flex-row items-start gap-4">
             <div className="shrink-0">
               <Popover>
@@ -1572,28 +1776,46 @@ export function ProductsPage() {
               </DialogDescription>
             </div>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {error && <p className="text-sm text-destructive">{error}</p>}
+          <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 gap-4">
+            {error && <p className="text-sm text-destructive shrink-0">{error}</p>}
+            <div className="flex-1 min-h-0 overflow-y-auto">
             <Tabs value={modalTab} onValueChange={setModalTab} className="w-full">
-              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-5' : 'grid-cols-4'}`}>
+              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-6' : 'grid-cols-5'}`}>
                 <TabsTrigger value="genel">Genel</TabsTrigger>
                 <TabsTrigger value="fiyat">Fiyat</TabsTrigger>
                 <TabsTrigger value="gorsel">Görsel</TabsTrigger>
                 {isPackageType && (
                   <TabsTrigger value="paket">Paket içeriği</TabsTrigger>
                 )}
+                <TabsTrigger value="e-ticaret">E-Ticaret</TabsTrigger>
                 <TabsTrigger value="diger">Diğer</TabsTrigger>
               </TabsList>
               <TabsContent value="genel" className="space-y-4 mt-4 min-h-[55vh]">
-                <div className="space-y-2">
-                  <Label htmlFor="category">Kategori</Label>
-                  <CategorySelect
-                    id="category"
-                    value={form.category_id}
-                    onChange={(id) => setForm((f) => ({ ...f, category_id: id }))}
-                    categories={categories}
-                    placeholder="Kategori seçin"
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="category">Kategori</Label>
+                    <CategorySelect
+                      id="category"
+                      value={form.category_id}
+                      onChange={(id) => setForm((f) => ({ ...f, category_id: id }))}
+                      categories={categories}
+                      placeholder="Kategori seçin"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="product_item_group">Ürün Grubu</Label>
+                    <select
+                      id="product_item_group"
+                      value={form.product_item_group_id}
+                      onChange={(e) => setForm((f) => ({ ...f, product_item_group_id: e.target.value ? Number(e.target.value) : '' }))}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="">Seçin (Ürün / Yedek Parça / Aksesuar)</option>
+                      {itemGroups.map((g) => (
+                        <option key={g.id} value={g.id}>{g.name}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
@@ -1736,14 +1958,14 @@ export function ProductsPage() {
                               : 'Paket içeriği kaydedildikten sonra hesaplanır'}
                         </div>
                       ) : (
-                        <Input
+                        <DecimalInput
                           id="price"
-                          type="number"
-                          step={1}
-                          min="0"
-                          value={form.price ?? ''}
-                          onChange={(e) => handlePriceChange(parseFloat(e.target.value) || 0)}
-                          placeholder="0"
+                          value={form.price ?? 0}
+                          onChange={(v) => handlePriceChange(v, { skipSameTargetRule: true })}
+                          onBlur={handlePriceBlur}
+                          maxDecimals={2}
+                          minDecimals={2}
+                          placeholder="0,00"
                           className="flex-1 text-right tabular-nums"
                         />
                       )}
@@ -1773,7 +1995,7 @@ export function ProductsPage() {
                                 ? (calculatedPackagePrice ?? 0)
                                 : (() => {
                                     const el = document.getElementById('price') as HTMLInputElement | null
-                                    const raw = el?.value != null && el.value !== '' ? parseFloat(el.value) : Number(form.price) || 0
+                                    const raw = el?.value != null && el.value !== '' ? parseDecimal(el.value) : Number(form.price) || 0
                                     return isNaN(raw) ? 0 : raw
                                   })()
                               handlePriceChange(v)
@@ -1846,7 +2068,7 @@ export function ProductsPage() {
                                     ? (calculatedPackagePrice ?? 0)
                                     : (() => {
                                         const el = document.getElementById('price') as HTMLInputElement | null
-                                        const raw = el?.value != null && el.value !== '' ? parseFloat(el.value) : Number(form.price) || 0
+                                        const raw = el?.value != null && el.value !== '' ? parseDecimal(el.value) : Number(form.price) || 0
                                         return isNaN(raw) ? 0 : raw
                                       })()
                                   handlePriceChange(v)
@@ -1894,6 +2116,117 @@ export function ProductsPage() {
                   />
                 </TabsContent>
               )}
+              <TabsContent value="e-ticaret" className="space-y-4 mt-4 min-h-[55vh]">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleGenerateEcommerce}
+                      disabled={aiGenerateLoading || !form.name?.trim()}
+                      className="gap-2"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      {aiGenerateLoading ? 'Oluşturuluyor...' : 'ChatGPT ile Oluştur'}
+                    </Button>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="ecommerce_name">E-Ticaret Adı</Label>
+                    <Input
+                      id="ecommerce_name"
+                      value={form.ecommerce_name ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, ecommerce_name: e.target.value }))}
+                      placeholder="E-ticaret sitelerinde görünecek ürün adı (boşsa ana ad kullanılır)"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="main_description">Açıklama</Label>
+                    <textarea
+                      id="main_description"
+                      value={form.main_description ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, main_description: e.target.value }))}
+                      placeholder="Ürün açıklaması"
+                      rows={4}
+                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[100px]"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="seo_slug">SEO Bağlantısı</Label>
+                    <Input
+                      id="seo_slug"
+                      value={form.seo_slug ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, seo_slug: e.target.value }))}
+                      placeholder="urun-adi-seo-url"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="seo_title">Meta Başlığı</Label>
+                    <Input
+                      id="seo_title"
+                      value={form.seo_title ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, seo_title: e.target.value }))}
+                      placeholder="Sayfa başlığı (SEO)"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="seo_description">Meta Açıklaması</Label>
+                    <textarea
+                      id="seo_description"
+                      value={form.seo_description ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, seo_description: e.target.value }))}
+                      placeholder="Meta description (SEO)"
+                      rows={2}
+                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 pt-2 border-t">
+                    <div className="space-y-2">
+                      <Label>Ürün Kodu</Label>
+                      <div className="flex h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
+                        {form.sku || '—'}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Üretici</Label>
+                      <div className="flex h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
+                        {form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '—' : '—'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Kategoriler</Label>
+                    <div className="flex min-h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
+                      {categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '—'}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Fiyat</Label>
+                    <div className="flex h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm tabular-nums">
+                      {(() => {
+                        const ecomPrice = form.prices[1] ?? { price: form.price, currency_id: form.currency_id }
+                        const cur = ecomPrice.currency_id ? currencies.find((c) => c.id === ecomPrice.currency_id) : null
+                        return ecomPrice.price != null
+                          ? `${formatPrice(ecomPrice.price)} ${cur?.symbol ?? ''}`.trim() || '—'
+                          : '—'
+                      })()}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Resimler</Label>
+                    <ProductImagesGrid
+                      images={form.images}
+                      onChange={(images) => {
+                        setForm((f) => ({ ...f, images }))
+                        if (editingId) {
+                          const imageValue = serializeImagesToImage(images)
+                          setData((prev) => prev.map((p) => (p.id === editingId ? { ...p, image: imageValue } : p)))
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+              </TabsContent>
               <TabsContent value="diger" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="space-y-2">
                   <Label htmlFor="gtip_code">GTİP Kodu</Label>
@@ -1906,7 +2239,8 @@ export function ProductsPage() {
                 </div>
               </TabsContent>
             </Tabs>
-            <DialogFooter className="flex-row justify-between sm:!justify-between gap-2 pt-4 border-t w-full">
+            </div>
+            <DialogFooter className="flex-row justify-between sm:!justify-between gap-2 pt-4 border-t w-full shrink-0 mt-auto">
               <div className="flex items-center gap-4 shrink-0">
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1936,6 +2270,34 @@ export function ProductsPage() {
                 </Tooltip>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                {modalTab === 'e-ticaret' && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={!!publishLoading}
+                        className="gap-2"
+                      >
+                        <Send className="h-4 w-4" />
+                        {publishLoading ? 'Yayınlanıyor...' : 'Yayınla'}
+                        <ChevronDown className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setOpenCartPublishOpen(true)} disabled={!!publishLoading}>
+                        OpenCart
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => handlePublish('okm')} disabled={!!publishLoading}>
+                        OKM
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => handlePublish('trendyol')} disabled={!!publishLoading}>
+                        Trendyol
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
                 {editingId && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -1944,7 +2306,7 @@ export function ProductsPage() {
                           type="button"
                           variant="outline"
                           size="icon"
-                          onClick={() => handleDelete(editingId, closeModal)}
+                          onClick={() => openDeleteConfirm(editingId!, closeModal)}
                           disabled={saving}
                           className="text-destructive hover:text-destructive"
                         >
@@ -1987,6 +2349,68 @@ export function ProductsPage() {
               </div>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu ürünü silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
+
+      <Dialog open={openCartPublishOpen} onOpenChange={(o) => !o && setOpenCartPublishOpen(false)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>OpenCart&apos;a Yayınla</DialogTitle>
+            <DialogDescription>
+              Ürün OpenCart&apos;ta yoksa yeni oluşturulur. Varolan ürünler için güncellenecek alanları seçin:
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={openCartUpdateOptions.update_price}
+                onChange={(e) => setOpenCartUpdateOptions((o) => ({ ...o, update_price: e.target.checked }))}
+                className="rounded border-input"
+              />
+              <span className="text-sm">Fiyat güncelle</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={openCartUpdateOptions.update_description}
+                onChange={(e) => setOpenCartUpdateOptions((o) => ({ ...o, update_description: e.target.checked }))}
+                className="rounded border-input"
+              />
+              <span className="text-sm">Açıklama güncelle (ad, açıklama, SEO)</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={openCartUpdateOptions.update_images}
+                onChange={(e) => setOpenCartUpdateOptions((o) => ({ ...o, update_images: e.target.checked }))}
+                className="rounded border-input"
+              />
+              <span className="text-sm">Görsel güncelle</span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenCartPublishOpen(false)}>
+              İptal
+            </Button>
+            <Button
+              onClick={() => {
+                setOpenCartPublishOpen(false)
+                handlePublish('opencart', openCartUpdateOptions)
+              }}
+              disabled={!!publishLoading}
+            >
+              {publishLoading === 'opencart' ? 'Yayınlanıyor...' : 'Yayınla'}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

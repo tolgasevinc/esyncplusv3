@@ -18,6 +18,7 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL } from '@/lib/api'
 import { ColorPresetPicker } from '@/components/ColorPresetPicker'
 
@@ -46,6 +47,8 @@ export function MusteriGruplariPage() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: number | null; onSuccess?: () => void }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
@@ -137,17 +140,26 @@ export function MusteriGruplariPage() {
     }
   }
 
-  async function handleDelete(id: number, onSuccess?: () => void) {
-    if (!confirm('Bu grubu silmek istediğinize emin misiniz?')) return
+  function openDeleteConfirm(id: number, onSuccess?: () => void) {
+    setDeleteConfirm({ open: true, id, onSuccess })
+  }
+
+  async function executeDelete() {
+    const { id, onSuccess } = deleteConfirm
+    if (!id) return
+    setDeleting(true)
     try {
       const res = await fetch(`${API_URL}/api/customer-groups/${id}`, { method: 'DELETE' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Silinemedi')
       fetchData()
       toastSuccess('Grup silindi', 'Grup başarıyla silindi.')
+      setDeleteConfirm({ open: false, id: null })
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -303,7 +315,7 @@ export function MusteriGruplariPage() {
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-block">
-                        <Button type="button" variant="outline" size="icon" onClick={() => handleDelete(editingId, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
+                        <Button type="button" variant="outline" size="icon" onClick={() => openDeleteConfirm(editingId!, closeModal)} disabled={saving} className="text-destructive hover:text-destructive">
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </span>
@@ -334,6 +346,14 @@ export function MusteriGruplariPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={deleteConfirm.open}
+        onOpenChange={(o) => setDeleteConfirm((p) => ({ ...p, open: o }))}
+        description="Bu grubu silmek istediğinize emin misiniz?"
+        onConfirm={executeDelete}
+        loading={deleting}
+      />
     </PageLayout>
   )
 }

@@ -106,6 +106,106 @@ function filterExcludedMapping(
   return out
 }
 
+const OPENCART_CATEGORY = 'opencart_mysql'
+
+function OpenCartSettingsCard() {
+  const [storeUrl, setStoreUrl] = useState('')
+  const [imageUploadUrl, setImageUploadUrl] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API_URL}/api/app-settings?category=${encodeURIComponent(OPENCART_CATEGORY)}`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((d: Record<string, string>) => {
+        setStoreUrl((d.store_url ?? '').trim())
+        setImageUploadUrl((d.image_upload_url ?? '').trim())
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  async function handleSave() {
+    setSaving(true)
+    try {
+      const res = await fetch(`${API_URL}/api/app-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: OPENCART_CATEGORY,
+          settings: {
+            store_url: storeUrl.trim(),
+            image_upload_url: imageUploadUrl.trim(),
+          },
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Kaydetme hatası')
+      toastSuccess('OpenCart ayarları kaydedildi')
+    } catch (err) {
+      toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Bilinmeyen hata')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return null
+
+  return (
+    <Card>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger asChild>
+          <CardHeader className="cursor-pointer hover:bg-muted/50 rounded-t-lg transition-colors">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ImageIcon className="h-5 w-5" />
+                <CardTitle>OpenCart Ayarları</CardTitle>
+              </div>
+              {open ? <ChevronUp className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
+            </div>
+            <CardDescription>
+              Mağaza URL'si ve görsel yükleme adresi (Yayınla &gt; OpenCart için)
+            </CardDescription>
+          </CardHeader>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <CardContent className="space-y-4 pt-0">
+            <div className="space-y-2">
+              <Label htmlFor="opencart_store_url">Mağaza URL'si</Label>
+              <Input
+                id="opencart_store_url"
+                value={storeUrl}
+                onChange={(e) => setStoreUrl(e.target.value)}
+                placeholder="https://otomatikkapimarketim.com"
+              />
+              <p className="text-xs text-muted-foreground">
+                OpenCart mağazanızın ana adresi (ürün sayfalarına link için)
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="opencart_image_upload_url">Görsel Yükleme URL'si</Label>
+              <Input
+                id="opencart_image_upload_url"
+                value={imageUploadUrl}
+                onChange={(e) => setImageUploadUrl(e.target.value)}
+                placeholder="https://otomatikkapimarketim.com/image/catalog/opencart-image-upload.php"
+              />
+              <p className="text-xs text-muted-foreground">
+                scripts/opencart-image-upload.php dosyasını OpenCart image/catalog/ klasörüne yükleyin, buraya tam URL'ini yazın.
+              </p>
+            </div>
+            <Button onClick={handleSave} disabled={saving}>
+              <Save className="h-4 w-4 mr-2" />
+              {saving ? 'Kaydediliyor...' : 'Kaydet'}
+            </Button>
+          </CardContent>
+        </CollapsibleContent>
+      </Collapsible>
+    </Card>
+  )
+}
+
 export function SettingsDataTransferPage() {
   const [activeTab, setActiveTab] = useState('aktarimlar')
   const [open, setOpen] = useState(false)
@@ -1075,8 +1175,9 @@ export function SettingsDataTransferPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="ayarlar" className="mt-4">
+        <TabsContent value="ayarlar" className="mt-4 space-y-4">
           {settingsContent}
+          <OpenCartSettingsCard />
         </TabsContent>
       </Tabs>
 

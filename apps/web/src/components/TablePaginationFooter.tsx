@@ -13,14 +13,18 @@ const PAGE_SIZE_OPTIONS = [
 
 export type PageSizeValue = 10 | 25 | 50 | 100 | 'fit' | number
 
-const ROW_HEIGHT_PX = 56
+const ROW_HEIGHT_PX = 48
 const TABLE_HEADER_PX = 52
 const CONTENT_PADDING_PX = 48
 const SAFETY_MARGIN_PX = 16
+const EXTRA_ROW_SAFETY = 3
+const MIN_CONTAINER_HEIGHT_FOR_CALC = 150
 
 function calcFitLimit(containerHeight: number): number {
-  const available = containerHeight - CONTENT_PADDING_PX - TABLE_HEADER_PX - SAFETY_MARGIN_PX
-  return Math.max(1, Math.floor(available / ROW_HEIGHT_PX))
+  if (containerHeight < MIN_CONTAINER_HEIGHT_FOR_CALC) return 10
+  const available = containerHeight - CONTENT_PADDING_PX - TABLE_HEADER_PX - SAFETY_MARGIN_PX - EXTRA_ROW_SAFETY * ROW_HEIGHT_PX
+  const rows = Math.max(1, Math.floor(available / ROW_HEIGHT_PX))
+  return Math.min(100, Math.max(5, rows))
 }
 
 interface TablePaginationFooterProps {
@@ -107,15 +111,17 @@ export function TablePaginationFooter({
 
   const effectiveLimit = pageSize === 'fit' ? fitLimit : pageSize
   const totalPages = Math.max(1, Math.ceil(total / effectiveLimit))
-  const showing = total === 0 ? 0 : Math.min(effectiveLimit, Math.max(0, total - (page - 1) * effectiveLimit))
+  const start = total === 0 ? 0 : (page - 1) * effectiveLimit + 1
+  const end = total === 0 ? 0 : Math.min(page * effectiveLimit, total)
+  const rangeText = total === 0 ? '0' : start === end ? `${start}` : `${start}-${end}`
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-4">
       <div className="flex items-center gap-4">
         <span className="text-sm">
-          Kayıt: <span className="font-semibold text-foreground">{showing}</span>
-          <span className="text-muted-foreground">/{total}</span>
-          {hasFilter && ' (filtrelenmiş)'}
+          Kayıt: <span className="font-semibold text-foreground">{rangeText}</span>
+          <span className="text-muted-foreground"> / {total}</span>
+          {hasFilter && <span className="text-muted-foreground"> (filtrelenmiş)</span>}
         </span>
         <span className="text-sm">
           Sayfa <span className="font-semibold text-foreground">{page}</span>

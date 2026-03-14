@@ -26,4 +26,15 @@ export default defineConfig({
   },
   // .env dosyasının apps/web'den yüklendiğinden emin ol (monorepo'da cwd root olabilir)
   envDir: __dirname,
+  build: {
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-ui': ['@radix-ui/react-dialog', '@radix-ui/react-dropdown-menu', '@radix-ui/react-tabs', '@radix-ui/react-popover', '@radix-ui/react-tooltip'],
+        },
+      },
+    },
+  },
 })

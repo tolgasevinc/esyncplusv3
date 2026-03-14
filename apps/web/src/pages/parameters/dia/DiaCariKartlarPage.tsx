@@ -1,12 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Search, X } from 'lucide-react'
+import { Loader2, Search, Send, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { API_URL } from '@/lib/api'
+import { toastError, toastSuccess } from '@/lib/toast'
 
 interface DiaCariKart {
   id: number
@@ -40,8 +49,27 @@ export function DiaCariKartlarPage() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [detailItem, setDetailItem] = useState<DiaCariKart | null>(null)
+  const [transferLoading, setTransferLoading] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0
+
+  const handleTransferParasut = useCallback(async () => {
+    if (!detailItem) return
+    setTransferLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/dia/cari-kartlar/${detailItem.id}/transfer-parasut`, {
+        method: 'POST',
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Aktarım başarısız')
+      toastSuccess('Paraşüt\'e aktarıldı', json.message || 'Müşteri Paraşüt\'e başarıyla eklendi.')
+    } catch (err) {
+      toastError('Aktarım hatası', err instanceof Error ? err.message : 'Paraşüt\'e aktarılamadı')
+    } finally {
+      setTransferLoading(false)
+    }
+  }, [detailItem])
   const limit = pageSize === 'fit' ? fitLimit : pageSize
 
   const fetchData = useCallback(async () => {
@@ -142,7 +170,11 @@ export function DiaCariKartlarPage() {
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">{error || 'Henüz kayıt yok.'}</td></tr>
                 ) : (
                   data.map((item) => (
-                    <tr key={item.id} className="border-b hover:bg-muted/30">
+                    <tr
+                      key={item.id}
+                      className="border-b hover:bg-muted/30 cursor-pointer"
+                      onClick={() => setDetailItem(item)}
+                    >
                       <td className="p-3 font-medium">{item.unvan || '—'}</td>
                       <td className="p-3">{item.carikartkodu || '—'}</td>
                       <td className="p-3">{item.vergidairesi_adi || '—'}</td>
@@ -158,6 +190,79 @@ export function DiaCariKartlarPage() {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={!!detailItem} onOpenChange={(open) => !open && setDetailItem(null)}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{detailItem?.unvan || 'Cari Kart Detayı'}</DialogTitle>
+          </DialogHeader>
+          {detailItem && (
+            <div className="grid gap-4 py-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <DetailRow label="Cari Kayıt Türü" value={detailItem.carikayitturu} />
+                <DetailRow label="Cari Kart Kodu" value={detailItem.carikartkodu} />
+                <DetailRow label="Ünvan" value={detailItem.unvan} />
+                <DetailRow label="Vergi Dairesi" value={detailItem.vergidairesi_adi} />
+                <DetailRow label="Vergi Numarası" value={detailItem.verginumarasi} />
+                <DetailRow label="TC Kimlik No" value={detailItem.tckimlikno} />
+                <DetailRow label="Grup Kodu" value={detailItem.grupkodu} />
+                <DetailRow label="Özel Kod 1" value={detailItem.ozelkod1} />
+                <DetailRow label="E-posta" value={detailItem.eposta} />
+                <DetailRow label="Potansiyel" value={detailItem.potansiyel ? 'Evet' : 'Hayır'} />
+                <DetailRow label="Cari Kart Tipi" value={detailItem.carikarttipi} />
+              </div>
+              <div className="border-t pt-4">
+                <h4 className="text-sm font-medium text-muted-foreground mb-2">Adres Bilgileri</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <DetailRow label="Adres Adı" value={detailItem.adresler_adres_adresadi} />
+                  <DetailRow label="Adres" value={detailItem.adresler_adres_adres1} />
+                  <DetailRow label="İlçe" value={detailItem.adresler_adres_ilce} />
+                  <DetailRow label="Şehir" value={detailItem.adresler_adres_sehir} />
+                  <DetailRow label="Telefon" value={detailItem.adresler_adres_telefon1} />
+                  <DetailRow label="Cep Telefonu" value={detailItem.adresler_adres_ceptel} />
+                </div>
+              </div>
+              <div className="border-t pt-4 text-xs text-muted-foreground">
+                <DetailRow label="Oluşturulma" value={detailItem.created_at} />
+              </div>
+            </div>
+          )}
+          <DialogFooter className="flex-row justify-end gap-2 border-t pt-4 mt-4">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleTransferParasut}
+                  disabled={transferLoading || !detailItem?.unvan?.trim()}
+                >
+                  {transferLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
+                  <span className="ml-2">Paraşüte aktar</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {!detailItem?.unvan?.trim()
+                  ? 'Ünvan boş olduğu için aktarılamaz'
+                  : 'Cari kartı Paraşüt\'e müşteri olarak aktarır'}
+              </TooltipContent>
+            </Tooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </PageLayout>
+  )
+}
+
+function DetailRow({ label, value }: { label: string; value?: string | number | null }) {
+  const display = value == null || value === '' ? '—' : String(value)
+  return (
+    <div className="space-y-1">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-sm">{display}</div>
+    </div>
   )
 }

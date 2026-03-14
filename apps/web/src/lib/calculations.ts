@@ -29,6 +29,8 @@ export interface CalculationRule {
   operations: CalculationOperation[]
   /** Hesaplama sonucunun para birimi (opsiyonel; boşsa kaynak para birimi kullanılır) */
   result_currency_id?: number | null
+  /** Marka ID; null/undefined = tüm markalar için geçerli */
+  brand_id?: number | null
 }
 
 function applyOperation(current: number, op: CalculationOperation): number {
@@ -50,6 +52,18 @@ function applyOperation(current: number, op: CalculationOperation): number {
     default:
       return current
   }
+}
+
+/** Ürün markasına göre uygun kuralı bulur. Önce markaya özel, yoksa tümü (brand_id null) kuralını döner. */
+export function findRuleForBrand(
+  rules: CalculationRule[],
+  target: string,
+  brandId: number | null | undefined
+): CalculationRule | undefined {
+  const matching = rules.filter(
+    (r) => String(r.target) === target && (r.brand_id == null || r.brand_id === brandId)
+  )
+  return matching.find((r) => r.brand_id === brandId) ?? matching.find((r) => r.brand_id == null)
 }
 
 /** Hesaplama kurallarını uygular, sonucu yuvarlar. Formül yoksa kaynak değer aynen döner. */

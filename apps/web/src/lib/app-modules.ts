@@ -30,6 +30,8 @@ export const APP_MODULES: AppModule[] = [
   { id: 'ayarlar-depolama', label: 'settings › storage', path: '/ayarlar/depolama' },
   { id: 'ayarlar-entegrasyonlar', label: 'settings › integrations', path: '/ayarlar/entegrasyonlar' },
   { id: 'opencart', label: 'OpenCart', path: '/opencart' },
+  { id: 'parasut', label: 'Paraşüt', path: '/parasut' },
+  { id: 'parasut-products', label: 'Paraşüt › Ürünler', path: '/parasut/products' },
   { id: 'ayarlar-hesaplamalar', label: 'settings › calculations', path: '/ayarlar/hesaplamalar' },
   { id: 'ayarlar-erisim', label: 'settings › access', path: '/ayarlar/erisim' },
   { id: 'ayarlar-tedarikciler', label: 'settings › suppliers', path: '/ayarlar/tedarikciler' },

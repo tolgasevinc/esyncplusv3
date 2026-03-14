@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import { Upload, Link as LinkIcon, Plus } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -51,6 +51,9 @@ export function ProductImagesGrid({
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [previewLoadFailed, setPreviewLoadFailed] = useState(false)
+  const [failedThumbnails, setFailedThumbnails] = useState<Set<number>>(new Set())
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
 
   const PRODUCT_IMAGES_FOLDER = 'images/products/'
 
@@ -63,6 +66,60 @@ export function ProductImagesGrid({
 
   const selectedImage = paddedImages[selectedIndex] || paddedImages.find(Boolean) || ''
   const previewUrl = selectedImage ? getImageDisplayUrl(selectedImage) : ''
+
+  useEffect(() => {
+    setPreviewLoadFailed(false)
+  }, [selectedImage, previewUrl])
+
+  useEffect(() => {
+    setFailedThumbnails(new Set())
+  }, [images])
+
+  function handleDragStart(e: React.DragEvent, index: number) {
+    setDragIndex(index)
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', String(index))
+    e.dataTransfer.setData('application/json', JSON.stringify({ index }))
+  }
+
+  function handleDragEnd() {
+    setDragIndex(null)
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+  }
+
+  function handleDrop(e: React.DragEvent, dropIndex: number) {
+    e.preventDefault()
+    const fromIndex = dragIndex
+    if (fromIndex == null || fromIndex === dropIndex) return
+    const next = [...paddedImages]
+    const [dragged] = next.splice(fromIndex, 1)
+    next.splice(dropIndex, 0, dragged)
+    onChange(next)
+    setDragIndex(null)
+  }
+
+  async function openModal(index: number) {
+    setEditingIndex(index)
+    setSelectedIndex(index)
+    setLinkPreview(null)
+    setError(null)
+    setModalOpen(true)
+    try {
+      const text = await navigator.clipboard?.readText?.()
+      const trimmed = (text || '').trim()
+      if (trimmed && /^https?:\/\/.+/i.test(trimmed)) {
+        setLinkUrl(trimmed)
+      } else {
+        setLinkUrl('')
+      }
+    } catch {
+      setLinkUrl('')
+    }
+  }
 
   async function uploadBlob(blob: Blob, filename: string): Promise<string> {
     const folder = getUploadFolder()
@@ -86,15 +143,6 @@ export function ProductImagesGrid({
     } catch {
       /* ignore */
     }
-  }
-
-  function openModal(index: number) {
-    setEditingIndex(index)
-    setSelectedIndex(index)
-    setLinkUrl('')
-    setLinkPreview(null)
-    setError(null)
-    setModalOpen(true)
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -216,33 +264,42 @@ export function ProductImagesGrid({
       {/* Sol: 5 satır x 2 sütun kare avatar grid */}
       <div className="flex flex-col">
         <Label className="mb-2">Görüntü listesi</Label>
+        <p className="text-xs text-muted-foreground mb-2">Sürükleyerek sıralayabilirsiniz</p>
         <div
           className="grid"
           style={{ gridTemplateColumns: `repeat(${COLS}, ${SLOT_SIZE}px)`, gap: GAP }}
         >
           {paddedImages.slice(0, TOTAL_SLOTS).map((path, idx) => (
-            <button
+            <div
               key={idx}
-              type="button"
+              role="button"
+              tabIndex={0}
               onClick={() => openModal(idx)}
-              className="aspect-square w-16 h-16 rounded-lg border-2 border-dashed border-muted-foreground/30 hover:border-primary/50 bg-muted/30 flex items-center justify-center overflow-hidden transition-colors"
+              onKeyDown={(e) => e.key === 'Enter' && openModal(idx)}
+              draggable={!!path}
+              onDragStart={(e) => path && handleDragStart(e, idx)}
+              onDragEnd={handleDragEnd}
+              onDragOver={handleDragOver}
+              onDrop={(e) => handleDrop(e, idx)}
+              className={`aspect-square w-16 h-16 rounded-lg border-2 border-dashed flex items-center justify-center overflow-hidden transition-colors cursor-pointer select-none
+                ${path ? 'border-muted-foreground/30 hover:border-primary/50 bg-muted/30' : 'border-muted-foreground/20 bg-muted/20'}
+                ${dragIndex === idx ? 'opacity-50 ring-2 ring-primary' : ''}
+                ${dragIndex != null && dragIndex !== idx ? 'ring-1 ring-primary/50' : ''}`}
             >
-              {path ? (
-                <div
-                  className="w-full h-full bg-white"
-                  style={{
-                    backgroundImage: `url(${getImageDisplayUrl(path)})`,
-                    backgroundSize: 'contain',
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'center',
-                  }}
-                  role="img"
-                  aria-label={`Görsel ${idx + 1}`}
+              {path && !failedThumbnails.has(idx) ? (
+                <img
+                  src={getImageDisplayUrl(path)}
+                  alt={`Görsel ${idx + 1}`}
+                  className="w-full h-full object-contain bg-white pointer-events-none"
+                  onError={() => setFailedThumbnails((s) => new Set(s).add(idx))}
+                  draggable={false}
                 />
+              ) : path && failedThumbnails.has(idx) ? (
+                <span className="text-xs text-muted-foreground text-center px-1">Yüklenemedi</span>
               ) : (
-                <Plus className="h-6 w-6 text-muted-foreground" />
+                <Plus className="h-6 w-6 text-muted-foreground pointer-events-none" />
               )}
-            </button>
+            </div>
           ))}
         </div>
       </div>
@@ -254,13 +311,16 @@ export function ProductImagesGrid({
           className="rounded-lg border bg-white flex items-center justify-center overflow-hidden shrink-0"
           style={{ width: GRID_HEIGHT, height: GRID_HEIGHT }}
         >
-          {previewUrl ? (
+          {previewUrl && !previewLoadFailed ? (
             <img
               src={previewUrl}
               alt="Önizleme"
               className="max-w-full max-h-full object-contain"
               style={{ maxWidth: GRID_HEIGHT, maxHeight: GRID_HEIGHT }}
+              onError={() => setPreviewLoadFailed(true)}
             />
+          ) : previewUrl && previewLoadFailed ? (
+            <span className="text-sm text-muted-foreground text-center p-4">Görsel yüklenemedi</span>
           ) : (
             <span className="text-sm text-muted-foreground">Görsel seçin</span>
           )}
