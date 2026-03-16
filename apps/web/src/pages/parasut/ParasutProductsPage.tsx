@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, RefreshCw, Package, AlertCircle, SlidersHorizontal, Plus, Trash2, Download, Upload, Pencil } from 'lucide-react'
+import { Search, RefreshCw, Package, AlertCircle, SlidersHorizontal, Plus, Trash2, Download, Upload, Pencil, Link2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -182,6 +182,12 @@ export function ParasutProductsPage() {
   const [editForm, setEditForm] = useState<EditForm>(emptyEditForm)
   const [editSaving, setEditSaving] = useState(false)
   const [pullFormValues, setPullFormValues] = useState<Record<string, string>>({})
+  const [matchModalProduct, setMatchModalProduct] = useState<ParasutProduct | null>(null)
+  const [matchMasterProduct, setMatchMasterProduct] = useState<{ id: number; name: string; sku?: string } | null>(null)
+  const [matchMasterSearch, setMatchMasterSearch] = useState('')
+  const [matchMasterSearchDebounced, setMatchMasterSearchDebounced] = useState('')
+  const [matchMasterSuggestions, setMatchMasterSuggestions] = useState<{ id: number; name: string; sku?: string }[]>([])
+  const [matchLoading, setMatchLoading] = useState(false)
 
   const limit = pageSize === 'fit' ? fitLimit : pageSize
 
@@ -246,6 +252,13 @@ export function ParasutProductsPage() {
     setPushMasterSuggestions([])
   }, [])
 
+  const openMatchModal = useCallback((p: ParasutProduct) => {
+    setMatchModalProduct(p)
+    setMatchMasterProduct(null)
+    setMatchMasterSearch('')
+    setMatchMasterSuggestions([])
+  }, [])
+
   const openEditModal = useCallback((p: ParasutProduct) => {
     setEditModalProduct(p)
     const pr = p as ParasutProduct & { gtip?: string; photo?: string }
@@ -295,6 +308,11 @@ export function ParasutProductsPage() {
   }, [pushMasterSearch])
 
   useEffect(() => {
+    const t = setTimeout(() => setMatchMasterSearchDebounced(matchMasterSearch), 300)
+    return () => clearTimeout(t)
+  }, [matchMasterSearch])
+
+  useEffect(() => {
     if (!pushMasterSearch.trim()) {
       setPushMasterProduct(null)
       setPushMasterProductDetails(null)
@@ -338,6 +356,26 @@ export function ParasutProductsPage() {
     }
   }, [])
 
+  const searchMatchMasterProducts = useCallback(async (q: string) => {
+    if (!q.trim()) {
+      setMatchMasterSuggestions([])
+      return
+    }
+    try {
+      const res = await fetch(`${API_URL}/api/products/search-by-name?q=${encodeURIComponent(q)}&limit=25`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      const list = (data.products ?? []).map((p: { id: number; name: string; sku?: string }) => ({
+        id: p.id,
+        name: p.name,
+        sku: p.sku,
+      }))
+      setMatchMasterSuggestions(list)
+    } catch {
+      setMatchMasterSuggestions([])
+    }
+  }, [])
+
   useEffect(() => {
     if (!pushModalProduct) return
     if (!pushMasterSearchDebounced.trim()) {
@@ -346,6 +384,15 @@ export function ParasutProductsPage() {
     }
     searchMasterProducts(pushMasterSearchDebounced)
   }, [pushModalProduct, pushMasterSearchDebounced, searchMasterProducts])
+
+  useEffect(() => {
+    if (!matchModalProduct) return
+    if (!matchMasterSearchDebounced.trim()) {
+      setMatchMasterSuggestions([])
+      return
+    }
+    searchMatchMasterProducts(matchMasterSearchDebounced)
+  }, [matchModalProduct, matchMasterSearchDebounced, searchMatchMasterProducts])
 
   const fetchProducts = useCallback(async () => {
     setLoading(true)
@@ -454,6 +501,44 @@ export function ParasutProductsPage() {
       setTransferLoading(false)
     }
   }, [pushModalProduct, pushMasterProduct, rules, fieldCheckboxes, fetchProducts])
+
+  const handleMatch = useCallback(async () => {
+    if (!matchModalProduct || !matchMasterProduct) return
+    const parasutCode = (matchModalProduct.code ?? '').trim()
+    const masterSku = (matchMasterProduct.sku ?? '').trim()
+    const value = masterSku || parasutCode
+    if (!value) {
+      toastError('Hata', 'Ana ürünün SKU\'su veya Paraşüt ürün kodundan biri dolu olmalı')
+      return
+    }
+    setMatchLoading(true)
+    try {
+      const [parasutRes, masterRes] = await Promise.all([
+        fetch(`${API_URL}/api/parasut/products/${matchModalProduct.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: value, name: matchModalProduct.name ?? 'Ürün' }),
+        }),
+        fetch(`${API_URL}/api/products/${matchMasterProduct.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sku: value }),
+        }),
+      ])
+      const parasutData = await parasutRes.json()
+      const masterData = await masterRes.json()
+      if (!parasutRes.ok) throw new Error((parasutData as { error?: string }).error || 'Paraşüt güncellenemedi')
+      if (!masterRes.ok) throw new Error((masterData as { error?: string }).error || 'Ana ürün güncellenemedi')
+      toastSuccess('Başarılı', 'Eşleştirme tamamlandı. Paraşüt kodu ve ana ürün SKU\'su güncellendi.')
+      setMatchModalProduct(null)
+      setMatchMasterProduct(null)
+      fetchProducts()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Eşleştirme başarısız')
+    } finally {
+      setMatchLoading(false)
+    }
+  }, [matchModalProduct, matchMasterProduct, fetchProducts])
 
   const handleEditSave = useCallback(async () => {
     if (!editModalProduct) return
@@ -713,6 +798,15 @@ export function ParasutProductsPage() {
                             variant="outline"
                             size="sm"
                             className="h-7 px-2 text-xs"
+                            onClick={() => openMatchModal(p)}
+                          >
+                            <Link2 className="h-3.5 w-3 mr-1" />
+                            Eşleştir
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
                             onClick={() => openPullModal(p)}
                           >
                             <Download className="h-3.5 w-3 mr-1" />
@@ -967,6 +1061,64 @@ export function ParasutProductsPage() {
             <Button variant="outline" onClick={() => { setPushModalProduct(null); setPushMasterProduct(null); setPushMasterProductDetails(null) }}>İptal</Button>
             <Button onClick={handlePush} disabled={transferLoading || !pushMasterProduct || rules.length === 0}>
               {transferLoading ? 'Gönderiliyor...' : 'Gönder'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Eşleştir modal - Paraşüt ürünü ile ana ürün eşleştir */}
+      <Dialog open={!!matchModalProduct} onOpenChange={(o) => !o && (setMatchModalProduct(null), setMatchMasterProduct(null))}>
+        <DialogContent className="max-w-xl p-6 sm:p-8">
+          <DialogHeader>
+            <DialogTitle>Ürün Eşleştir</DialogTitle>
+            <DialogDescription>
+              {matchModalProduct?.name ?? matchModalProduct?.code ?? 'Ürün'} — Ana ürünlerden seçerek Paraşüt kodu ile ana ürün SKU\'sunu eşleştirin.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4 min-w-0">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Ana ürün seçin</label>
+              <div className="relative">
+                <Input
+                  placeholder="Ürün adı veya SKU ile ara..."
+                  value={matchMasterSearch}
+                  onChange={(e) => setMatchMasterSearch(e.target.value)}
+                  onFocus={() => matchMasterSearch && searchMatchMasterProducts(matchMasterSearch)}
+                />
+                {matchMasterSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-1 border rounded-md bg-background shadow-lg z-10 max-h-64 overflow-y-auto">
+                    {matchMasterSuggestions.map((mp) => (
+                      <button
+                        key={mp.id}
+                        type="button"
+                        className="w-full text-left px-3 py-2.5 text-sm hover:bg-muted border-b border-border last:border-b-0 flex flex-col gap-0.5"
+                        onClick={() => {
+                          setMatchMasterProduct(mp)
+                          setMatchMasterSearch(mp.sku ? `${mp.sku} - ${mp.name}` : mp.name)
+                          setMatchMasterSuggestions([])
+                        }}
+                      >
+                        <span className="font-mono text-xs text-muted-foreground">{mp.sku ?? '—'}</span>
+                        <span>{mp.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {matchMasterProduct && (
+                <p className="text-xs text-muted-foreground">
+                  Seçili: <span className="font-mono">{matchMasterProduct.sku ?? '—'}</span> — {matchMasterProduct.name}
+                </p>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Eşleştirme sonrası Paraşüt ürün kodu ve ana ürün SKU\'su aynı değere ayarlanacak (ana ürün SKU öncelikli, boşsa Paraşüt kodu kullanılır).
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setMatchModalProduct(null); setMatchMasterProduct(null) }}>İptal</Button>
+            <Button onClick={handleMatch} disabled={matchLoading || !matchMasterProduct}>
+              {matchLoading ? 'Eşleştiriliyor...' : 'Eşleştir'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
@@ -159,6 +160,7 @@ export function CategorySelect({
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
   const [focusedIndex, setFocusedIndex] = useState(-1)
+  const [dropdownRect, setDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -201,6 +203,18 @@ export function CategorySelect({
   useEffect(() => {
     setFocusedIndex(-1)
   }, [query, filtered])
+
+  useEffect(() => {
+    if (open && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      const minWidth = 520
+      const maxW = typeof window !== 'undefined' ? Math.min(window.innerWidth * 0.9, 600) : 600
+      const width = Math.min(Math.max(rect.width, minWidth), maxW)
+      setDropdownRect({ top: rect.bottom + 4, left: rect.left, width })
+    } else {
+      setDropdownRect(null)
+    }
+  }, [open])
 
   useEffect(() => {
     if (focusedIndex >= 0 && listRef.current) {
@@ -276,12 +290,22 @@ export function CategorySelect({
         autoComplete="off"
       />
       </div>
-      {open && (
-        <div
-          ref={listRef}
-          className="absolute z-50 mt-1 w-full rounded-md border bg-popover py-1 shadow-lg"
-          style={{ maxHeight: 260, overflowY: 'auto' }}
-        >
+      {open &&
+        dropdownRect &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={listRef}
+            className="fixed z-[100] rounded-md border bg-popover py-1 shadow-lg"
+            style={{
+              top: dropdownRect.top,
+              left: dropdownRect.left,
+              width: dropdownRect.width,
+              minWidth: 520,
+              maxHeight: 320,
+              overflowY: 'auto',
+            }}
+          >
           <button
             type="button"
             onClick={() => {
@@ -306,11 +330,17 @@ export function CategorySelect({
             filtered.map((item) => {
               const selIdx = selectableFiltered.indexOf(item)
               const isFocused = selIdx >= 0 && selIdx === focusedIndex
+              const indentClass = {
+                group: 'pl-2',
+                category: 'pl-6',
+                subcategory: 'pl-10',
+              }[item.level]
               const rowClass = cn(
-                'w-full text-left px-3 py-2 text-sm flex items-center gap-2',
+                'w-full text-left px-3 py-2.5 text-sm flex items-center gap-2.5',
+                indentClass,
                 item.level === 'group' && 'bg-blue-100 dark:bg-blue-950/50 font-medium',
                 item.level === 'category' && 'bg-emerald-50 dark:bg-emerald-950/30 hover:bg-emerald-100',
-                item.level === 'subcategory' && 'bg-amber-50 dark:bg-amber-950/20 hover:bg-amber-100 pl-4',
+                item.level === 'subcategory' && 'bg-amber-50 dark:bg-amber-950/20 hover:bg-amber-100',
                 item.selectable && 'cursor-pointer',
                 !item.selectable && 'cursor-default',
                 value === item.id && item.selectable && 'bg-accent',
@@ -337,7 +367,7 @@ export function CategorySelect({
                       )}
                     />
                   )}
-                  <span className="truncate">{item.label}</span>
+                  <span className="break-words whitespace-normal">{item.label}</span>
                 </button>
               ) : (
                 <div key={`${item.level}-${item.id}`} className={rowClass}>
@@ -349,13 +379,14 @@ export function CategorySelect({
                   ) : (
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
                   )}
-                  <span className="text-blue-700 dark:text-blue-300 truncate">{item.label}</span>
+                  <span className="text-blue-700 dark:text-blue-300 break-words whitespace-normal">{item.label}</span>
                 </div>
               )
             })
           )}
-        </div>
-      )}
+          </div>,
+          document.body
+        )}
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles } from 'lucide-react'
+import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,7 +22,7 @@ import { ProductImagesGrid } from '@/components/ProductImagesGrid'
 import { PackageContentsTab } from '@/components/PackageContentsTab'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { API_URL } from '@/lib/api'
-import { CategorySelect, getCategoryPath, buildHierarchy, type CategoryItem } from '@/components/CategorySelect'
+import { getCategoryPath, buildHierarchy, type CategoryItem } from '@/components/CategorySelect'
 import { fetchSidebarMenus } from '@/lib/sidebar-menus'
 import { ProductCodeDisplay } from '@/components/ProductCodeDisplay'
 import { ProductPricePreview } from '@/components/ProductPricePreview'
@@ -129,6 +129,188 @@ function findParasutIconPath(menus: { label: string; iconPath?: string }[]): str
     if ((l.includes('parasut') || l.includes('paraşüt')) && m.iconPath) return m.iconPath
   }
   return undefined
+}
+
+/** Gruplar ve kategoriler açılır liste - varsayılan kapalı */
+function CategoryTreeTab({
+  categories,
+  value,
+  onChange,
+}: {
+  categories: CategoryItem[]
+  value: number | ''
+  onChange: (id: number | '') => void
+}) {
+  const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set())
+  const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
+
+  const groups = categories.filter((c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0))
+  const mainCats = categories.filter((c) => !c.category_id || c.category_id === 0)
+  const subCats = categories.filter((c) => c.category_id && c.category_id > 0)
+
+  const byGroup = new Map<number, CategoryItem[]>()
+  mainCats.forEach((c) => {
+    const gid = c.group_id ?? 0
+    if (gid > 0) {
+      if (!byGroup.has(gid)) byGroup.set(gid, [])
+      byGroup.get(gid)!.push(c)
+    }
+  })
+
+  const byParent = new Map<number, CategoryItem[]>()
+  subCats.forEach((c) => {
+    const pid = c.category_id!
+    if (!byParent.has(pid)) byParent.set(pid, [])
+    byParent.get(pid)!.push(c)
+  })
+
+  const noGroupCats = mainCats.filter((c) => c.group_id == null && !groups.some((g) => g.id === c.id))
+
+  const toggleGroup = (id: number) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleCategory = (id: number) => {
+    setExpandedCategories((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const sortedGroups = [...groups].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+  const sortedNoGroup = [...noGroupCats].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+
+  const renderCat = (cat: CategoryItem, group?: CategoryItem, indent: number = 0) => {
+    const subs = byParent.get(cat.id) || []
+    const hasSubs = subs.length > 0
+    const isExpanded = expandedCategories.has(cat.id)
+    const isSelected = value === cat.id
+
+    if (hasSubs) {
+      return (
+        <div key={`cat-${cat.id}`} className="space-y-0.5">
+          <div
+            className={cn(
+              'flex items-center gap-2 px-3 py-2 text-sm rounded-md cursor-pointer',
+              indent === 0 ? 'bg-emerald-50 dark:bg-emerald-950/30' : 'bg-emerald-50/80 dark:bg-emerald-950/20',
+              isSelected && 'ring-2 ring-primary ring-offset-2'
+            )}
+            style={{ paddingLeft: `${12 + indent * 16}px` }}
+          >
+            <button
+              type="button"
+              onClick={() => toggleCategory(cat.id)}
+              className="shrink-0 p-0.5 hover:bg-black/5 rounded"
+            >
+              {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange(cat.id)}
+              className="flex-1 flex items-center gap-2 text-left min-w-0"
+            >
+              {cat.color ? (
+                <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: cat.color }} />
+              ) : (
+                <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              )}
+              <span className="break-words whitespace-normal">{group ? `${group.name} [${group.code}] > ` : ''}{cat.name} [{cat.code}]</span>
+            </button>
+          </div>
+          {isExpanded && (
+            <div className="space-y-0.5">
+              {[...subs].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)).map((sub) => (
+                <button
+                  key={`sub-${sub.id}`}
+                  type="button"
+                  onClick={() => onChange(sub.id)}
+                  className={cn(
+                    'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-amber-50 dark:bg-amber-950/20 hover:opacity-90',
+                    value === sub.id && 'ring-2 ring-primary ring-offset-2'
+                  )}
+                  style={{ paddingLeft: `${28 + indent * 16}px` }}
+                >
+                  {sub.color ? (
+                    <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: sub.color }} />
+                  ) : (
+                    <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  )}
+                  <span className="break-words whitespace-normal">{cat.name} [{cat.code}] › {sub.name} [{sub.code}]</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    return (
+      <button
+        key={`cat-${cat.id}`}
+        type="button"
+        onClick={() => onChange(cat.id)}
+        className={cn(
+          'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md',
+          indent === 0 ? 'bg-emerald-50 dark:bg-emerald-950/30' : 'bg-emerald-50/80 dark:bg-emerald-950/20',
+          'hover:opacity-90',
+          value === cat.id && 'ring-2 ring-primary ring-offset-2'
+        )}
+        style={{ paddingLeft: `${12 + indent * 16}px` }}
+      >
+        {cat.color ? (
+          <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: cat.color }} />
+        ) : (
+          <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-emerald-500" />
+        )}
+        <span className="break-words whitespace-normal">{group ? `${group.name} [${group.code}] > ` : ''}{cat.name} [{cat.code}]</span>
+      </button>
+    )
+  }
+
+  return (
+    <div className="rounded-lg border bg-muted/30 overflow-hidden">
+      <div className="max-h-[55vh] overflow-y-auto p-2 space-y-0.5">
+        {sortedGroups.map((group) => {
+          const isExpanded = expandedGroups.has(group.id)
+          const groupCats = (byGroup.get(group.id) || []).sort(
+            (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)
+          )
+          return (
+            <div key={`grp-${group.id}`} className="space-y-0.5">
+              <button
+                type="button"
+                onClick={() => toggleGroup(group.id)}
+                className={cn(
+                  'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-blue-100 dark:bg-blue-950/50 font-medium cursor-pointer hover:opacity-90'
+                )}
+              >
+                {isExpanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                {group.color ? (
+                  <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: group.color }} />
+                ) : (
+                  <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500" />
+                )}
+                <span className="break-words whitespace-normal">{group.name} [{group.code}]</span>
+              </button>
+              {isExpanded && (
+                <div className="space-y-0.5 pl-1">
+                  {groupCats.map((cat) => renderCat(cat, group, 1))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {sortedNoGroup.map((cat) => renderCat(cat, undefined, 0))}
+      </div>
+    </div>
+  )
 }
 
 /** Bu tiplerde tedarikçi kodu aranmaz (paket, mamül, hizmet) */
@@ -1118,6 +1300,11 @@ export function ProductsPage() {
       setError('Ürün tipi seçilmeden kayıt yapılamaz.')
       return
     }
+    if (!form.category_id) {
+      setError('Kategori seçilmeden kayıt yapılamaz.')
+      setModalTab('kategori')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -1882,8 +2069,9 @@ export function ProductsPage() {
             {error && <p className="text-sm text-destructive shrink-0">{error}</p>}
             <div className="flex-1 min-h-0 overflow-y-auto">
             <Tabs value={modalTab} onValueChange={setModalTab} className="w-full">
-              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-6' : 'grid-cols-5'}`}>
+              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-7' : 'grid-cols-6'}`}>
                 <TabsTrigger value="genel">Genel</TabsTrigger>
+                <TabsTrigger value="kategori">Kategori</TabsTrigger>
                 <TabsTrigger value="fiyat">Fiyat</TabsTrigger>
                 <TabsTrigger value="gorsel">Görsel</TabsTrigger>
                 {isPackageType && (
@@ -1894,16 +2082,6 @@ export function ProductsPage() {
               </TabsList>
               <TabsContent value="genel" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="category">Kategori</Label>
-                    <CategorySelect
-                      id="category"
-                      value={form.category_id}
-                      onChange={(id) => setForm((f) => ({ ...f, category_id: id }))}
-                      categories={categories}
-                      placeholder="Kategori seçin"
-                    />
-                  </div>
                   <div className="space-y-2">
                       <Label htmlFor="product_item_group">Ürün Grubu</Label>
                     <select
@@ -2040,6 +2218,24 @@ export function ProductsPage() {
                     className="text-right tabular-nums"
                   />
                 </div>
+              </TabsContent>
+              <TabsContent value="kategori" className="mt-4 min-h-[55vh]">
+                <CategoryTreeTab
+                  categories={categories}
+                  value={form.category_id}
+                  onChange={(id) => {
+                    const newPath = getCategoryPath(categories, id)
+                    setForm((f) => {
+                      const newSku = buildProductCode(newPath, brandCode, isPackageType ? '' : (f.supplier_code ?? ''))
+                      return { ...f, category_id: id, sku: newSku || f.sku }
+                    })
+                  }}
+                />
+                {form.category_id && (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    Seçili: {getCategoryPath(categories, form.category_id).map((p) => p.name).join(' › ')}
+                  </p>
+                )}
               </TabsContent>
               <TabsContent value="fiyat" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="space-y-3">
