@@ -41,6 +41,25 @@ import { lookupFromSupplierSource, fetchMatchedSupplierCodesFromBrand } from '@/
 import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/utils'
 import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
 
+/** Dinamik arka plan rengi - style attribute yerine ref ile CSS değişkeni atar (linter uyumlu) */
+function DynamicBgSpan({ color, className, ...rest }: { color: string; className?: string } & React.ComponentPropsWithoutRef<'span'>) {
+  const refFn = useCallback((el: HTMLSpanElement | null) => {
+    if (el) el.style.setProperty('--dynamic-bg', color)
+  }, [color])
+  return <span ref={refFn} className={cn('dynamic-bg', className)} {...rest} />
+}
+
+/** Dinamik arka plan + metin rengi (button) - style attribute yerine ref ile CSS değişkeni atar */
+function DynamicBgFgButton({ bg, fg = '#fff', className, ...rest }: { bg: string; fg?: string; className?: string } & React.ComponentPropsWithoutRef<'button'>) {
+  const refFn = useCallback((el: HTMLButtonElement | null) => {
+    if (el) {
+      el.style.setProperty('--dynamic-bg', bg)
+      el.style.setProperty('--dynamic-fg', fg)
+    }
+  }, [bg, fg])
+  return <button ref={refFn} className={cn('dynamic-bg-fg', className)} {...rest} />
+}
+
 interface Product {
   id: number
   name: string
@@ -1227,7 +1246,7 @@ export function ProductsPage() {
               />
             </div>
             <div
-              role="group"
+              role="radiogroup"
               aria-label="Ürün tipi filtresi"
               className="inline-flex rounded-r-md border border-l-0 border-input bg-muted/30 p-0.5 shrink-0"
             >
@@ -1238,26 +1257,21 @@ export function ProductsPage() {
                   .map((t) => ({ key: String(t.id), label: t.name, color: t.color })),
               ].map(({ key, label, color }) => {
                 const isActive = filterTypeId === key
-                const bgStyle = isActive && color ? { backgroundColor: color, color: '#fff' } : undefined
-                return (
-                  <button
-                    key={key || 'all'}
-                    type="button"
-                    role="radio"
-                    aria-checked={isActive}
-                    aria-label={label}
-                    className={`h-9 px-2.5 text-xs font-medium transition-colors first:rounded-l-none last:rounded-r-md ${
-                      isActive
-                        ? color
-                          ? 'shadow-sm'
-                          : 'bg-background text-foreground shadow-sm'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                    style={bgStyle}
-                    onClick={() => setListState({ filterTypeId: key, page: 1 })}
-                  >
-                    {label}
-                  </button>
+                const btnClass = `h-9 px-2.5 text-xs font-medium transition-colors first:rounded-l-none last:rounded-r-md cursor-pointer inline-flex items-center justify-center ${
+                  isActive && color ? 'dynamic-bg-fg shadow-sm' : isActive
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`
+                const commonProps = {
+                  key: key || 'all',
+                  className: btnClass,
+                  onClick: () => setListState({ filterTypeId: key, page: 1 }),
+                  children: label,
+                }
+                return color ? (
+                  <DynamicBgFgButton {...commonProps} bg={color} type="button" role="radio" aria-label={label} aria-checked={isActive} />
+                ) : (
+                  <button {...commonProps} type="button" role="radio" aria-label={label} aria-checked={isActive} />
                 )
               })}
             </div>
@@ -1524,7 +1538,7 @@ export function ProductsPage() {
                                         )}
                                       >
                                         {groupItem.color ? (
-                                          <span className="shrink-0 w-3 h-3 rounded border" style={{ backgroundColor: groupItem.color }} />
+                                          <DynamicBgSpan color={groupItem.color} className="shrink-0 w-3 h-3 rounded border" />
                                         ) : null}
                                         <span className="truncate font-medium">{groupName}</span>
                                       </button>
@@ -1545,7 +1559,7 @@ export function ProductsPage() {
                                         )}
                                       >
                                         {h.color ? (
-                                          <span className="shrink-0 w-3 h-3 rounded border" style={{ backgroundColor: h.color }} />
+                                          <DynamicBgSpan color={h.color} className="shrink-0 w-3 h-3 rounded border" />
                                         ) : null}
                                         <span className="truncate">
                                           {h.path.length > 1 ? h.path.slice(1).map((p) => p.name).join(' › ') : h.path[0]?.name ?? h.label}
@@ -1691,12 +1705,12 @@ export function ProductsPage() {
                         {item.type_name ? (
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <span
+                              <DynamicBgSpan
+                                color={item.type_color || '#6b7280'}
                                 className="inline-flex h-7 min-w-[1.75rem] items-center justify-center rounded-full px-2 text-xs font-semibold text-white border border-white/20"
-                                style={{ backgroundColor: item.type_color || '#6b7280' }}
                               >
                                 {item.type_name.charAt(0).toUpperCase()}
-                              </span>
+                              </DynamicBgSpan>
                             </TooltipTrigger>
                             <TooltipContent>{item.type_name}</TooltipContent>
                           </Tooltip>
@@ -1823,12 +1837,10 @@ export function ProductsPage() {
                     type="button"
                     className="inline-flex items-center gap-1.5 rounded-full border bg-muted/50 px-3 py-1 text-sm font-medium hover:bg-muted transition-colors"
                   >
-                    {form.type_id && types.find((t) => t.id === form.type_id)?.color && (
-                      <span
-                        className="shrink-0 w-3 h-3 rounded-full border"
-                        style={{ backgroundColor: types.find((t) => t.id === form.type_id)!.color }}
-                      />
-                    )}
+                    {(() => {
+                      const typeColor = form.type_id ? types.find((t) => t.id === form.type_id)?.color : undefined
+                      return typeColor ? <DynamicBgSpan color={typeColor} className="shrink-0 w-3 h-3 rounded-full border" /> : null
+                    })()}
                     {selectedTypeName}
                     <ChevronDown className="h-3.5 w-3.5" />
                   </button>
@@ -1843,12 +1855,9 @@ export function ProductsPage() {
                       onClick={() => setForm((f) => ({ ...f, type_id: t.id, ...(isSkipType ? { supplier_code: '' } : {}) }))}
                       className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent flex items-center gap-2"
                     >
-                      {t.color && (
-                        <span
-                          className="shrink-0 w-3.5 h-3.5 rounded border"
-                          style={{ backgroundColor: t.color }}
-                        />
-                      )}
+                      {t.color ? (
+                        <DynamicBgSpan color={t.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
+                      ) : null}
                       {t.name}
                     </button>
                     )

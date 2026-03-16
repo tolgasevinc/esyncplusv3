@@ -169,3 +169,12 @@
   border-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
 }
 
+/* Dinamik renk utility - JS tarafında --dynamic-bg, --dynamic-fg CSS değişkeni atanır */
+.dynamic-bg {
+  background-color: var(--dynamic-bg);
+}
+.dynamic-bg-fg {
+  background-color: var(--dynamic-bg);
+  color: var(--dynamic-fg);
+}
+
