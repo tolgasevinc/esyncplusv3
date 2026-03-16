@@ -1,0 +1,6 @@
+name = "esyncplusv3"
+compatibility_date = "2024-11-01"
+pages_build_output_dir = "dist"
+
+# Proje adı Cloudflare'da değiştiyse: CLOUDFLARE_PAGES_PROJECT_NAME=yeni-ad npm run deploy:web
+# Veya bu name değerini yeni proje adıyla güncelleyin.

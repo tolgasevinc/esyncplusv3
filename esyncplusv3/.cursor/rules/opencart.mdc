@@ -1,0 +1,52 @@
+---
+description: OpenCart MySQL entegrasyonu - tablo yapıları, API, sayfa kuralları
+globs: apps/web/src/pages/opencart/**/*.tsx, apps/api/src/index.ts
+alwaysApply: false
+---
+
+# OpenCart Entegrasyonu
+
+## Veritabanı
+
+- **MySQL config:** Ayarlar > Veri Aktarımı (category=mysql)
+- **OpenCart DB:** app_settings category=opencart_mysql, key=database (varsayılan: otomati1_opencart)
+- **Ayarlar:** store_url, language_id, store_id, fiyat_getir_price_type, table_prefix (varsayılan: oc_)
+
+## Tablo Yapıları
+
+**Ürün:** oc_product (product_id, model, sku, price, quantity, image, manufacturer_id, status) + oc_product_description (name, description, language_id) + oc_product_to_category + oc_manufacturer (manufacturer_name)
+
+**Kategori:** oc_category + oc_category_description + oc_category_path + oc_category_to_store
+
+**Üretici:** oc_manufacturer (manufacturer_id, name, sort_order)
+
+## API Endpoints
+
+- GET /api/opencart-mysql/products (search, filter_name, filter_model, filter_sku, filter_manufacturer_id, filter_status, filter_matched_sku, sort_by, sort_order, limit, offset)
+- GET /api/opencart-mysql/products/:id
+- PUT /api/opencart-mysql/products/:id (body: name, model, price, quantity, tax_class_id, manufacturer_id, status, categories[])
+- GET /api/opencart-mysql/products/:id/attributes
+- GET /api/opencart-mysql/products/:id/images
+- GET /api/opencart-mysql/products/:id/categories
+- GET /api/opencart-mysql/products/:id/filters
+- GET /api/opencart-mysql/products/:id/options
+- GET /api/opencart-mysql/products/:id/related
+- GET /api/opencart-mysql/categories
+- GET /api/opencart-mysql/manufacturers
+- GET /api/opencart-mysql/attributes
+
+## Sayfa Kuralları
+
+- **Ana içerik:** Ürün listesi (SKU, Ad, Fiyat sağ yaslı bold para sembollü, Eşleşme)
+- **Eşleşme:** Ana ürünler (products) ile SKU üzerinden kontrol
+- **Üst bar:** Arama kutusu solda, sağında dropdown ile diğer tablolar (Kategoriler, Üreticiler vb.) — her biri modal ile açılır
+- **Satır tıklama:** Detay modal (büyük, sekmeli) — her alt tablo için sekme (Genel, Öznitelikler, Görseller, Kategoriler vb.)
+--
+
+--
+**Detay Modal Sekmeler**
+- Genel : Adı, Kod (Model), Fiyat, Stok, KDV, Üretici, Kategoriler (otomatik tamamlama ile eklenip, çıkarılabilir.)
+- Görsel : Main Image (product tablosundaki ana görsel) ve product_image tablosundaki diğer görseller avatar boyu, tıklanırsa büyük önizleme ve sıralaması değiştirilebilir. silinebilir, tıklayarak eklenebilir veya ana tablodan geçilebilir) tüm görseller ana üründen çekilebilir.
+- Filtreler, Özellik, Seçenek bir sekmede olacak sekmenin adını sen bul
+- SEO: Adı, Açıklama, tag, meta_title, meta_keywords, h1, h2, h3, image_title, image_alt, bilgi
+- Benzer Ürünler sekmesi

@@ -1,0 +1,33 @@
+---
+description: Sayfa tasarım kuralları - sabit footer, Kaydet butonları footer'da
+globs: apps/web/src/pages/**/*.tsx
+alwaysApply: false
+---
+
+# Sayfa Tasarım Kuralları
+
+`notes/notes-pages.md` dosyasındaki kurallara uy.
+
+## Footer
+
+- **Sabit footer** her sayfada olacak (PageLayout ile).
+- **Form/ayar sayfalarında** Kaydet vb. butonlar **footer'da sağa yaslı** olacak.
+- `PageLayout` bileşenine `footerActions` prop'u ile geçir:
+
+```tsx
+<PageLayout
+  title="..."
+  footerActions={
+    <Button variant="save" onClick={handleSave} disabled={saving}>
+      {saving ? 'Kaydediliyor...' : 'Kaydet'}
+    </Button>
+  }
+>
+```
+
+- Kaydet butonlarını Card veya form içine koyma; footer'a taşı.
+
+## Kart/Liste Sayfaları
+
+- Footer sol: `footerContent` ile sayfalama ve kayıt sayıları (TablePaginationFooter).
+- Footer sağ: copyright (footerActions yoksa).

@@ -1,0 +1,104 @@
+import { lazy, Suspense } from 'react'
+import { Toaster } from 'sonner'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import { AppLayout } from '@/components/layout/AppLayout'
+import { ThemeLoader } from '@/components/ThemeLoader'
+import { HomePage } from '@/pages/HomePage'
+import { SettingsPage } from '@/pages/SettingsPage'
+import { ParametersPage } from '@/pages/ParametersPage'
+import { ParasutPage } from '@/pages/ParasutPage'
+
+const MarkalarPage = lazy(() => import('@/pages/parameters/MarkalarPage').then((m) => ({ default: m.MarkalarPage })))
+const BirimlerPage = lazy(() => import('@/pages/parameters/BirimlerPage').then((m) => ({ default: m.BirimlerPage })))
+const GruplarPage = lazy(() => import('@/pages/parameters/GruplarPage').then((m) => ({ default: m.GruplarPage })))
+const KategorilerPage = lazy(() => import('@/pages/parameters/KategorilerPage').then((m) => ({ default: m.KategorilerPage })))
+const UrunTipleriPage = lazy(() => import('@/pages/parameters/UrunTipleriPage').then((m) => ({ default: m.UrunTipleriPage })))
+const UrunGruplariPage = lazy(() => import('@/pages/parameters/UrunGruplariPage').then((m) => ({ default: m.UrunGruplariPage })))
+const ParaBirimleriPage = lazy(() => import('@/pages/parameters/ParaBirimleriPage').then((m) => ({ default: m.ParaBirimleriPage })))
+const FiyatTipleriPage = lazy(() => import('@/pages/parameters/FiyatTipleriPage').then((m) => ({ default: m.FiyatTipleriPage })))
+const VergiOranlariPage = lazy(() => import('@/pages/parameters/VergiOranlariPage').then((m) => ({ default: m.VergiOranlariPage })))
+const MusteriTipleriPage = lazy(() => import('@/pages/parameters/MusteriTipleriPage').then((m) => ({ default: m.MusteriTipleriPage })))
+const MusteriGruplariPage = lazy(() => import('@/pages/parameters/MusteriGruplariPage').then((m) => ({ default: m.MusteriGruplariPage })))
+const YasalTiplerPage = lazy(() => import('@/pages/parameters/YasalTiplerPage').then((m) => ({ default: m.YasalTiplerPage })))
+const SuppliersPage = lazy(() => import('@/pages/parameters/SuppliersPage').then((m) => ({ default: m.SuppliersPage })))
+const DiaPage = lazy(() => import('@/pages/DiaPage').then((m) => ({ default: m.DiaPage })))
+const DiaCariKartlarPage = lazy(() => import('@/pages/parameters/dia/DiaCariKartlarPage').then((m) => ({ default: m.DiaCariKartlarPage })))
+const DiaVergiDaireleriPage = lazy(() => import('@/pages/parameters/dia/DiaVergiDaireleriPage').then((m) => ({ default: m.DiaVergiDaireleriPage })))
+const CustomersPage = lazy(() => import('@/pages/customers/CustomersPage').then((m) => ({ default: m.CustomersPage })))
+const TekliflerPage = lazy(() => import('@/pages/offers/TekliflerPage').then((m) => ({ default: m.TekliflerPage })))
+const ProductsPage = lazy(() => import('@/pages/products/ProductsPage').then((m) => ({ default: m.ProductsPage })))
+const EDocumentsPage = lazy(() => import('@/pages/documents/EDocumentsPage').then((m) => ({ default: m.EDocumentsPage })))
+const SettingsGeneralPage = lazy(() => import('@/pages/settings/SettingsGeneralPage').then((m) => ({ default: m.SettingsGeneralPage })))
+const SettingsDatabasePage = lazy(() => import('@/pages/settings/SettingsDatabasePage').then((m) => ({ default: m.SettingsDatabasePage })))
+const SettingsStoragePage = lazy(() => import('@/pages/settings/SettingsStoragePage').then((m) => ({ default: m.SettingsStoragePage })))
+const SettingsIntegrationsPage = lazy(() => import('@/pages/settings/SettingsIntegrationsPage').then((m) => ({ default: m.SettingsIntegrationsPage })))
+const SettingsCalculationsPage = lazy(() => import('@/pages/settings/SettingsCalculationsPage').then((m) => ({ default: m.SettingsCalculationsPage })))
+const SettingsAccessPage = lazy(() => import('@/pages/settings/SettingsAccessPage').then((m) => ({ default: m.SettingsAccessPage })))
+const SettingsSuppliersPage = lazy(() => import('@/pages/settings/SettingsSuppliersPage').then((m) => ({ default: m.SettingsSuppliersPage })))
+const SettingsDataTransferPage = lazy(() => import('@/pages/settings/SettingsDataTransferPage').then((m) => ({ default: m.SettingsDataTransferPage })))
+const SettingsFileManagerPage = lazy(() => import('@/pages/settings/SettingsFileManagerPage').then((m) => ({ default: m.SettingsFileManagerPage })))
+const SettingsExchangeRatesPage = lazy(() => import('@/pages/settings/SettingsExchangeRatesPage').then((m) => ({ default: m.SettingsExchangeRatesPage })))
+const SettingsMarketplacePage = lazy(() => import('@/pages/settings/SettingsMarketplacePage').then((m) => ({ default: m.SettingsMarketplacePage })))
+const OpenCartPage = lazy(() => import('@/pages/opencart/OpenCartPage').then((m) => ({ default: m.OpenCartPage })))
+const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPage').then((m) => ({ default: m.ParasutProductsPage })))
+function App() {
+  return (
+    <>
+      <ThemeLoader />
+      <Toaster richColors position="bottom-right" />
+      <AppLayout>
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+      <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground">Yükleniyor...</div>}>
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/parasut" element={<ParasutPage />} />
+        <Route path="/parasut/products" element={<ParasutProductsPage />} />
+        <Route path="/ayarlar" element={<SettingsPage />} />
+        <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
+        <Route path="/ayarlar/veritabani" element={<SettingsDatabasePage />} />
+        <Route path="/ayarlar/depolama" element={<SettingsStoragePage />} />
+        <Route path="/ayarlar/entegrasyonlar" element={<SettingsIntegrationsPage />} />
+        <Route path="/ayarlar/hesaplamalar" element={<SettingsCalculationsPage />} />
+        <Route path="/ayarlar/erisim" element={<SettingsAccessPage />} />
+        <Route path="/ayarlar/tedarikciler" element={<SettingsSuppliersPage />} />
+        <Route path="/ayarlar/veri-aktarimi" element={<SettingsDataTransferPage />} />
+        <Route path="/ayarlar/dosya-yoneticisi" element={<SettingsFileManagerPage />} />
+        <Route path="/ayarlar/doviz-kurlari" element={<SettingsExchangeRatesPage />} />
+        <Route path="/ayarlar/marketplace" element={<SettingsMarketplacePage />} />
+        <Route path="/parametreler" element={<ParametersPage />} />
+        <Route path="/parametreler/markalar" element={<MarkalarPage />} />
+        <Route path="/parametreler/birimler" element={<BirimlerPage />} />
+        <Route path="/parametreler/gruplar" element={<GruplarPage />} />
+        <Route path="/parametreler/kategoriler" element={<KategorilerPage />} />
+        <Route path="/parametreler/urun-tipleri" element={<UrunTipleriPage />} />
+        <Route path="/parametreler/urun-gruplari" element={<UrunGruplariPage />} />
+        <Route path="/parametreler/para-birimleri" element={<ParaBirimleriPage />} />
+        <Route path="/parametreler/fiyat-tipleri" element={<FiyatTipleriPage />} />
+        <Route path="/parametreler/vergi-oranlari" element={<VergiOranlariPage />} />
+        <Route path="/parametreler/musteri-gruplari" element={<MusteriGruplariPage />} />
+        <Route path="/parametreler/musteri-tipleri" element={<MusteriTipleriPage />} />
+        <Route path="/parametreler/yasal-tipler" element={<YasalTiplerPage />} />
+        <Route path="/parametreler/tedarikciler" element={<SuppliersPage />} />
+        <Route path="/dia" element={<DiaPage />} />
+        <Route path="/dia/cari-kartlar" element={<DiaCariKartlarPage />} />
+        <Route path="/dia/vergi-daireleri" element={<DiaVergiDaireleriPage />} />
+        <Route path="/parametreler/dia" element={<Navigate to="/dia" replace />} />
+        <Route path="/parametreler/dia/cari-kartlar" element={<Navigate to="/dia/cari-kartlar" replace />} />
+        <Route path="/parametreler/dia/vergi-daireleri" element={<Navigate to="/dia/vergi-daireleri" replace />} />
+        <Route path="/customers" element={<CustomersPage />} />
+        <Route path="/musteriler" element={<Navigate to="/customers" replace />} />
+        <Route path="/teklifler" element={<TekliflerPage />} />
+        <Route path="/products" element={<ProductsPage />} />
+        <Route path="/urunler" element={<Navigate to="/products" replace />} />
+        <Route path="/e-documents" element={<EDocumentsPage />} />
+        <Route path="/opencart" element={<OpenCartPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+      </Suspense>
+      </div>
+    </AppLayout>
+    </>
+  )
+}
+
+export default App

@@ -1,0 +1,30 @@
+{
+  "name": "project-v3",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "npm run dev -w api",
+    "dev:web": "npm run dev -w web",
+    "dev:web-only": "npm run dev -w web",
+    "dev:remote": "concurrently \"npm run dev:api:remote\" \"npm run dev:web\"",
+    "dev:api:remote": "npm run dev:remote -w api",
+    "build": "npm run build -w api && npm run build -w web",
+    "deploy:api": "npm run deploy -w api",
+    "deploy:web": "npm run deploy -w web",
+    "deploy": "npm run deploy:api && npm run deploy:web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "wrangler": "^4.70.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@radix-ui/react-switch": "^1.2.6"
+  }
+}

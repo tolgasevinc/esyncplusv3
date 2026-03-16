@@ -1,0 +1,171 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 97%;
+    --foreground: 222.2 84% 4.9%;
+    --sidebar: 220 14% 88%;
+    --sidebar-foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --card-header: 220 10% 94%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 94%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 88%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --sidebar: 222.2 84% 3.5%;
+    --sidebar-foreground: 210 40% 98%;
+    --card: 220 10% 12%;
+    --card-foreground: 210 40% 98%;
+    --card-header: 220 10% 16%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 15%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 14%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+  }
+}
+
+@keyframes loading-slider {
+  0%, 100% { transform: translateX(-100%); }
+  50% { transform: translateX(200%); }
+}
+
+@keyframes row-highlight {
+  0% { background-color: rgb(34 197 94 / 0.4); }
+  70% { background-color: rgb(34 197 94 / 0.15); }
+  100% { background-color: transparent; }
+}
+
+.animate-row-highlight {
+  animation: row-highlight 2.5s ease-out forwards;
+}
+
+/* Loader - zıplayan kare animasyonu */
+@keyframes loader-jump {
+  15% { border-bottom-right-radius: 3px; }
+  25% { transform: translateY(9px) rotate(22.5deg); }
+  50% { transform: translateY(18px) scale(1, 0.9) rotate(45deg); border-bottom-right-radius: 40px; }
+  75% { transform: translateY(9px) rotate(67.5deg); }
+  100% { transform: translateY(0) rotate(90deg); }
+}
+
+@keyframes loader-shadow {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.2, 1); }
+}
+
+.loader-bounce {
+  width: 48px;
+  height: 48px;
+  margin: auto;
+  position: relative;
+}
+
+.loader-bounce::before {
+  content: '';
+  width: 48px;
+  height: 5px;
+  background: rgb(240 128 128 / 0.31);
+  position: absolute;
+  top: 60px;
+  left: 0;
+  border-radius: 50%;
+  animation: loader-shadow 0.5s linear infinite;
+}
+
+.loader-bounce::after {
+  content: '';
+  width: 100%;
+  height: 100%;
+  background: #f08080;
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 4px;
+  animation: loader-jump 0.5s linear infinite;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Tema özelleştirmeleri - CSS değişkenleri (boşsa varsayılan kullanılır) */
+.theme-page-bg { background-color: var(--theme-page-bg, hsl(var(--background))); }
+.theme-body-bg { background-color: var(--theme-body-bg, hsl(var(--background))); }
+.theme-footer-bg { background-color: var(--theme-footer-bg, hsl(var(--background))); }
+.theme-sidebar-bg { background-color: var(--theme-sidebar-bg, hsl(var(--sidebar))); }
+.theme-sidebar-text { color: var(--theme-sidebar-text, hsl(var(--sidebar-foreground))); }
+.theme-sidebar-header-bg { background-color: var(--theme-sidebar-header-bg, hsl(var(--sidebar))); }
+.theme-sidebar-footer-bg { background-color: var(--theme-sidebar-footer-bg, hsl(var(--sidebar))); }
+
+/* Buton tema renkleri - variant ile kullanılır */
+.btn-theme-save {
+  background-color: var(--theme-btn-save, hsl(var(--primary))) !important;
+  color: var(--theme-btn-save-fg, hsl(var(--primary-foreground))) !important;
+  border-color: var(--theme-btn-save, hsl(var(--primary))) !important;
+}
+.btn-theme-save:hover {
+  background-color: var(--theme-btn-save-hover, color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)) !important;
+  border-color: var(--theme-btn-save-hover, color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)) !important;
+}
+.btn-theme-close {
+  background-color: transparent !important;
+  color: var(--theme-btn-close, hsl(var(--foreground))) !important;
+  border-color: var(--theme-btn-close, hsl(var(--input))) !important;
+}
+.btn-theme-close:hover {
+  background-color: var(--theme-btn-close-hover, hsl(var(--accent))) !important;
+}
+.btn-theme-update {
+  background-color: var(--theme-btn-update, hsl(var(--primary))) !important;
+  color: var(--theme-btn-update-fg, hsl(var(--primary-foreground))) !important;
+  border-color: var(--theme-btn-update, hsl(var(--primary))) !important;
+}
+.btn-theme-update:hover {
+  background-color: var(--theme-btn-update-hover, color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)) !important;
+  border-color: var(--theme-btn-update-hover, color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)) !important;
+}
+.btn-theme-delete {
+  background-color: var(--theme-btn-delete, hsl(var(--destructive))) !important;
+  color: var(--theme-btn-delete-fg, hsl(var(--destructive-foreground))) !important;
+  border-color: var(--theme-btn-delete, hsl(var(--destructive))) !important;
+}
+.btn-theme-delete:hover {
+  background-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
+  border-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
+}
+

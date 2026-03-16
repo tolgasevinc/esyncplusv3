@@ -1,0 +1,7 @@
+# Assets (hash'li dosyalar) uzun süre cache'lensin
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# SPA sayfaları (/, /products vb.) her seferinde güncel HTML
+/*
+  Cache-Control: no-cache, no-store, must-revalidate
