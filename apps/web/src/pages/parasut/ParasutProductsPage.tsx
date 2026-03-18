@@ -229,15 +229,6 @@ export function ParasutProductsPage() {
     setAddMasterForm((f) => ({ ...f, sku: addMasterGeneratedSku }))
   }, [addMasterGeneratedSku, pullModalProduct])
 
-  const getParasutValueForMaster = useCallback((parasut: string, product: ParasutProduct | null): string => {
-    if (!product) return ''
-    const p = product as ParasutProduct & { gtip?: string; photo?: string }
-    const v = p[parasut as keyof ParasutProduct]
-    if (v == null || v === '') return ''
-    if (typeof v === 'number') return String(v)
-    return String(v).trim()
-  }, [])
-
   const getFieldLabel = (parasut: string, master: string) => {
     const pLabel = PARASUT_FIELDS.find((f) => f.value === parasut)?.label ?? parasut
     const mLabel = MASTER_PRODUCT_FIELDS.find((f) => f.value === master)?.label ?? master

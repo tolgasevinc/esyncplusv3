@@ -11,6 +11,8 @@ export type PdfBlockType =
   | 'offer_notes'
   | 'footer'
   | 'image'
+  | 'text'
+  | 'qr_code'
 
 /** Tek bir PDF blok tanımı */
 export type PdfBlock = {
@@ -24,6 +26,10 @@ export type PdfBlock = {
   fontSize: number
   fontFamily?: string
   fontColor?: string
+  fontWeight?: 'normal' | 'bold'
+  fontStyle?: 'normal' | 'italic'
+  textDecoration?: 'none' | 'underline'
+  textAlign?: 'left' | 'center' | 'right'
   visible: boolean
   // company
   logo_url?: string
@@ -37,6 +43,10 @@ export type PdfBlock = {
   footer_text?: string
   // image (R2 assets)
   image_key?: string
+  // text (serbest metin bloğu)
+  text_content?: string
+  // qr_code (QR kod - encode edilecek metin/URL)
+  qr_content?: string
 }
 
 /** Layout config - bloklar dizisi */
@@ -53,19 +63,112 @@ export const BLOCK_TYPE_LABELS: Record<PdfBlockType, string> = {
   offer_notes: 'Teklif Notları',
   footer: 'Alt Antet Bilgileri',
   image: 'Görsel Bloğu',
+  text: 'Yazı Bloğu',
+  qr_code: 'QR Kod',
 }
 
-/** Yaygın yazı tipleri */
+/** Google Fonts listesi - teklif çıktısında kullanılabilir yazı tipleri */
 export const FONT_FAMILIES = [
-  'Arial',
-  'Helvetica',
-  'Times New Roman',
-  'Georgia',
-  'Verdana',
-  'Tahoma',
-  'Trebuchet MS',
-  'system-ui',
-  'sans-serif',
+  'Roboto',
+  'Open Sans',
+  'Inter',
+  'Montserrat',
+  'Poppins',
+  'Lato',
+  'Source Sans 3',
+  'Raleway',
+  'Ubuntu',
+  'Nunito',
+  'Work Sans',
+  'DM Sans',
+  'Merriweather',
+  'Playfair Display',
+  'Oswald',
+  'PT Sans',
+  'Roboto Condensed',
+  'Roboto Mono',
+  'Arimo',
+  'Bebas Neue',
+  'Barlow',
+  'Barlow Condensed',
+  'Fira Sans',
+  'Libre Baskerville',
+  'Libre Franklin',
+  'Manrope',
+  'Mukta',
+  'Noto Sans',
+  'Noto Serif',
+  'Outfit',
+  'Plus Jakarta Sans',
+  'Quicksand',
+  'Rajdhani',
+  'Red Hat Display',
+  'Rubik',
+  'Sora',
+  'Space Grotesk',
+  'Titillium Web',
+  'Urbanist',
+  'Vollkorn',
+  'Yanone Kaffeesatz',
+  'Zilla Slab',
+  'Crimson Text',
+  'EB Garamond',
+  'Inconsolata',
+  'Josefin Sans',
+  'Karla',
+  'Lexend',
+  'Lora',
+  'Mulish',
+  'Nunito Sans',
+  'Oxygen',
+  'Palanquin',
+  'Prompt',
+  'Public Sans',
+  'Readex Pro',
+  'Sarabun',
+  'Sen',
+  'Source Serif 4',
+  'Spectral',
+  'Syne',
+  'Tinos',
+  'Trirong',
+  'Varela Round',
+  'Abel',
+  'Acme',
+  'Almarai',
+  'Archivo',
+  'Asap',
+  'Bitter',
+  'Cabin',
+  'Cairo',
+  'Comfortaa',
+  'Dancing Script',
+  'Dosis',
+  'Exo 2',
+  'Figtree',
+  'Hind',
+  'IBM Plex Sans',
+  'IBM Plex Serif',
+  'Kanit',
+  'Kreon',
+  'Lilita One',
+  'Martel',
+  'Maven Pro',
+  'Oleo Script',
+  'Pacifico',
+  'Permanent Marker',
+  'Philosopher',
+  'Raleway Dots',
+  'Righteous',
+  'Roboto Slab',
+  'Satisfy',
+  'Shadows Into Light',
+  'Signika',
+  'Staatliches',
+  'Tajawal',
+  'Ubuntu Condensed',
+  'Unbounded',
+  'Vollkorn SC',
 ]
 
 /** Yeni blok varsayılan değerleri */
@@ -80,8 +183,12 @@ export function createDefaultBlock(type: PdfBlockType, sortOrder: number): PdfBl
     width: 170,
     height: 40,
     fontSize: 11,
-    fontFamily: 'Arial',
+    fontFamily: 'Roboto',
     fontColor: '#000000',
+    fontWeight: 'normal' as const,
+    fontStyle: 'normal' as const,
+    textDecoration: 'none' as const,
+    textAlign: 'left' as const,
     visible: true,
   }
   switch (type) {
@@ -99,6 +206,10 @@ export function createDefaultBlock(type: PdfBlockType, sortOrder: number): PdfBl
       return { ...base, x: 20, y: 260, width: 170, height: 35, fontSize: 9 }
     case 'image':
       return { ...base, x: 20, y: 20, width: 60, height: 40 }
+    case 'text':
+      return { ...base, x: 20, y: 20, width: 170, height: 30, text_content: 'Serbest metin' }
+    case 'qr_code':
+      return { ...base, x: 20, y: 20, width: 40, height: 40, qr_content: 'https://example.com' }
     default:
       return base as PdfBlock
   }
@@ -129,6 +240,10 @@ function migrateLegacyToBlocks(legacy: Record<string, unknown>): PdfBlock[] {
       fontSize: (v.fontSize as number) ?? 11,
       fontFamily: (v.fontFamily as string) || 'Arial',
       fontColor: (v.fontColor as string) || '#000000',
+      fontWeight: (v.fontWeight as 'normal' | 'bold') || 'normal',
+      fontStyle: (v.fontStyle as 'normal' | 'italic') || 'normal',
+      textDecoration: (v.textDecoration as 'none' | 'underline') || 'none',
+      textAlign: (v.textAlign as 'left' | 'center' | 'right') || 'left',
       visible: (v.visible as boolean) !== false,
       logo_url: v.logo_url as string | undefined,
       logo_width: v.logo_width as number | undefined,

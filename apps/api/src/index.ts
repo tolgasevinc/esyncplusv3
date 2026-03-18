@@ -3684,6 +3684,10 @@ type PdfBlockApi = {
   fontSize: number;
   fontFamily?: string;
   fontColor?: string;
+  fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
+  textDecoration?: 'none' | 'underline';
+  textAlign?: 'left' | 'center' | 'right';
   visible: boolean;
   logo_url?: string;
   logo_width?: number;
@@ -3694,21 +3698,65 @@ type PdfBlockApi = {
   company_tax_office?: string;
   footer_text?: string;
   image_key?: string;
+  text_content?: string;
+  qr_content?: string;
 };
 
-function blockCss(b: PdfBlockApi, isImage = false): string {
+/** Google Fonts - teklif çıktısında kullanılabilir yazı tipleri */
+const GOOGLE_FONTS = new Set([
+  'Roboto', 'Open Sans', 'Inter', 'Montserrat', 'Poppins', 'Lato', 'Source Sans 3', 'Raleway', 'Ubuntu', 'Nunito',
+  'Work Sans', 'DM Sans', 'Merriweather', 'Playfair Display', 'Oswald', 'PT Sans', 'Roboto Condensed', 'Roboto Mono',
+  'Arimo', 'Bebas Neue', 'Barlow', 'Barlow Condensed', 'Fira Sans', 'Libre Baskerville', 'Libre Franklin', 'Manrope',
+  'Mukta', 'Noto Sans', 'Noto Serif', 'Outfit', 'Plus Jakarta Sans', 'Quicksand', 'Rajdhani', 'Red Hat Display',
+  'Rubik', 'Sora', 'Space Grotesk', 'Titillium Web', 'Urbanist', 'Vollkorn', 'Yanone Kaffeesatz', 'Zilla Slab',
+  'Crimson Text', 'EB Garamond', 'Inconsolata', 'Josefin Sans', 'Karla', 'Lexend', 'Lora', 'Mulish', 'Nunito Sans',
+  'Oxygen', 'Palanquin', 'Prompt', 'Public Sans', 'Readex Pro', 'Sarabun', 'Sen', 'Source Serif 4', 'Spectral',
+  'Syne', 'Tinos', 'Trirong', 'Varela Round', 'Abel', 'Acme', 'Almarai', 'Archivo', 'Asap', 'Bitter', 'Cabin', 'Cairo',
+  'Comfortaa', 'Dancing Script', 'Dosis', 'Exo 2', 'Figtree', 'Hind', 'IBM Plex Sans', 'IBM Plex Serif', 'Kanit',
+  'Kreon', 'Lilita One', 'Martel', 'Maven Pro', 'Oleo Script', 'Pacifico', 'Permanent Marker', 'Philosopher',
+  'Raleway Dots', 'Righteous', 'Roboto Slab', 'Satisfy', 'Shadows Into Light', 'Signika', 'Staatliches', 'Tajawal',
+  'Ubuntu Condensed', 'Unbounded', 'Vollkorn SC',
+]);
+
+function fontFamilyCss(fontFamily: string | undefined): string {
+  const ff = (fontFamily?.trim() || 'Roboto').replace(/'/g, "\\'");
+  return `'${ff}', sans-serif`;
+}
+
+function buildGoogleFontsLink(blocks: PdfBlockApi[], alwaysIncludeDefault = false): string {
+  const fonts = new Set<string>();
+  let hasTextBlocks = false;
+  for (const b of blocks) {
+    if (b.type === 'image' || b.type === 'qr_code') continue;
+    hasTextBlocks = true;
+    const ff = (b.fontFamily || 'Roboto').trim();
+    if (ff) fonts.add(ff);
+  }
+  if (!hasTextBlocks && !alwaysIncludeDefault) return '';
+  if (fonts.size === 0) fonts.add('Roboto');
+  const familyParam = [...fonts].map((f) => `family=${f.replace(/ /g, '+')}:ital,wght@0,400;0,700;1,400;1,700`).join('&');
+  return `<link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link rel="stylesheet" href="https://fonts.googleapis.com/css2?${familyParam}&amp;display=swap" />`;
+}
+
+function blockCss(b: PdfBlockApi, isImage = false, showBlockBorders = false): string {
   if (!b || b.visible === false) return '';
   const x = b.x ?? 20;
   const y = b.y ?? 20;
   const w = b.width ?? 80;
   const h = b.height ?? 40;
+  const borderStyle = showBlockBorders ? 'border:1px dashed #64748b;' : '';
   if (isImage) {
-    return `position:absolute;left:${x}mm;top:${y}mm;width:${w}mm;height:${h}mm;box-sizing:border-box;overflow:hidden;`;
+    return `position:absolute;left:${x}mm;top:${y}mm;width:${w}mm;height:${h}mm;box-sizing:border-box;overflow:hidden;${borderStyle}`;
   }
   const fs = b.fontSize ?? 11;
-  const ff = b.fontFamily || 'Arial';
+  const ff = fontFamilyCss(b.fontFamily);
   const fc = b.fontColor || '#000000';
-  return `position:absolute;left:${x}mm;top:${y}mm;width:${w}mm;min-height:${h}mm;font-size:${fs}px;font-family:${ff};color:${fc};box-sizing:border-box;padding:4px;`;
+  const fw = b.fontWeight === 'bold' ? 'bold' : 'normal';
+  const fst = b.fontStyle === 'italic' ? 'italic' : 'normal';
+  const td = b.textDecoration === 'underline' ? 'underline' : 'none';
+  const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+  const sizeStyle = showBlockBorders ? `height:${h}mm;overflow:auto;` : `min-height:${h}mm;`;
+  return `position:absolute;left:${x}mm;top:${y}mm;width:${w}mm;${sizeStyle}font-size:${fs}px;font-family:${ff};font-weight:${fw};font-style:${fst};text-decoration:${td};text-align:${ta};color:${fc};box-sizing:border-box;padding:4px;${borderStyle}`;
 }
 
 function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
@@ -3730,6 +3778,10 @@ function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
       fontSize: (v.fontSize as number) ?? 11,
       fontFamily: (v.fontFamily as string) || 'Arial',
       fontColor: (v.fontColor as string) || '#000000',
+      fontWeight: (v.fontWeight as 'normal' | 'bold') || 'normal',
+      fontStyle: (v.fontStyle as 'normal' | 'italic') || 'normal',
+      textDecoration: (v.textDecoration as 'none' | 'underline') || 'none',
+      textAlign: (v.textAlign as 'left' | 'center' | 'right') || 'left',
       visible: (v.visible as boolean) !== false,
       logo_url: v.logo_url as string | undefined,
       logo_width: v.logo_width as number | undefined,
@@ -3752,12 +3804,45 @@ function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
   return blocks.sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
+function normalizeBlock(b: Record<string, unknown>): PdfBlockApi {
+  const type = (b.type as string) || 'text';
+  return {
+    id: (b.id as string) || `block-${Date.now()}`,
+    type,
+    sortOrder: (b.sortOrder as number) ?? 0,
+    x: (b.x as number) ?? 20,
+    y: (b.y as number) ?? 20,
+    width: (b.width as number) ?? 80,
+    height: (b.height as number) ?? 40,
+    fontSize: (b.fontSize as number) ?? 11,
+    fontFamily: (b.fontFamily as string) || 'Roboto',
+    fontColor: (b.fontColor as string) || '#000000',
+    fontWeight: (b.fontWeight as 'normal' | 'bold') || 'normal',
+    fontStyle: (b.fontStyle as 'normal' | 'italic') || 'normal',
+    textDecoration: (b.textDecoration as 'none' | 'underline') || 'none',
+    textAlign: (b.textAlign as 'left' | 'center' | 'right') || 'left',
+    visible: (b.visible as boolean) !== false,
+    logo_url: b.logo_url as string | undefined,
+    logo_width: b.logo_width as number | undefined,
+    logo_height: b.logo_height as number | undefined,
+    company_name: b.company_name as string | undefined,
+    company_address: b.company_address as string | undefined,
+    company_phone: b.company_phone as string | undefined,
+    company_tax_office: b.company_tax_office as string | undefined,
+    footer_text: b.footer_text as string | undefined,
+    image_key: b.image_key as string | undefined,
+    text_content: b.text_content as string | undefined,
+    qr_content: b.qr_content as string | undefined,
+  };
+}
+
 function parseBlocksConfig(raw: string | undefined): PdfBlockApi[] {
   if (!raw?.trim()) return [];
   try {
-    const parsed = JSON.parse(raw) as { blocks?: PdfBlockApi[] } | Record<string, unknown>;
-    if (parsed && Array.isArray((parsed as { blocks?: PdfBlockApi[] }).blocks)) {
-      return ((parsed as { blocks: PdfBlockApi[] }).blocks || []).filter((b) => b);
+    const parsed = JSON.parse(raw) as { blocks?: unknown[] } | Record<string, unknown>;
+    if (parsed && Array.isArray((parsed as { blocks?: unknown[] }).blocks)) {
+      const blocks = ((parsed as { blocks: unknown[] }).blocks || []).filter(Boolean) as Record<string, unknown>[];
+      return blocks.map(normalizeBlock).sort((a, b) => a.sortOrder - b.sortOrder);
     }
     return migrateLegacyBlocks((parsed || {}) as Record<string, unknown>);
   } catch {
@@ -3785,9 +3870,23 @@ app.get('/api/offers/sample/pdf', async (c) => {
     for (const b of blocks) {
       if (b.visible === false) continue;
       const isImageBlock = b.type === 'image';
-      const style = blockCss(b, isImageBlock);
+      const isQrBlock = b.type === 'qr_code';
+      const style = blockCss(b, isImageBlock || isQrBlock, true);
       let content = '';
       switch (b.type) {
+        case 'text':
+          content = b.text_content ? escapeHtml(b.text_content).replace(/\n/g, '<br/>') : '';
+          break;
+        case 'qr_code': {
+          const qrData = b.qr_content || '';
+          const qrUrl = qrData
+            ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`
+            : '';
+          if (qrUrl) {
+            content = `<img src="${escapeHtml(qrUrl)}" alt="QR" style="width:100%;height:100%;object-fit:contain;" />`;
+          }
+          break;
+        }
         case 'image': {
           const imgKey = b.image_key || '';
           const imgSrc = imgKey ? await storagePathToDataUrl(c.env.STORAGE, imgKey) : null;
@@ -3821,15 +3920,17 @@ app.get('/api/offers/sample/pdf', async (c) => {
         default:
           content = '';
       }
-      if (content || isImageBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
+      if (content || isImageBlock || isQrBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
     }
     if (blocks.length === 0) {
-      blocksHtml = `<div style="margin:20mm">${sampleTable}</div>`;
+      blocksHtml = `<div style="margin:20mm;font-family:inherit">${sampleTable}</div>`;
     }
+    const googleFontsLink = buildGoogleFontsLink(blocks, true);
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Örnek Teklif</title>
-<style>body{font-family:system-ui,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:210mm;min-height:297mm;box-sizing:border-box}
-.block{box-sizing:border-box}
-table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}
+${googleFontsLink}
+<style>body{font-family:"Roboto","Helvetica Neue",Arial,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:210mm;min-height:297mm;box-sizing:border-box}
+.block{box-sizing:border-box;font-family:inherit}
+table{width:100%;border-collapse:collapse;font-family:inherit}th,td{border:1px solid #333;padding:6px;text-align:left;font-family:inherit}th{background:#eee}
 .text-right{text-align:right}.text-center{text-align:center}</style></head><body>
 ${blocksHtml}
 </body></html>`;
@@ -3990,9 +4091,23 @@ ${offer.project_name ? `<p style="margin-top:1rem"><strong>Proje:</strong> ${esc
     for (const b of blocks) {
       if (b.visible === false) continue;
       const isImageBlock = b.type === 'image';
-      const style = blockCss(b, isImageBlock);
+      const isQrBlock = b.type === 'qr_code';
+      const style = blockCss(b, isImageBlock || isQrBlock);
       let content = '';
       switch (b.type) {
+        case 'text':
+          content = b.text_content ? escapeHtml(b.text_content).replace(/\n/g, '<br/>') : '';
+          break;
+        case 'qr_code': {
+          const qrData = b.qr_content || '';
+          const qrUrl = qrData
+            ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`
+            : '';
+          if (qrUrl) {
+            content = `<img src="${escapeHtml(qrUrl)}" alt="QR" style="width:100%;height:100%;object-fit:contain;" />`;
+          }
+          break;
+        }
         case 'image': {
           const imgKey = b.image_key || '';
           const imgSrc = imgKey ? await storagePathToDataUrl(c.env.STORAGE, imgKey) : null;
@@ -4028,15 +4143,17 @@ ${offer.project_name ? `<p style="margin-top:1rem"><strong>Proje:</strong> ${esc
         default:
           content = '';
       }
-      if (content || isImageBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
+      if (content || isImageBlock || isQrBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
     }
     if (blocks.length === 0) {
-      blocksHtml = `<div style="margin:20mm">${notesHtml ? `<div class="notes" style="margin-bottom:1rem">${notesHtml}</div>` : ''}${dahilHaricHtml}${itemsTableHtml}</div>`;
+      blocksHtml = `<div style="margin:20mm;font-family:inherit">${notesHtml ? `<div class="notes" style="margin-bottom:1rem">${notesHtml}</div>` : ''}${dahilHaricHtml}${itemsTableHtml}</div>`;
     }
+    const googleFontsLink = buildGoogleFontsLink(blocks, true);
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Teklif ${escapeHtml(String(offer.order_no || ''))}</title>
-<style>body{font-family:system-ui,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:210mm;min-height:297mm;box-sizing:border-box}
-.block{box-sizing:border-box}
-table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}.text-right{text-align:right}.text-center{text-align:center}</style></head><body>
+${googleFontsLink}
+<style>body{font-family:"Roboto","Helvetica Neue",Arial,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:210mm;min-height:297mm;box-sizing:border-box}
+.block{box-sizing:border-box;font-family:inherit}
+table{width:100%;border-collapse:collapse;font-family:inherit}th,td{border:1px solid #333;padding:6px;text-align:left;font-family:inherit}th{background:#eee}.text-right{text-align:right}.text-center{text-align:center}</style></head><body>
 ${coverHtml}
 ${blocksHtml}
 ${attachmentsHtml}

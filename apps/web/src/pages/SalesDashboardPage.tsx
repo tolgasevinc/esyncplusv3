@@ -20,7 +20,6 @@ import {
   ReceiptText,
   MessageSquare,
   RotateCcw,
-  ChevronRight,
   Banknote,
   Activity,
 } from 'lucide-react'
@@ -124,26 +123,6 @@ function KpiCard({ label, value, delta, deltaLabel, icon, iconBg, iconColor, loa
     )
   }
   return inner
-}
-
-// ─── Section Header ───────────────────────────────────────────────────────────
-
-function SectionTitle({ children, to }: { children: ReactNode; to?: string }) {
-  return (
-    <div className="flex items-center justify-between mb-3">
-      <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-        {children}
-      </h2>
-      {to && (
-        <Link
-          to={to}
-          className="flex items-center gap-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          Tümünü gör <ChevronRight className="h-3 w-3" />
-        </Link>
-      )}
-    </div>
-  )
 }
 
 // ─── Empty State ──────────────────────────────────────────────────────────────

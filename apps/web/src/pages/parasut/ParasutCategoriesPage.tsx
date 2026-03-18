@@ -158,8 +158,6 @@ export function ParasutCategoriesPage() {
     [masterCategories]
   )
 
-  const masterHierarchy = useMemo(() => fullHierarchy.filter((h) => h.selectable), [fullHierarchy])
-
   const masterTree = useMemo(
     () => buildMasterTree(masterCategories, fullHierarchy),
     [masterCategories, fullHierarchy]
