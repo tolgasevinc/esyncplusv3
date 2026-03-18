@@ -10,8 +10,8 @@ const topSections = [
 ]
 
 const bottomSections = [
-  { id: 'markalar', title: 'Markalar', icon: Tag, path: '/parametreler/markalar' },
-  { id: 'kategoriler', title: 'Kategoriler', icon: FolderTree, path: '/parametreler/kategoriler' },
+  { id: 'parasut-kategoriler', title: 'Paraşüt Kategoriler', icon: FolderTree, path: '/parasut/categories' },
+  { id: 'parasut-markalar', title: 'Paraşüt Marka Eşleştirme', icon: Tag, path: '/parasut/brands' },
 ]
 
 export function ParasutPage() {

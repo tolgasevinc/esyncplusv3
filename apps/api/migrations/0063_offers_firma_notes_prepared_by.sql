@@ -1,0 +1,14 @@
+-- offers: Firma bilgileri, notlar, hazırlayan, proje
+ALTER TABLE offers ADD COLUMN company_name TEXT;
+ALTER TABLE offers ADD COLUMN authorized_name TEXT;
+ALTER TABLE offers ADD COLUMN company_phone TEXT;
+ALTER TABLE offers ADD COLUMN company_email TEXT;
+ALTER TABLE offers ADD COLUMN tax_office TEXT;
+ALTER TABLE offers ADD COLUMN tax_no TEXT;
+ALTER TABLE offers ADD COLUMN project_name TEXT;
+ALTER TABLE offers ADD COLUMN project_description TEXT;
+ALTER TABLE offers ADD COLUMN note_selections TEXT;
+ALTER TABLE offers ADD COLUMN prepared_by_name TEXT;
+ALTER TABLE offers ADD COLUMN prepared_by_title TEXT;
+ALTER TABLE offers ADD COLUMN prepared_by_phone TEXT;
+ALTER TABLE offers ADD COLUMN prepared_by_email TEXT;

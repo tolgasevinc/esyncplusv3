@@ -1,6 +1,9 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
+import { ChevronDown } from 'lucide-react'
 import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 
 export interface CategoryItem {
@@ -20,6 +23,8 @@ export interface CategorySelectProps {
   placeholder?: string
   id?: string
   className?: string
+  /** Popover + kademeli badge formatı (modal içinde tıklanabilir) */
+  variant?: 'default' | 'badge'
 }
 
 export interface CategoryPathItem {
@@ -141,12 +146,47 @@ export function buildHierarchy(categories: CategoryItem[]): HierarchyItem[] {
   return result
 }
 
+/** buildHierarchy ile aynı, ancak gruplar da seçilebilir (Paraşüt eşleştirme için) */
+export function buildHierarchyWithSelectableGroups(categories: CategoryItem[]): HierarchyItem[] {
+  return buildHierarchy(categories).map((h) =>
+    h.level === 'group' ? { ...h, selectable: true } : h
+  )
+}
+
 /** Seçili kategori için path döndürür (kod oluşturucu için) */
 export function getCategoryPath(categories: CategoryItem[], categoryId: number | ''): CategoryPathItem[] {
   if (!categoryId) return []
   const hierarchy = buildHierarchy(categories)
   const item = hierarchy.find((h) => h.id === categoryId)
   return item?.path ?? []
+}
+
+/** Path'i kademeli badge olarak render et */
+function PathBadges({ path, color }: { path: CategoryPathItem[]; color?: string }) {
+  const levelStyles = [
+    'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-200',
+    'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200',
+    'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-200',
+  ]
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {path.map((p, i) => {
+        const isLast = i === path.length - 1
+        const styleClass = isLast && color ? '' : levelStyles[Math.min(i, 2)]
+        return (
+          <span key={i} className="inline-flex items-center gap-1">
+            <span
+              className={cn('inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium', styleClass)}
+              style={isLast && color ? { backgroundColor: color, color: '#fff' } : undefined}
+            >
+              {p.name} {p.code ? `[${p.code}]` : ''}
+            </span>
+            {i < path.length - 1 && <span className="text-muted-foreground text-xs">›</span>}
+          </span>
+        )
+      })}
+    </div>
+  )
 }
 
 export function CategorySelect({
@@ -156,6 +196,7 @@ export function CategorySelect({
   placeholder = 'Ara veya seçin...',
   id: inputId,
   className,
+  variant = 'default',
 }: CategorySelectProps) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -187,6 +228,88 @@ export function CategorySelect({
   )
 
   const displayValue = open ? query : selectedItem ? selectedItem.label : ''
+
+  if (variant === 'badge') {
+    return (
+      <Popover open={open} onOpenChange={setOpen} modal={false}>
+        <PopoverTrigger asChild>
+          <Button
+            id={inputId}
+            variant="outline"
+            role="combobox"
+            aria-expanded={open}
+            className={cn('h-10 w-full justify-between font-normal', className)}
+          >
+            {selectedItem ? (
+              <PathBadges path={selectedItem.path} color={selectedItem.color} />
+            ) : (
+              <span className="text-muted-foreground">{placeholder}</span>
+            )}
+            <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[var(--radix-popover-trigger-width)] min-w-[320px] max-w-[520px] p-0" align="start">
+          <div className="p-2 border-b">
+            <Input
+              placeholder="Ara..."
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="h-9"
+              autoComplete="off"
+            />
+          </div>
+          <div className="max-h-[280px] overflow-y-auto py-1">
+            <button
+              type="button"
+              onClick={() => {
+                onChange('')
+                setOpen(false)
+                setQuery('')
+              }}
+              className={cn(
+                'w-full text-left px-3 py-2 text-sm hover:bg-accent',
+                !value && 'bg-accent'
+              )}
+            >
+              <span className="text-muted-foreground">{placeholder}</span>
+            </button>
+            {filtered.length === 0 ? (
+              <div className="px-3 py-4 text-sm text-muted-foreground text-center">
+                {hierarchy.length === 0 ? 'Kategori bulunamadı.' : 'Sonuç bulunamadı'}
+              </div>
+            ) : (
+              filtered.map((item) =>
+                item.selectable ? (
+                  <button
+                    key={`${item.level}-${item.id}`}
+                    type="button"
+                    onClick={() => {
+                      onChange(item.id)
+                      setOpen(false)
+                      setQuery('')
+                    }}
+                    className={cn(
+                      'w-full text-left px-3 py-2.5 text-sm flex items-center gap-2 hover:bg-accent',
+                      value === item.id && 'bg-accent'
+                    )}
+                  >
+                    <PathBadges path={item.path} color={item.color} />
+                  </button>
+                ) : (
+                  <div
+                    key={`${item.level}-${item.id}`}
+                    className="px-3 py-2 text-sm font-medium text-blue-700 dark:text-blue-300"
+                  >
+                    <PathBadges path={item.path} />
+                  </div>
+                )
+              )
+            )}
+          </div>
+        </PopoverContent>
+      </Popover>
+    )
+  }
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {

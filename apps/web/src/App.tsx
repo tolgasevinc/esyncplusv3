@@ -21,11 +21,17 @@ const MusteriTipleriPage = lazy(() => import('@/pages/parameters/MusteriTipleriP
 const MusteriGruplariPage = lazy(() => import('@/pages/parameters/MusteriGruplariPage').then((m) => ({ default: m.MusteriGruplariPage })))
 const YasalTiplerPage = lazy(() => import('@/pages/parameters/YasalTiplerPage').then((m) => ({ default: m.YasalTiplerPage })))
 const SuppliersPage = lazy(() => import('@/pages/parameters/SuppliersPage').then((m) => ({ default: m.SuppliersPage })))
+const TeklifNotlariPage = lazy(() => import('@/pages/parameters/TeklifNotlariPage').then((m) => ({ default: m.TeklifNotlariPage })))
+const TeklifAyarlariPage = lazy(() => import('@/pages/parameters/TeklifAyarlariPage').then((m) => ({ default: m.TeklifAyarlariPage })))
+const TeklifCiktiAyarlariPage = lazy(() => import('@/pages/parameters/TeklifCiktiAyarlariPage').then((m) => ({ default: m.TeklifCiktiAyarlariPage })))
+const TeklifEkleriPage = lazy(() => import('@/pages/parameters/TeklifEkleriPage').then((m) => ({ default: m.TeklifEkleriPage })))
+const DahilHaricEtiketleriPage = lazy(() => import('@/pages/parameters/DahilHaricEtiketleriPage').then((m) => ({ default: m.DahilHaricEtiketleriPage })))
 const DiaPage = lazy(() => import('@/pages/DiaPage').then((m) => ({ default: m.DiaPage })))
 const DiaCariKartlarPage = lazy(() => import('@/pages/parameters/dia/DiaCariKartlarPage').then((m) => ({ default: m.DiaCariKartlarPage })))
 const DiaVergiDaireleriPage = lazy(() => import('@/pages/parameters/dia/DiaVergiDaireleriPage').then((m) => ({ default: m.DiaVergiDaireleriPage })))
 const CustomersPage = lazy(() => import('@/pages/customers/CustomersPage').then((m) => ({ default: m.CustomersPage })))
 const TekliflerPage = lazy(() => import('@/pages/offers/TekliflerPage').then((m) => ({ default: m.TekliflerPage })))
+const TeklifFormPage = lazy(() => import('@/pages/offers/TeklifFormPage').then((m) => ({ default: m.TeklifFormPage })))
 const ProductsPage = lazy(() => import('@/pages/products/ProductsPage').then((m) => ({ default: m.ProductsPage })))
 const EDocumentsPage = lazy(() => import('@/pages/documents/EDocumentsPage').then((m) => ({ default: m.EDocumentsPage })))
 const SettingsGeneralPage = lazy(() => import('@/pages/settings/SettingsGeneralPage').then((m) => ({ default: m.SettingsGeneralPage })))
@@ -40,7 +46,11 @@ const SettingsFileManagerPage = lazy(() => import('@/pages/settings/SettingsFile
 const SettingsExchangeRatesPage = lazy(() => import('@/pages/settings/SettingsExchangeRatesPage').then((m) => ({ default: m.SettingsExchangeRatesPage })))
 const SettingsMarketplacePage = lazy(() => import('@/pages/settings/SettingsMarketplacePage').then((m) => ({ default: m.SettingsMarketplacePage })))
 const OpenCartPage = lazy(() => import('@/pages/opencart/OpenCartPage').then((m) => ({ default: m.OpenCartPage })))
+const SalesDashboardPage = lazy(() => import('@/pages/SalesDashboardPage').then((m) => ({ default: m.SalesDashboardPage })))
 const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPage').then((m) => ({ default: m.ParasutProductsPage })))
+const ParasutCategoriesPage = lazy(() => import('@/pages/parasut/ParasutCategoriesPage').then((m) => ({ default: m.ParasutCategoriesPage })))
+const ParasutBrandsPage = lazy(() => import('@/pages/parasut/ParasutBrandsPage').then((m) => ({ default: m.ParasutBrandsPage })))
+const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
 function App() {
   return (
     <>
@@ -53,6 +63,9 @@ function App() {
         <Route path="/" element={<HomePage />} />
         <Route path="/parasut" element={<ParasutPage />} />
         <Route path="/parasut/products" element={<ParasutProductsPage />} />
+        <Route path="/parasut/categories" element={<ParasutCategoriesPage />} />
+        <Route path="/parasut/brands" element={<ParasutBrandsPage />} />
+        <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
         <Route path="/ayarlar/veritabani" element={<SettingsDatabasePage />} />
@@ -79,6 +92,11 @@ function App() {
         <Route path="/parametreler/musteri-tipleri" element={<MusteriTipleriPage />} />
         <Route path="/parametreler/yasal-tipler" element={<YasalTiplerPage />} />
         <Route path="/parametreler/tedarikciler" element={<SuppliersPage />} />
+        <Route path="/parametreler/teklif-notlari" element={<TeklifNotlariPage />} />
+        <Route path="/parametreler/teklif-ayarlari" element={<TeklifAyarlariPage />} />
+        <Route path="/parametreler/teklif-cikti-ayarlari" element={<TeklifCiktiAyarlariPage />} />
+        <Route path="/parametreler/teklif-ekleri" element={<TeklifEkleriPage />} />
+        <Route path="/parametreler/teklif-dahil-haric-etiketleri" element={<DahilHaricEtiketleriPage />} />
         <Route path="/dia" element={<DiaPage />} />
         <Route path="/dia/cari-kartlar" element={<DiaCariKartlarPage />} />
         <Route path="/dia/vergi-daireleri" element={<DiaVergiDaireleriPage />} />
@@ -88,10 +106,12 @@ function App() {
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/musteriler" element={<Navigate to="/customers" replace />} />
         <Route path="/teklifler" element={<TekliflerPage />} />
+        <Route path="/teklifler/:id" element={<TeklifFormPage />} />
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/urunler" element={<Navigate to="/products" replace />} />
         <Route path="/e-documents" element={<EDocumentsPage />} />
         <Route path="/opencart" element={<OpenCartPage />} />
+        <Route path="/satis" element={<SalesDashboardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </Suspense>

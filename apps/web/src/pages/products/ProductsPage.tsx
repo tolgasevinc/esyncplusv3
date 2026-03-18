@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
+import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles } from 'lucide-react'
+import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,15 +43,22 @@ import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/util
 import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
 
 /** Dinamik arka plan rengi - style attribute yerine ref ile CSS değişkeni atar (linter uyumlu) */
-function DynamicBgSpan({ color, className, ...rest }: { color: string; className?: string } & React.ComponentPropsWithoutRef<'span'>) {
-  const refFn = useCallback((el: HTMLSpanElement | null) => {
-    if (el) el.style.setProperty('--dynamic-bg', color)
-  }, [color])
-  return <span ref={refFn} className={cn('dynamic-bg', className)} {...rest} />
-}
+const DynamicBgSpan = forwardRef<HTMLSpanElement, { color: string; className?: string } & ComponentPropsWithoutRef<'span'>>(
+  function DynamicBgSpan({ color, className, ...rest }, ref) {
+    const refFn = useCallback(
+      (el: HTMLSpanElement | null) => {
+        if (el) el.style.setProperty('--dynamic-bg', color)
+        if (typeof ref === 'function') ref(el)
+        else if (ref) (ref as MutableRefObject<HTMLSpanElement | null>).current = el
+      },
+      [color]
+    )
+    return <span ref={refFn} className={cn('dynamic-bg', className)} {...rest} />
+  }
+)
 
 /** Dinamik arka plan + metin rengi (button) - style attribute yerine ref ile CSS değişkeni atar */
-function DynamicBgFgButton({ bg, fg = '#fff', className, ...rest }: { bg: string; fg?: string; className?: string } & React.ComponentPropsWithoutRef<'button'>) {
+function DynamicBgFgButton({ bg, fg = '#fff', className, ...rest }: { bg: string; fg?: string; className?: string } & ComponentPropsWithoutRef<'button'>) {
   const refFn = useCallback((el: HTMLButtonElement | null) => {
     if (el) {
       el.style.setProperty('--dynamic-bg', bg)
@@ -74,6 +82,7 @@ interface Product {
   quantity: number
   ecommerce_price?: number
   ecommerce_currency_id?: number
+  ecommerce_enabled?: number
   image?: string
   tax_rate?: number
   supplier_code?: string
@@ -131,18 +140,21 @@ function findParasutIconPath(menus: { label: string; iconPath?: string }[]): str
   return undefined
 }
 
-/** Gruplar ve kategoriler açılır liste - varsayılan kapalı */
+/** Gruplar ve kategoriler açılır liste - varsayılan kapalı, arama destekli */
 function CategoryTreeTab({
   categories,
   value,
   onChange,
+  showSearch = true,
 }: {
   categories: CategoryItem[]
   value: number | ''
   onChange: (id: number | '') => void
+  showSearch?: boolean
 }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set())
   const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
+  const [search, setSearch] = useState('')
 
   const groups = categories.filter((c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0))
   const mainCats = categories.filter((c) => !c.category_id || c.category_id === 0)
@@ -165,6 +177,19 @@ function CategoryTreeTab({
   })
 
   const noGroupCats = mainCats.filter((c) => c.group_id == null && !groups.some((g) => g.id === c.id))
+
+  const q = search.trim().toLowerCase()
+  const matches = (c: CategoryItem) =>
+    !q || (c.name || '').toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)
+  const categoryMatches = (cat: CategoryItem) => {
+    if (matches(cat)) return true
+    const subs = byParent.get(cat.id) || []
+    return subs.some((s) => matches(s))
+  }
+  const groupMatches = (group: CategoryItem) => {
+    const groupCats = byGroup.get(group.id) || []
+    return groupCats.some((cat) => categoryMatches(cat))
+  }
 
   const toggleGroup = (id: number) => {
     setExpandedGroups((prev) => {
@@ -189,9 +214,11 @@ function CategoryTreeTab({
 
   const renderCat = (cat: CategoryItem, group?: CategoryItem, indent: number = 0) => {
     const subs = byParent.get(cat.id) || []
-    const hasSubs = subs.length > 0
-    const isExpanded = expandedCategories.has(cat.id)
+    const filteredSubs = q ? subs.filter((s) => matches(s)) : subs
+    const hasSubs = filteredSubs.length > 0
+    const isExpanded = expandedCategories.has(cat.id) || (!!q && hasSubs)
     const isSelected = value === cat.id
+    if (q && !matches(cat) && !hasSubs) return null
 
     if (hasSubs) {
       return (
@@ -226,7 +253,7 @@ function CategoryTreeTab({
           </div>
           {isExpanded && (
             <div className="space-y-0.5">
-              {[...subs].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)).map((sub) => (
+              {[...filteredSubs].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)).map((sub) => (
                 <button
                   key={`sub-${sub.id}`}
                   type="button"
@@ -274,14 +301,31 @@ function CategoryTreeTab({
     )
   }
 
+  const filteredGroups = q ? sortedGroups.filter((g) => groupMatches(g)) : sortedGroups
+  const filteredNoGroup = q ? sortedNoGroup.filter((c) => categoryMatches(c)) : sortedNoGroup
+
   return (
     <div className="rounded-lg border bg-muted/30 overflow-hidden">
+      {showSearch && (
+        <div className="p-2 border-b bg-muted/50">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Kategori ara (ad veya kod)..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-8 h-9 text-sm"
+            />
+          </div>
+        </div>
+      )}
       <div className="max-h-[55vh] overflow-y-auto p-2 space-y-0.5">
-        {sortedGroups.map((group) => {
-          const isExpanded = expandedGroups.has(group.id)
-          const groupCats = (byGroup.get(group.id) || []).sort(
-            (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)
-          )
+        {filteredGroups.map((group) => {
+          const isExpanded = expandedGroups.has(group.id) || !!q
+          const groupCats = (byGroup.get(group.id) || [])
+            .filter((c) => !q || categoryMatches(c))
+            .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+          if (q && groupCats.length === 0) return null
           return (
             <div key={`grp-${group.id}`} className="space-y-0.5">
               <button
@@ -307,7 +351,12 @@ function CategoryTreeTab({
             </div>
           )
         })}
-        {sortedNoGroup.map((cat) => renderCat(cat, undefined, 0))}
+        {filteredNoGroup.map((cat) => renderCat(cat, undefined, 0))}
+        {q && filteredGroups.length === 0 && filteredNoGroup.length === 0 && (
+          <div className="py-6 text-center text-sm text-muted-foreground">
+            &quot;{search}&quot; ile eşleşen kategori bulunamadı
+          </div>
+        )}
       </div>
     </div>
   )
@@ -458,6 +507,7 @@ const emptyForm = {
   quantity: 0,
   ecommerce_price: 0 as number,
   ecommerce_currency_id: '' as number | '',
+  ecommerce_enabled: true,
   prices: {} as Record<number, { price: number; currency_id: number | null; status: number }>,
   images: [] as string[],
   tax_rate: 20,
@@ -542,6 +592,12 @@ export function ProductsPage() {
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
   const [matchedParasutSkus, setMatchedParasutSkus] = useState<Set<string>>(new Set())
   const [parasutIconPath, setParasutIconPath] = useState<string | undefined>()
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | null>(null)
+  const [bulkCategoryId, setBulkCategoryId] = useState<number | ''>('')
+  const [bulkTypeId, setBulkTypeId] = useState<number | ''>('')
+  const [bulkItemGroupId, setBulkItemGroupId] = useState<number | ''>('')
+  const [bulkSaving, setBulkSaving] = useState(false)
   const imageUploadProductRef = useRef<Product | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterGroupId !== '' || filterTypeId !== '' || filterNoImage
@@ -576,6 +632,22 @@ export function ProductsPage() {
     setFilterBrandSearch('')
     setFilterCategorySearch('')
   }
+
+  const handleEcommerceToggle = useCallback(async (productId: number, enabled: boolean) => {
+    try {
+      const res = await fetch(`${API_URL}/api/products/${productId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ecommerce_enabled: enabled }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Güncellenemedi')
+      setData((prev) => prev.map((p) => (p.id === productId ? { ...p, ecommerce_enabled: enabled ? 1 : 0 } : p)))
+      toastSuccess(enabled ? 'E-ticarete açıldı' : 'E-ticarete kapatıldı', 'Ürün dışa aktarım ve entegrasyonlara dahil edilecek.')
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Güncellenemedi')
+    }
+  }, [])
 
   const categoryPath = useMemo(
     () => getCategoryPath(categories, form.category_id),
@@ -1077,6 +1149,7 @@ export function ProductsPage() {
         gtip_code: product?.gtip_code ?? item.gtip_code ?? '',
         sort_order: product?.sort_order ?? item.sort_order ?? 0,
         status: product?.status ?? item.status ?? 1,
+        ecommerce_enabled: (product?.ecommerce_enabled ?? item.ecommerce_enabled ?? 1) === 1,
         ecommerce_name: product?.ecommerce_name ?? '',
         main_description: product?.main_description ?? '',
         seo_slug: product?.seo_slug ?? '',
@@ -1293,7 +1366,7 @@ export function ProductsPage() {
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     if (!form.name.trim()) return
     if (!form.type_id) {
@@ -1402,11 +1475,52 @@ export function ProductsPage() {
       setTotal((t) => Math.max(0, t - 1))
       toastSuccess('Ürün silindi', 'Ürün başarıyla silindi.')
       setDeleteConfirm({ open: false, id: null })
+      setSelectedIds((prev) => { const n = new Set(prev); n.delete(id); return n })
       onSuccess?.()
     } catch (err) {
       toastError('Silme hatası', err instanceof Error ? err.message : 'Silinemedi')
     } finally {
       setDeleting(false)
+    }
+  }
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size >= data.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(data.map((p) => p.id)))
+    }
+  }
+
+  const handleBulkUpdate = async (field: 'category_id' | 'type_id' | 'product_item_group_id', value: number | null) => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    setBulkSaving(true)
+    try {
+      const res = await fetch(`${API_URL}/api/products/bulk`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, [field]: value }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Güncellenemedi')
+      setBulkModal(null)
+      setSelectedIds(new Set())
+      fetchData()
+      toastSuccess('Toplu güncelleme', `${json.updated ?? ids.length} ürün güncellendi.`)
+    } catch (err) {
+      toastError('Toplu güncelleme hatası', err instanceof Error ? err.message : 'Güncellenemedi')
+    } finally {
+      setBulkSaving(false)
     }
   }
 
@@ -1449,16 +1563,16 @@ export function ProductsPage() {
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
                 }`
+                const elemKey = key || 'all'
                 const commonProps = {
-                  key: key || 'all',
                   className: btnClass,
                   onClick: () => setListState({ filterTypeId: key, page: 1 }),
                   children: label,
                 }
                 return color ? (
-                  <DynamicBgFgButton {...commonProps} bg={color} type="button" role="radio" aria-label={label} aria-checked={isActive} />
+                  <DynamicBgFgButton key={elemKey} {...commonProps} bg={color} type="button" role="radio" aria-label={label} aria-checked={isActive} />
                 ) : (
-                  <button {...commonProps} type="button" role="radio" aria-label={label} aria-checked={isActive} />
+                  <button key={elemKey} {...commonProps} type="button" role="radio" aria-label={label} aria-checked={isActive} />
                 )
               })}
             </div>
@@ -1492,6 +1606,38 @@ export function ProductsPage() {
               {filterNoImage ? 'Tüm ürünleri göster' : 'Sadece görseli olmayan ürünleri göster'}
             </TooltipContent>
           </Tooltip>
+          {selectedIds.size > 0 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="secondary" size="sm" className="gap-1.5">
+                  <Layers className="h-4 w-4" />
+                  Toplu İşlemler ({selectedIds.size})
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => { setBulkCategoryId(''); setBulkModal('category') }}>
+                  Kategori değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setBulkTypeId(''); setBulkModal('type') }}>
+                  Tip değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setBulkItemGroupId(''); setBulkModal('itemGroup') }}>
+                  Ürün grubu değiştir
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5" disabled title="Satır seçerek toplu işlem yapabilirsiniz">
+                  <Layers className="h-4 w-4" />
+                  Toplu İşlemler
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Satır seçerek toplu işlem yapabilirsiniz</TooltipContent>
+            </Tooltip>
+          )}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" size="icon" onClick={openNew}>
@@ -1522,6 +1668,16 @@ export function ProductsPage() {
             <table className="w-full text-sm">
               <thead className="sticky top-0 z-10 bg-muted/95 backdrop-blur">
                 <tr className="border-b bg-muted/50">
+                  <th className="text-center p-2 font-medium w-10">
+                    <input
+                      type="checkbox"
+                      checked={data.length > 0 && selectedIds.size >= data.length}
+                      ref={(el) => { if (el) el.indeterminate = data.length > 0 && selectedIds.size > 0 && selectedIds.size < data.length }}
+                      onChange={toggleSelectAll}
+                      className="rounded border-input"
+                      aria-label="Tümünü seç"
+                    />
+                  </th>
                   <th className="text-center p-2 font-medium w-16">Görsel</th>
                   <th className="text-center p-2 font-medium min-w-[140px]">
                     <div className="inline-flex items-center gap-1">
@@ -1768,6 +1924,14 @@ export function ProductsPage() {
                     </div>
                   </th>
                   <th className="text-center p-2 font-medium min-w-[80px]">Birim</th>
+                  <th className="text-center p-2 font-medium w-20">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span>E-Ticaret</span>
+                      </TooltipTrigger>
+                      <TooltipContent>Açık/Kapalı — dışa aktarım ve entegrasyonlarda dahil edilecekler</TooltipContent>
+                    </Tooltip>
+                  </th>
                   <th className="text-center p-2 font-medium tabular-nums min-w-[100px]">
                     <button
                       type="button"
@@ -1783,13 +1947,13 @@ export function ProductsPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={9} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
                       Yükleniyor...
                     </td>
                   </tr>
                 ) : data.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
                       {error || 'Henüz ürün kaydı yok. Yeni ürün eklemek için + butonunu kullanın.'}
                     </td>
                   </tr>
@@ -1797,9 +1961,21 @@ export function ProductsPage() {
                   data.map((item) => (
                     <tr
                       key={item.id}
-                      className="border-b hover:bg-muted/30 cursor-pointer"
+                      className={cn(
+                        'border-b hover:bg-muted/30 cursor-pointer',
+                        selectedIds.has(item.id) && 'bg-primary/5'
+                      )}
                       onClick={() => openEdit(item)}
                     >
+                      <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(item.id)}
+                          onChange={() => toggleSelect(item.id)}
+                          className="rounded border-input"
+                          aria-label={`${item.name || 'Ürün'} seç`}
+                        />
+                      </td>
                       <td className="p-3 text-center">
                         <button
                           type="button"
@@ -1990,6 +2166,12 @@ export function ProductsPage() {
                       </td>
                       <td className="p-3 text-center text-muted-foreground">
                         {item.unit_name ?? '—'}
+                      </td>
+                      <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
+                        <Switch
+                          checked={(item.ecommerce_enabled ?? 1) === 1}
+                          onCheckedChange={(checked) => handleEcommerceToggle(item.id, !!checked)}
+                        />
                       </td>
                       <td className="p-3 text-right tabular-nums font-bold">
                         {item.price != null ? (
@@ -2662,6 +2844,102 @@ export function ProductsPage() {
         onConfirm={executeDelete}
         loading={deleting}
       />
+
+      <Dialog open={bulkModal === 'category'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu Kategori Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün kategori bilgisini değiştireceksiniz.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label>Yeni kategori</Label>
+            <div className="mt-2 max-h-[280px] overflow-y-auto border rounded-md p-2">
+              <CategoryTreeTab
+                categories={categories}
+                value={bulkCategoryId}
+                onChange={setBulkCategoryId}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={!bulkCategoryId || bulkSaving}
+              onClick={() => handleBulkUpdate('category_id', bulkCategoryId || null)}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkModal === 'type'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu Tip Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün tip bilgisini değiştireceksiniz.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label>Yeni tip</Label>
+            <select
+              value={bulkTypeId}
+              onChange={(e) => setBulkTypeId(e.target.value ? Number(e.target.value) : '')}
+              className="flex h-10 w-full mt-2 rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">Seçin</option>
+              {types.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={!bulkTypeId || bulkSaving}
+              onClick={() => handleBulkUpdate('type_id', bulkTypeId || null)}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkModal === 'itemGroup'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu Ürün Grubu Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün ürün grubunu değiştireceksiniz (Ticari Mal, Hammadde, Mamül vb.).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label>Yeni ürün grubu</Label>
+            <select
+              value={bulkItemGroupId}
+              onChange={(e) => setBulkItemGroupId(e.target.value ? Number(e.target.value) : '')}
+              className="flex h-10 w-full mt-2 rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">Seçin</option>
+              {itemGroups.map((g) => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={!bulkItemGroupId || bulkSaving}
+              onClick={() => handleBulkUpdate('product_item_group_id', bulkItemGroupId || null)}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={openCartPublishOpen} onOpenChange={(o) => !o && setOpenCartPublishOpen(false)}>
         <DialogContent className="max-w-sm">

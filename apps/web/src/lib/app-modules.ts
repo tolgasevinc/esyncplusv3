@@ -32,11 +32,13 @@ export const APP_MODULES: AppModule[] = [
   { id: 'opencart', label: 'OpenCart', path: '/opencart' },
   { id: 'parasut', label: 'Paraşüt', path: '/parasut' },
   { id: 'parasut-products', label: 'Paraşüt › Ürünler', path: '/parasut/products' },
+  { id: 'parasut-brands', label: 'Paraşüt › Marka Eşleştirme', path: '/parasut/brands' },
   { id: 'ayarlar-hesaplamalar', label: 'settings › calculations', path: '/ayarlar/hesaplamalar' },
   { id: 'ayarlar-erisim', label: 'settings › access', path: '/ayarlar/erisim' },
   { id: 'ayarlar-tedarikciler', label: 'settings › suppliers', path: '/ayarlar/tedarikciler' },
   { id: 'ayarlar-veri-aktarimi', label: 'settings › data-transfer', path: '/ayarlar/veri-aktarimi' },
   { id: 'ayarlar-doviz-kurlari', label: 'settings › exchange-rates', path: '/ayarlar/doviz-kurlari' },
+  { id: 'veri-aktarim', label: 'Veri Aktarım', path: '/veri-aktarim' },
 ]
 
 export function getModuleById(id: string): AppModule | undefined {

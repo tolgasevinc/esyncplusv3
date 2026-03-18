@@ -35,6 +35,30 @@ function sqlNormalizeCol(col: string): string {
   return `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col}, ''), 'İ', 'i'), 'ı', 'i'), 'Ü', 'u'), 'ü', 'u'), 'Ö', 'o'), 'ö', 'o'), 'Ğ', 'g'), 'ğ', 'g'), 'Ş', 's'), 'ş', 's'), 'Ç', 'c'), 'ç', 'c'))`;
 }
 
+/** R2'den görsel alıp base64 data URL'e çevirir. Paraşüt gibi dış servisler URL'ye erişemeyebilir; data URL ile gönderim daha güvenilir. */
+async function storagePathToDataUrl(storage: R2Bucket | undefined, path: string): Promise<string | null> {
+  if (!path?.trim()) return null;
+  const p = path.trim();
+  if (p.startsWith('http://') || p.startsWith('https://')) return p;
+  if (!storage) return null;
+  try {
+    const obj = await storage.get(p);
+    if (!obj) return null;
+    const buf = await obj.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      const slice = bytes.subarray(i, i + chunk);
+      binary += String.fromCharCode.apply(null, Array.from(slice));
+    }
+    const base64 = btoa(binary);
+    const ct = obj.httpMetadata?.contentType || (p.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg');
+    return `data:${ct};base64,${base64}`;
+  } catch {
+    return null;
+  }
+}
 
 type Bindings = {
   DB: D1Database;
@@ -1094,7 +1118,7 @@ app.get('/api/products', async (c) => {
       : '';
     const { results } = await c.env.DB.prepare(
       `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, ${currencyIdCol} as currency_id,
-       ${priceCol} as price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
+       ${priceCol} as price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
        p.created_at, p.updated_at,
        b.name as brand_name, b.code as brand_code, b.image as brand_image,
        grp.code as group_code, grp.name as group_name, grp.color as group_color,
@@ -1354,7 +1378,7 @@ app.post('/api/products', async (c) => {
     const body = await c.req.json<{
       name: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
       type_id?: number; product_item_group_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
-      ecommerce_price?: number; ecommerce_currency_id?: number;
+      ecommerce_price?: number; ecommerce_currency_id?: number; ecommerce_enabled?: boolean;
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
@@ -1364,9 +1388,10 @@ app.post('/api/products', async (c) => {
     if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
     const sort_order = body.sort_order ?? 0;
     const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    const ecommerce_enabled = body.ecommerce_enabled !== undefined ? (body.ecommerce_enabled ? 1 : 0) : 1;
     await c.env.DB.prepare(
-      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, product_item_group_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, product_item_group_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status, ecommerce_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       name,
       body.sku?.trim() || null,
@@ -1384,7 +1409,8 @@ app.post('/api/products', async (c) => {
       body.supplier_code?.trim() || null,
       body.gtip_code?.trim() || null,
       sort_order,
-      status
+      status,
+      ecommerce_enabled
     ).run();
     const productId = (await c.env.DB.prepare(`SELECT last_insert_rowid() as id`).first<{ id: number }>())?.id ?? 0;
     if (productId && body.prices && Array.isArray(body.prices) && body.prices.length > 0) {
@@ -1448,7 +1474,7 @@ app.put('/api/products/:id', async (c) => {
     const body = await c.req.json<{
       name?: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
       type_id?: number; product_item_group_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
-      ecommerce_price?: number; ecommerce_currency_id?: number;
+      ecommerce_price?: number; ecommerce_currency_id?: number; ecommerce_enabled?: boolean;
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
@@ -1475,6 +1501,7 @@ app.put('/api/products/:id', async (c) => {
     if (body.gtip_code !== undefined) { updates.push('gtip_code = ?'); values.push(body.gtip_code?.trim() || null); }
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (body.ecommerce_enabled !== undefined) { updates.push('ecommerce_enabled = ?'); values.push(body.ecommerce_enabled ? 1 : 0); }
     if (updates.length === 0 && !(body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined)) return c.json({ error: 'Güncellenecek alan yok' }, 400);
     if (updates.length > 0) {
       updates.push("updated_at = datetime('now')");
@@ -1574,6 +1601,39 @@ app.delete('/api/products/:id', async (c) => {
   }
 });
 
+/** Toplu ürün güncelleme: kategori, tip veya ürün grubu değiştir */
+app.patch('/api/products/bulk', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      ids: number[];
+      category_id?: number | null;
+      type_id?: number | null;
+      product_item_group_id?: number | null;
+    }>();
+    const ids = Array.isArray(body.ids) ? body.ids.filter((x): x is number => typeof x === 'number' && x > 0) : [];
+    if (ids.length === 0) return c.json({ error: 'En az bir ürün ID gerekli' }, 400);
+    const hasCategory = body.category_id !== undefined;
+    const hasType = body.type_id !== undefined;
+    const hasGroup = body.product_item_group_id !== undefined;
+    if (!hasCategory && !hasType && !hasGroup) return c.json({ error: 'Güncellenecek alan belirtin (category_id, type_id veya product_item_group_id)' }, 400);
+    const updates: string[] = [];
+    const values: (number | null)[] = [];
+    if (hasCategory) { updates.push('category_id = ?'); values.push(body.category_id ?? null); }
+    if (hasType) { updates.push('type_id = ?'); values.push(body.type_id ?? null); }
+    if (hasGroup) { updates.push('product_item_group_id = ?'); values.push(body.product_item_group_id ?? null); }
+    updates.push("updated_at = datetime('now')");
+    const placeholders = ids.map(() => '?').join(',');
+    const stmt = c.env.DB.prepare(
+      `UPDATE products SET ${updates.join(', ')} WHERE id IN (${placeholders}) AND is_deleted = 0`
+    );
+    await stmt.bind(...values, ...ids).run();
+    return c.json({ ok: true, updated: ids.length });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 /** Ürün E-Ticaret bilgilerini OpenCart veritabanına yayınla. Eşleşmeyen ürünler OpenCart'ta yeni oluşturulur. Varolan ürünler için update_price, update_description, update_images ile seçimli güncelleme. */
 app.post('/api/products/:id/publish/opencart', async (c) => {
   try {
@@ -1585,12 +1645,13 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
       update_price?: boolean; update_description?: boolean; update_images?: boolean;
     }>().catch(() => null);
     const productRow = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.image, p.quantity, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
+      `SELECT p.id, p.name, p.sku, p.image, p.quantity, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
        FROM products p
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`
-    ).bind(id).first<{ id: number; name: string; sku: string | null; image: string | null; quantity: number; ecommerce_name: string | null; main_description: string | null; seo_slug: string | null; seo_title: string | null; seo_description: string | null }>();
+    ).bind(id).first<{ id: number; name: string; sku: string | null; image: string | null; quantity: number; ecommerce_enabled: number; ecommerce_name: string | null; main_description: string | null; seo_slug: string | null; seo_title: string | null; seo_description: string | null }>();
     if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
+    if (productRow.ecommerce_enabled === 0) return c.json({ error: 'Bu ürün e-ticarete kapalı. Önce ürün listesinde E-Ticaret anahtarını açın.' }, 400);
 
     const priceRow = await c.env.DB.prepare(
       `SELECT price FROM product_prices WHERE product_id = ? AND price_type_id = 1 AND is_deleted = 0 LIMIT 1`
@@ -2938,6 +2999,86 @@ app.get('/api/customers/check-tax-no', async (c) => {
   }
 });
 
+/** DIA + Paraşüt müşteri arama - yeni müşteri eklerken kullanılır, seçilen sonuç customers'a kaydedilir */
+app.get('/api/customers/search-external', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const q = (c.req.query('q') || '').trim().slice(0, 150);
+    if (!q || q.length < 2) return c.json({ data: [] });
+    const limit = Math.min(15, Math.max(5, parseInt(c.req.query('limit') || '10')));
+    const escapeClause = /[%_]/.test(q) ? " ESCAPE '\\'" : '';
+    const pat = `%${escapeLikePattern(normalizeForSearch(q))}%`;
+    const results: { source: string; id: string; title: string; tax_no?: string; tax_office?: string; email?: string; phone?: string; code?: string }[] = [];
+
+    // DIA dia_carikartlar
+    try {
+      const diaWhere = `(${sqlNormalizeCol('unvan')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('carikartkodu')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('verginumarasi')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('tckimlikno')} LIKE ?${escapeClause} OR ${sqlNormalizeCol('eposta')} LIKE ?${escapeClause})`;
+      const { results: diaRes } = await c.env.DB.prepare(
+        `SELECT c.id, c.unvan, c.carikartkodu, c.verginumarasi, c.tckimlikno, c.eposta, c.adresler_adres_telefon1, c.adresler_adres_ceptel, v.vergidairesiadi as vergidairesi_adi
+         FROM dia_carikartlar c
+         LEFT JOIN dia_vergidaireleri v ON c.vergidairesi = v.vdkod
+         WHERE ${diaWhere}
+         ORDER BY c.unvan LIMIT ?`
+      ).bind(pat, pat, pat, pat, pat, limit).all();
+      for (const r of (diaRes || []) as { id: number; unvan?: string | null; carikartkodu?: string | null; verginumarasi?: string | null; tckimlikno?: string | null; eposta?: string | null; adresler_adres_telefon1?: string | null; adresler_adres_ceptel?: string | null; vergidairesi_adi?: string | null }[]) {
+        const taxNo = (r.verginumarasi || r.tckimlikno || '').trim().replace(/\s/g, '');
+        const phone = (r.adresler_adres_telefon1 || r.adresler_adres_ceptel || '').trim();
+        results.push({
+          source: 'dia',
+          id: String(r.id),
+          title: (r.unvan || '').trim() || '—',
+          tax_no: taxNo || undefined,
+          tax_office: (r.vergidairesi_adi || '').trim() || undefined,
+          email: (r.eposta || '').trim() || undefined,
+          phone: phone || undefined,
+          code: (r.carikartkodu || '').trim() || undefined,
+        });
+      }
+    } catch {
+      /* ignore DIA errors */
+    }
+
+    // Paraşüt contacts
+    try {
+      const auth = await getParasutAuth(c);
+      if (auth) {
+        const base = 'https://api.parasut.com';
+        const params = new URLSearchParams();
+        params.set('filter[name]', q);
+        params.set('filter[account_type]', 'customer');
+        params.set('page[size]', String(Math.min(10, limit - results.length)));
+        const res = await fetch(`${base}/v4/${auth.companyId}/contacts?${params.toString()}`, {
+          headers: { 'Authorization': `Bearer ${auth.token}`, 'Accept': 'application/json' },
+        });
+        const json = await res.json().catch(() => ({}));
+        if (res.ok) {
+          const data = (json as { data?: unknown[] }).data ?? [];
+          for (const item of data as { id?: string; attributes?: Record<string, unknown> }[]) {
+            const attrs = item.attributes ?? {};
+            const name = (attrs.name as string) || '';
+            if (!name) continue;
+            results.push({
+              source: 'parasut',
+              id: item.id || '',
+              title: name,
+              tax_no: (attrs.tax_number as string)?.trim() || undefined,
+              tax_office: (attrs.tax_office as string)?.trim() || undefined,
+              email: (attrs.email as string)?.trim() || undefined,
+              phone: (attrs.phone as string)?.trim() || undefined,
+            });
+          }
+        }
+      }
+    } catch {
+      /* ignore Paraşüt errors */
+    }
+
+    return c.json({ data: results });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 // Customer addresses - must be before /api/customers/:id
 app.get('/api/customers/:id/addresses', async (c) => {
   try {
@@ -3371,6 +3512,11 @@ app.post('/api/offers', async (c) => {
       date?: string; order_no?: string; customer_id?: number | null; contact_id?: number | null;
       description?: string; notes?: string; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number;
       currency_id?: number | null; exchange_rate?: number | null;
+      company_name?: string; authorized_name?: string; company_phone?: string; company_email?: string;
+      tax_office?: string; tax_no?: string; project_name?: string; project_description?: string;
+      note_selections?: string; prepared_by_name?: string; prepared_by_title?: string; prepared_by_phone?: string; prepared_by_email?: string;
+      include_cover_page?: number; include_attachment_ids?: string;
+      include_tag_ids?: string; exclude_tag_ids?: string;
       items?: Array<{ type?: string; product_id?: number | null; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number; discount_5?: number }>;
     }>();
     const date = body.date?.trim() || new Date().toISOString().slice(0, 10);
@@ -3389,11 +3535,28 @@ app.post('/api/offers', async (c) => {
     const discount_2 = body.discount_2 ?? 0;
     const discount_3 = body.discount_3 ?? 0;
     const discount_4 = body.discount_4 ?? 0;
+    const company_name = body.company_name?.trim() || null;
+    const authorized_name = body.authorized_name?.trim() || null;
+    const company_phone = body.company_phone?.trim() || null;
+    const company_email = body.company_email?.trim() || null;
+    const tax_office = body.tax_office?.trim() || null;
+    const tax_no = body.tax_no?.trim() || null;
+    const project_name = body.project_name?.trim() || null;
+    const project_description = body.project_description?.trim() || null;
+    const note_selections = body.note_selections ? (typeof body.note_selections === 'string' ? body.note_selections : JSON.stringify(body.note_selections)) : null;
+    const prepared_by_name = body.prepared_by_name?.trim() || null;
+    const prepared_by_title = body.prepared_by_title?.trim() || null;
+    const prepared_by_phone = body.prepared_by_phone?.trim() || null;
+    const prepared_by_email = body.prepared_by_email?.trim() || null;
+    const include_cover_page = body.include_cover_page ? 1 : 0;
+    const include_attachment_ids = body.include_attachment_ids ? (typeof body.include_attachment_ids === 'string' ? body.include_attachment_ids : JSON.stringify(body.include_attachment_ids)) : null;
+    const include_tag_ids = body.include_tag_ids ? (typeof body.include_tag_ids === 'string' ? body.include_tag_ids : JSON.stringify(body.include_tag_ids)) : null;
+    const exclude_tag_ids = body.exclude_tag_ids ? (typeof body.exclude_tag_ids === 'string' ? body.exclude_tag_ids : JSON.stringify(body.exclude_tag_ids)) : null;
     const uuid = crypto.randomUUID();
     await c.env.DB.prepare(
-      `INSERT INTO offers (date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, currency_id, exchange_rate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
-    ).bind(date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, currency_id, exchange_rate).run();
+      `INSERT INTO offers (date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, currency_id, exchange_rate, company_name, authorized_name, company_phone, company_email, tax_office, tax_no, project_name, project_description, note_selections, prepared_by_name, prepared_by_title, prepared_by_phone, prepared_by_email, include_cover_page, include_attachment_ids, include_tag_ids, exclude_tag_ids, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(date, order_no, uuid, customer_id, contact_id, description, notes, discount_1, discount_2, discount_3, discount_4, currency_id, exchange_rate, company_name, authorized_name, company_phone, company_email, tax_office, tax_no, project_name, project_description, note_selections, prepared_by_name, prepared_by_title, prepared_by_phone, prepared_by_email, include_cover_page, include_attachment_ids, include_tag_ids, exclude_tag_ids).run();
     const offerId = (await c.env.DB.prepare(`SELECT last_insert_rowid() as id`).first()) as { id: number };
     const id = offerId.id;
     const items = body.items || [];
@@ -3423,6 +3586,11 @@ app.put('/api/offers/:id', async (c) => {
       date?: string; order_no?: string; customer_id?: number | null; contact_id?: number | null;
       description?: string; notes?: string; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number;
       currency_id?: number | null; exchange_rate?: number | null;
+      company_name?: string; authorized_name?: string; company_phone?: string; company_email?: string;
+      tax_office?: string; tax_no?: string; project_name?: string; project_description?: string;
+      note_selections?: string; prepared_by_name?: string; prepared_by_title?: string; prepared_by_phone?: string; prepared_by_email?: string;
+      include_cover_page?: number; include_attachment_ids?: string;
+      include_tag_ids?: string; exclude_tag_ids?: string;
       items?: Array<{ type?: string; product_id?: number | null; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; discount_1?: number; discount_2?: number; discount_3?: number; discount_4?: number; discount_5?: number }>;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM offers WHERE id = ? AND is_deleted = 0`).bind(id).first();
@@ -3448,6 +3616,23 @@ app.put('/api/offers/:id', async (c) => {
     if (body.discount_4 !== undefined) { updates.push('discount_4 = ?'); values.push(body.discount_4); }
     if (body.currency_id !== undefined) { updates.push('currency_id = ?'); values.push(body.currency_id); }
     if (body.exchange_rate !== undefined) { updates.push('exchange_rate = ?'); values.push(body.exchange_rate != null && body.exchange_rate > 0 ? body.exchange_rate : 1); }
+    if (body.company_name !== undefined) { updates.push('company_name = ?'); values.push(body.company_name?.trim() || null); }
+    if (body.authorized_name !== undefined) { updates.push('authorized_name = ?'); values.push(body.authorized_name?.trim() || null); }
+    if (body.company_phone !== undefined) { updates.push('company_phone = ?'); values.push(body.company_phone?.trim() || null); }
+    if (body.company_email !== undefined) { updates.push('company_email = ?'); values.push(body.company_email?.trim() || null); }
+    if (body.tax_office !== undefined) { updates.push('tax_office = ?'); values.push(body.tax_office?.trim() || null); }
+    if (body.tax_no !== undefined) { updates.push('tax_no = ?'); values.push(body.tax_no?.trim() || null); }
+    if (body.project_name !== undefined) { updates.push('project_name = ?'); values.push(body.project_name?.trim() || null); }
+    if (body.project_description !== undefined) { updates.push('project_description = ?'); values.push(body.project_description?.trim() || null); }
+    if (body.note_selections !== undefined) { updates.push('note_selections = ?'); values.push(body.note_selections ? (typeof body.note_selections === 'string' ? body.note_selections : JSON.stringify(body.note_selections)) : null); }
+    if (body.prepared_by_name !== undefined) { updates.push('prepared_by_name = ?'); values.push(body.prepared_by_name?.trim() || null); }
+    if (body.prepared_by_title !== undefined) { updates.push('prepared_by_title = ?'); values.push(body.prepared_by_title?.trim() || null); }
+    if (body.prepared_by_phone !== undefined) { updates.push('prepared_by_phone = ?'); values.push(body.prepared_by_phone?.trim() || null); }
+    if (body.prepared_by_email !== undefined) { updates.push('prepared_by_email = ?'); values.push(body.prepared_by_email?.trim() || null); }
+    if (body.include_cover_page !== undefined) { updates.push('include_cover_page = ?'); values.push(body.include_cover_page ? 1 : 0); }
+    if (body.include_attachment_ids !== undefined) { updates.push('include_attachment_ids = ?'); values.push(body.include_attachment_ids ? (typeof body.include_attachment_ids === 'string' ? body.include_attachment_ids : JSON.stringify(body.include_attachment_ids)) : null); }
+    if (body.include_tag_ids !== undefined) { updates.push('include_tag_ids = ?'); values.push(body.include_tag_ids ? (typeof body.include_tag_ids === 'string' ? body.include_tag_ids : JSON.stringify(body.include_tag_ids)) : null); }
+    if (body.exclude_tag_ids !== undefined) { updates.push('exclude_tag_ids = ?'); values.push(body.exclude_tag_ids ? (typeof body.exclude_tag_ids === 'string' ? body.exclude_tag_ids : JSON.stringify(body.exclude_tag_ids)) : null); }
     if (updates.length > 0) {
       updates.push("updated_at = datetime('now')");
       values.push(id);
@@ -3482,6 +3667,636 @@ app.delete('/api/offers/:id', async (c) => {
       `UPDATE offers SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
     ).bind(id).run();
     if (res.meta.changes === 0) return c.json({ error: 'Teklif bulunamadı' }, 404);
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+type PdfBlockApi = {
+  id: string;
+  type: string;
+  sortOrder: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  fontFamily?: string;
+  fontColor?: string;
+  visible: boolean;
+  logo_url?: string;
+  logo_width?: number;
+  logo_height?: number;
+  company_name?: string;
+  company_address?: string;
+  company_phone?: string;
+  company_tax_office?: string;
+  footer_text?: string;
+  image_key?: string;
+};
+
+function blockCss(b: PdfBlockApi, isImage = false): string {
+  if (!b || b.visible === false) return '';
+  const x = b.x ?? 20;
+  const y = b.y ?? 20;
+  const w = b.width ?? 80;
+  const h = b.height ?? 40;
+  if (isImage) {
+    return `position:absolute;left:${x}mm;top:${y}mm;width:${w}mm;height:${h}mm;box-sizing:border-box;overflow:hidden;`;
+  }
+  const fs = b.fontSize ?? 11;
+  const ff = b.fontFamily || 'Arial';
+  const fc = b.fontColor || '#000000';
+  return `position:absolute;left:${x}mm;top:${y}mm;width:${w}mm;min-height:${h}mm;font-size:${fs}px;font-family:${ff};color:${fc};box-sizing:border-box;padding:4px;`;
+}
+
+function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
+  const blocks: PdfBlockApi[] = [];
+  const map: Record<string, string> = { company_block: 'company', customer_block: 'customer', offer_header_block: 'offer_header', footer_block: 'footer' };
+  let so = 0;
+  for (const [key, val] of Object.entries(legacy)) {
+    const type = map[key];
+    if (!type || !val || typeof val !== 'object') continue;
+    const v = val as Record<string, unknown>;
+    blocks.push({
+      id: `migrated-${key}`,
+      type,
+      sortOrder: so++,
+      x: (v.x as number) ?? 20,
+      y: (v.y as number) ?? 20,
+      width: (v.width as number) ?? 80,
+      height: (v.height as number) ?? 40,
+      fontSize: (v.fontSize as number) ?? 11,
+      fontFamily: (v.fontFamily as string) || 'Arial',
+      fontColor: (v.fontColor as string) || '#000000',
+      visible: (v.visible as boolean) !== false,
+      logo_url: v.logo_url as string | undefined,
+      logo_width: v.logo_width as number | undefined,
+      logo_height: v.logo_height as number | undefined,
+      company_name: v.company_name as string | undefined,
+      company_address: v.company_address as string | undefined,
+      company_phone: v.company_phone as string | undefined,
+      company_tax_office: v.company_tax_office as string | undefined,
+      footer_text: v.footer_text as string | undefined,
+    });
+  }
+  const hasItems = blocks.some((b) => b.type === 'offer_items');
+  const hasNotes = blocks.some((b) => b.type === 'offer_notes');
+  if (!hasItems) {
+    blocks.push({ id: 'migrated-offer_items', type: 'offer_items', sortOrder: so++, x: 20, y: 120, width: 170, height: 80, fontSize: 11, visible: true });
+  }
+  if (!hasNotes) {
+    blocks.push({ id: 'migrated-offer_notes', type: 'offer_notes', sortOrder: so++, x: 20, y: 210, width: 170, height: 40, fontSize: 11, visible: true });
+  }
+  return blocks.sort((a, b) => a.sortOrder - b.sortOrder);
+}
+
+function parseBlocksConfig(raw: string | undefined): PdfBlockApi[] {
+  if (!raw?.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as { blocks?: PdfBlockApi[] } | Record<string, unknown>;
+    if (parsed && Array.isArray((parsed as { blocks?: PdfBlockApi[] }).blocks)) {
+      return ((parsed as { blocks: PdfBlockApi[] }).blocks || []).filter((b) => b);
+    }
+    return migrateLegacyBlocks((parsed || {}) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+/** Örnek teklif PDF - layout ayarlarını test etmek için (gerçek teklif verisi yok) */
+app.get('/api/offers/sample/pdf', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results: layoutRes } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'teklif_cikti_ayarlari' AND "key" = 'layout_config' AND is_deleted = 0 LIMIT 1`
+    ).all();
+    const raw = (layoutRes as { value?: string }[])?.[0]?.value;
+    const blocks = parseBlocksConfig(raw);
+    function escapeHtml(s: string): string {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    const sampleTable = `<table><thead><tr><th>Ürün / Açıklama</th><th class="text-center">Miktar</th><th class="text-right">Birim Fiyat</th><th class="text-right">Tutar</th></tr></thead><tbody>
+<tr><td>Örnek Ürün 1</td><td class="text-center">2</td><td class="text-right">1.500,00 ₺</td><td class="text-right">3.000,00 ₺</td></tr>
+<tr><td>Örnek Ürün 2</td><td class="text-center">1</td><td class="text-right">2.000,00 ₺</td><td class="text-right">2.000,00 ₺</td></tr>
+</tbody></table><p class="text-right" style="margin-top:1rem"><strong>Genel Toplam:</strong> 5.000,00 ₺</p>`;
+    let blocksHtml = '';
+    for (const b of blocks) {
+      if (b.visible === false) continue;
+      const isImageBlock = b.type === 'image';
+      const style = blockCss(b, isImageBlock);
+      let content = '';
+      switch (b.type) {
+        case 'image': {
+          const imgKey = b.image_key || '';
+          const imgSrc = imgKey ? await storagePathToDataUrl(c.env.STORAGE, imgKey) : null;
+          if (imgSrc) {
+            content = `<img src="${imgSrc}" alt="" style="width:100%;height:100%;object-fit:contain;" />`;
+          }
+          break;
+        }
+        case 'company': {
+          const logoHtml = b.logo_url
+            ? `<img src="${escapeHtml(b.logo_url)}" alt="Logo" style="max-width:${b.logo_width ?? 60}px;max-height:${b.logo_height ?? 40}px;object-fit:contain;display:block;margin-bottom:4px;" />`
+            : '';
+          content = `${logoHtml}<div><strong>${escapeHtml(b.company_name || 'Örnek Firma A.Ş.')}</strong><br/>${escapeHtml(b.company_address || 'Adres')}<br/>${escapeHtml(b.company_phone || 'Tel')}</div>`;
+          break;
+        }
+        case 'customer':
+          content = '<strong>Müşteri:</strong> Örnek Müşteri Ltd.<br/><strong>Yetkili:</strong> Ahmet Yılmaz<br/>Vergi No: 1234567890';
+          break;
+        case 'offer_header':
+          content = `<strong>TEKLİF</strong><br/>Teklif No: ORN-2024-001 &nbsp; Tarih: ${new Date().toISOString().slice(0, 10)}`;
+          break;
+        case 'offer_items':
+          content = sampleTable;
+          break;
+        case 'offer_notes':
+          content = '<p><strong>Not:</strong> Örnek teklif notu</p>';
+          break;
+        case 'footer':
+          content = b.footer_text ? b.footer_text.replace(/\n/g, '<br/>') : '<strong>Örnek Firma A.Ş.</strong><br/>Resmi Ünvan, Adres, Telefon';
+          break;
+        default:
+          content = '';
+      }
+      if (content || isImageBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
+    }
+    if (blocks.length === 0) {
+      blocksHtml = `<div style="margin:20mm">${sampleTable}</div>`;
+    }
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Örnek Teklif</title>
+<style>body{font-family:system-ui,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:210mm;min-height:297mm;box-sizing:border-box}
+.block{box-sizing:border-box}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}
+.text-right{text-align:right}.text-center{text-align:center}</style></head><body>
+${blocksHtml}
+</body></html>`;
+    return new Response(html, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Disposition': 'inline; filename="ornek-teklif.html"' },
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+/** Teklif PDF - HTML döner, tarayıcıda yazdır > PDF olarak kaydet ile kullanılır */
+app.get('/api/offers/:id/pdf', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const row = await c.env.DB.prepare(
+      `SELECT o.*, c.title as customer_title, cur.code as currency_code, cur.symbol as currency_symbol
+       FROM offers o LEFT JOIN customers c ON o.customer_id = c.id AND c.is_deleted = 0
+       LEFT JOIN product_currencies cur ON o.currency_id = cur.id AND cur.is_deleted = 0
+       WHERE o.id = ? AND o.is_deleted = 0`
+    ).bind(id).first();
+    if (!row) return c.json({ error: 'Teklif bulunamadı' }, 404);
+    const offer = row as Record<string, unknown>;
+    const { results: items } = await c.env.DB.prepare(
+      `SELECT oi.*, p.name as product_name, p.sku as product_sku, u.name as unit_name
+       FROM offer_items oi
+       LEFT JOIN products p ON oi.product_id = p.id AND p.is_deleted = 0
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       WHERE oi.offer_id = ? AND oi.is_deleted = 0 ORDER BY oi.sort_order, oi.id`
+    ).bind(id).all();
+    const offerItems = (items || []) as { product_id?: number; product_name?: string; product_sku?: string; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; unit_name?: string }[];
+    const subtotal = offerItems.reduce((s, it) => s + (Number(it.amount) || 0) * (Number(it.unit_price) || 0) - (Number(it.line_discount) || 0), 0);
+    const discountPct = Number(offer.discount_1) ?? 0;
+    const afterDiscount = subtotal * (1 - discountPct / 100);
+    const totalVat = offerItems.reduce((s, it) => {
+      const net = (Number(it.amount) || 0) * (Number(it.unit_price) || 0) - (Number(it.line_discount) || 0);
+      const share = subtotal > 0 ? net / subtotal : 0;
+      return s + (afterDiscount * share) * ((Number(it.tax_rate) || 0) / 100);
+    }, 0);
+    const grandTotal = afterDiscount + totalVat;
+    const sym = (offer.currency_symbol as string) || (offer.currency_code as string) || '₺';
+    const fmt = (n: number) => (n ?? 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    let coverHtml = '';
+    if (offer.include_cover_page) {
+      const { results: coverRes } = await c.env.DB.prepare(
+        `SELECT value FROM app_settings WHERE category = 'teklif_ayarlari' AND "key" = 'cover_page_content' AND is_deleted = 0 LIMIT 1`
+      ).all();
+      const coverContent = (coverRes as { value?: string }[])?.[0]?.value || '';
+      coverHtml = `<div class="cover-page" style="page-break-after:always;padding:2rem;">${coverContent || '<p>Firma tanıtım sayfası</p>'}</div>`;
+    }
+    let attachmentsHtml = '';
+    const attIds = (() => {
+      try {
+        const v = offer.include_attachment_ids as string | undefined;
+        if (!v) return [];
+        const arr = typeof v === 'string' ? JSON.parse(v) : v;
+        return Array.isArray(arr) ? arr : [];
+      } catch { return []; }
+    })();
+    const productIdsInOffer = new Set(offerItems.map((it: { product_id?: number }) => it.product_id).filter(Boolean));
+    for (const attId of attIds) {
+      const attRow = await c.env.DB.prepare(`SELECT * FROM offer_attachments WHERE id = ? AND is_deleted = 0`).bind(attId).first();
+      if (!attRow) continue;
+      const att = attRow as { id: number; title: string; content?: string | null };
+      const { results: apRes } = await c.env.DB.prepare(`SELECT product_id FROM offer_attachment_products WHERE attachment_id = ?`).bind(attId).all();
+      const prodIds = (apRes || []).map((p: { product_id: number }) => p.product_id);
+      const relevant = prodIds.length === 0 || prodIds.some((pid: number) => productIdsInOffer.has(pid));
+      if (!relevant) continue;
+      const content = (att.content || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      attachmentsHtml += `<div class="attachment" style="page-break-before:always;padding:2rem;"><h2>${escapeHtml(att.title)}</h2><div>${content}</div></div>`;
+    }
+    const noteSelections = (() => {
+      try {
+        const v = offer.note_selections as string | undefined;
+        if (!v) return {} as Record<number, number[]>;
+        return typeof v === 'string' ? JSON.parse(v) : v;
+      } catch { return {}; }
+    })();
+    const { results: catRes } = await c.env.DB.prepare(
+      `SELECT * FROM offer_note_categories WHERE is_deleted = 0 ORDER BY sort_order`
+    ).all();
+    const categories = (catRes || []) as { id: number; label: string }[];
+    let notesHtml = '';
+    for (const cat of categories) {
+      const sel = noteSelections[cat.id] || noteSelections[String(cat.id)] || [];
+      if (sel.length === 0) continue;
+      const { results: optRes } = await c.env.DB.prepare(
+        `SELECT label FROM offer_note_options WHERE id IN (${sel.map(() => '?').join(',')}) AND is_deleted = 0`
+      ).bind(...sel).all();
+      const labels = (optRes || []).map((o: { label: string }) => o.label);
+      if (labels.length) notesHtml += `<p><strong>${escapeHtml(cat.label)}:</strong> ${labels.map(escapeHtml).join(', ')}</p>`;
+    }
+    function escapeHtml(s: string): string {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    const includeTagIds = (() => {
+      try {
+        const v = offer.include_tag_ids as string | undefined;
+        if (!v) return [];
+        const arr = typeof v === 'string' ? JSON.parse(v) : v;
+        return Array.isArray(arr) ? arr : [];
+      } catch { return []; }
+    })();
+    const excludeTagIds = (() => {
+      try {
+        const v = offer.exclude_tag_ids as string | undefined;
+        if (!v) return [];
+        const arr = typeof v === 'string' ? JSON.parse(v) : v;
+        return Array.isArray(arr) ? arr : [];
+      } catch { return []; }
+    })();
+    let dahilHaricHtml = '';
+    if (includeTagIds.length > 0 || excludeTagIds.length > 0) {
+      let dahilItems = '';
+      let haricItems = '';
+      if (includeTagIds.length > 0) {
+        const placeholders = includeTagIds.map(() => '?').join(',');
+        const { results: incRes } = await c.env.DB.prepare(
+          `SELECT label, description FROM offer_tags WHERE id IN (${placeholders}) AND is_deleted = 0`
+        ).bind(...includeTagIds).all();
+        dahilItems = (incRes || []).map((r: { label: string; description?: string | null }) =>
+          `<li>${escapeHtml(r.label)}${r.description ? ` – ${escapeHtml(r.description)}` : ''}</li>`
+        ).join('');
+      }
+      if (excludeTagIds.length > 0) {
+        const placeholders = excludeTagIds.map(() => '?').join(',');
+        const { results: excRes } = await c.env.DB.prepare(
+          `SELECT label, description FROM offer_tags WHERE id IN (${placeholders}) AND is_deleted = 0`
+        ).bind(...excludeTagIds).all();
+        haricItems = (excRes || []).map((r: { label: string; description?: string | null }) =>
+          `<li>${escapeHtml(r.label)}${r.description ? ` – ${escapeHtml(r.description)}` : ''}</li>`
+        ).join('');
+      }
+      dahilHaricHtml = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin:1rem 0">` +
+        `<div><strong>Dahil olanlar:</strong><ul style="margin:0.25rem 0 0 1rem;padding:0">${dahilItems || '<li>—</li>'}</ul></div>` +
+        `<div><strong>Hariç olanlar:</strong><ul style="margin:0.25rem 0 0 1rem;padding:0">${haricItems || '<li>—</li>'}</ul></div>` +
+        `</div>`;
+    }
+    const { results: layoutRes } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'teklif_cikti_ayarlari' AND "key" = 'layout_config' AND is_deleted = 0 LIMIT 1`
+    ).all();
+    const raw = (layoutRes as { value?: string }[])?.[0]?.value;
+    const blocks = parseBlocksConfig(raw);
+    const itemsTableHtml = `<table><thead><tr><th>Ürün / Açıklama</th><th class="text-center">Miktar</th><th class="text-right">Birim Fiyat</th><th class="text-right">Tutar</th></tr></thead><tbody>
+${offerItems.map((it) => {
+  const name = it.product_name || it.product_sku || it.description || '—';
+  const amt = Number(it.amount) || 0;
+  const up = Number(it.unit_price) || 0;
+  const disc = Number(it.line_discount) || 0;
+  const lineTotal = amt * up - disc;
+  return `<tr><td>${escapeHtml(name)}</td><td class="text-center">${amt}</td><td class="text-right">${fmt(up)} ${sym}</td><td class="text-right">${fmt(lineTotal)} ${sym}</td></tr>`;
+}).join('')}
+</tbody></table>
+<p class="text-right" style="margin-top:1rem"><strong>Genel Toplam:</strong> ${fmt(grandTotal)} ${sym}</p>
+${offer.project_name ? `<p style="margin-top:1rem"><strong>Proje:</strong> ${escapeHtml(String(offer.project_name))}</p>` : ''}`;
+    let blocksHtml = '';
+    for (const b of blocks) {
+      if (b.visible === false) continue;
+      const isImageBlock = b.type === 'image';
+      const style = blockCss(b, isImageBlock);
+      let content = '';
+      switch (b.type) {
+        case 'image': {
+          const imgKey = b.image_key || '';
+          const imgSrc = imgKey ? await storagePathToDataUrl(c.env.STORAGE, imgKey) : null;
+          if (imgSrc) {
+            content = `<img src="${imgSrc}" alt="" style="width:100%;height:100%;object-fit:contain;" />`;
+          }
+          break;
+        }
+        case 'company': {
+          const logoHtml = b.logo_url
+            ? `<img src="${escapeHtml(b.logo_url)}" alt="Logo" style="max-width:${b.logo_width ?? 60}px;max-height:${b.logo_height ?? 40}px;object-fit:contain;display:block;margin-bottom:4px;" />`
+            : '';
+          content = `${logoHtml}<div><strong>${escapeHtml(b.company_name || 'Firma')}</strong><br/>${escapeHtml(b.company_address || '')}${b.company_address ? '<br/>' : ''}${escapeHtml(b.company_phone || '')}${b.company_phone ? '<br/>' : ''}${escapeHtml(b.company_tax_office || '')}</div>`;
+          break;
+        }
+        case 'customer':
+          content = `<strong>Müşteri:</strong> ${escapeHtml(String(offer.company_name || offer.customer_title || ''))}<br/>${offer.authorized_name ? `<strong>Yetkili:</strong> ${escapeHtml(String(offer.authorized_name))}<br/>` : ''}${offer.tax_office ? `Vergi D.: ${escapeHtml(String(offer.tax_office))} ` : ''}${offer.tax_no ? escapeHtml(String(offer.tax_no)) : ''}`;
+          break;
+        case 'offer_header':
+          content = `<strong>TEKLİF</strong><br/>Teklif No: ${escapeHtml(String(offer.order_no || ''))} &nbsp; Tarih: ${escapeHtml(String((offer.date as string) || '').slice(0, 10))}`;
+          break;
+        case 'offer_items':
+          content = itemsTableHtml;
+          break;
+        case 'offer_notes':
+          content = (notesHtml ? notesHtml : '') + (dahilHaricHtml ? dahilHaricHtml : '');
+          break;
+        case 'footer':
+          content = b.footer_text
+            ? b.footer_text.replace(/\n/g, '<br/>')
+            : (offer.prepared_by_name ? `Hazırlayan: ${escapeHtml(String(offer.prepared_by_name))}${offer.prepared_by_title ? ` (${escapeHtml(String(offer.prepared_by_title))})` : ''}` : '');
+          break;
+        default:
+          content = '';
+      }
+      if (content || isImageBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
+    }
+    if (blocks.length === 0) {
+      blocksHtml = `<div style="margin:20mm">${notesHtml ? `<div class="notes" style="margin-bottom:1rem">${notesHtml}</div>` : ''}${dahilHaricHtml}${itemsTableHtml}</div>`;
+    }
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Teklif ${escapeHtml(String(offer.order_no || ''))}</title>
+<style>body{font-family:system-ui,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:210mm;min-height:297mm;box-sizing:border-box}
+.block{box-sizing:border-box}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}.text-right{text-align:right}.text-center{text-align:center}</style></head><body>
+${coverHtml}
+${blocksHtml}
+${attachmentsHtml}
+</body></html>`;
+    return new Response(html, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Disposition': `inline; filename="teklif-${offer.order_no || id}.html"` },
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== OFFER NOTE CATEGORIES (Teklif Notları) ==========
+app.get('/api/offer-note-categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results: cats } = await c.env.DB.prepare(
+      `SELECT * FROM offer_note_categories WHERE is_deleted = 0 ORDER BY sort_order, id`
+    ).all();
+    const categories = (cats || []) as { id: number; code: string; label: string; sort_order: number; allow_custom: number }[];
+    const withOptions: { id: number; code: string; label: string; sort_order: number; allow_custom: number; options: unknown[] }[] = [];
+    for (const cat of categories) {
+      const { results: opts } = await c.env.DB.prepare(
+        `SELECT * FROM offer_note_options WHERE category_id = ? AND is_deleted = 0 ORDER BY sort_order, id`
+      ).bind(cat.id).all();
+      withOptions.push({ ...cat, options: opts || [] });
+    }
+    return c.json({ data: withOptions });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/offer-note-categories/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ label?: string; allow_custom?: number }>();
+    const updates: string[] = [];
+    const values: (string | number)[] = [];
+    if (body.label !== undefined) { updates.push('label = ?'); values.push(body.label.trim()); }
+    if (body.allow_custom !== undefined) { updates.push('allow_custom = ?'); values.push(body.allow_custom ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE offer_note_categories SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM offer_note_categories WHERE id = ?`).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/offer-note-options', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ category_id: number; label: string; sort_order?: number; enabled_by_default?: number }>();
+    const category_id = body.category_id;
+    const label = (body.label || '').trim();
+    if (!label) return c.json({ error: 'Label gerekli' }, 400);
+    const sort_order = body.sort_order ?? 0;
+    const enabled_by_default = body.enabled_by_default !== undefined ? (body.enabled_by_default ? 1 : 0) : 1;
+    await c.env.DB.prepare(
+      `INSERT INTO offer_note_options (category_id, label, sort_order, enabled_by_default) VALUES (?, ?, ?, ?)`
+    ).bind(category_id, label, sort_order, enabled_by_default).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM offer_note_options WHERE id = last_insert_rowid()`).first();
+    return c.json(row, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/offer-note-options/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ label?: string; enabled_by_default?: number }>();
+    const updates: string[] = [];
+    const values: (string | number)[] = [];
+    if (body.label !== undefined) { updates.push('label = ?'); values.push(body.label.trim()); }
+    if (body.enabled_by_default !== undefined) { updates.push('enabled_by_default = ?'); values.push(body.enabled_by_default ? 1 : 0); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE offer_note_options SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM offer_note_options WHERE id = ?`).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/offer-note-options/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    await c.env.DB.prepare(
+      `UPDATE offer_note_options SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ?`
+    ).bind(id).run();
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== OFFER ATTACHMENTS (Teklif Ekleri) ==========
+app.get('/api/offer-attachments', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results: atts } = await c.env.DB.prepare(
+      `SELECT * FROM offer_attachments WHERE is_deleted = 0 ORDER BY sort_order, id`
+    ).all();
+    const attachments = (atts || []) as { id: number; title: string; content: string | null; sort_order: number }[];
+    const withProducts: { id: number; title: string; content: string | null; sort_order: number; product_ids: number[] }[] = [];
+    for (const a of attachments) {
+      const { results: prods } = await c.env.DB.prepare(
+        `SELECT product_id FROM offer_attachment_products WHERE attachment_id = ?`
+      ).bind(a.id).all();
+      withProducts.push({ ...a, product_ids: (prods || []).map((p: { product_id: number }) => p.product_id) });
+    }
+    return c.json({ data: withProducts });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/offer-attachments', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ title: string; content?: string; sort_order?: number; product_ids?: number[] }>();
+    const title = (body.title || '').trim();
+    if (!title) return c.json({ error: 'Başlık gerekli' }, 400);
+    const content = body.content?.trim() || null;
+    const sort_order = body.sort_order ?? 0;
+    await c.env.DB.prepare(
+      `INSERT INTO offer_attachments (title, content, sort_order) VALUES (?, ?, ?)`
+    ).bind(title, content, sort_order).run();
+    const row = (await c.env.DB.prepare(`SELECT * FROM offer_attachments WHERE id = last_insert_rowid()`).first()) as { id: number };
+    const product_ids = body.product_ids || [];
+    for (const pid of product_ids) {
+      await c.env.DB.prepare(`INSERT OR IGNORE INTO offer_attachment_products (attachment_id, product_id) VALUES (?, ?)`).bind(row.id, pid).run();
+    }
+    const full = await c.env.DB.prepare(`SELECT * FROM offer_attachments WHERE id = ?`).bind(row.id).first();
+    const { results: prods } = await c.env.DB.prepare(`SELECT product_id FROM offer_attachment_products WHERE attachment_id = ?`).bind(row.id).all();
+    return c.json({ ...full, product_ids: (prods || []).map((p: { product_id: number }) => p.product_id) }, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/offer-attachments/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ title?: string; content?: string; sort_order?: number; product_ids?: number[] }>();
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.title !== undefined) { updates.push('title = ?'); values.push(body.title.trim()); }
+    if (body.content !== undefined) { updates.push('content = ?'); values.push(body.content?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (updates.length > 0) {
+      updates.push("updated_at = datetime('now')");
+      values.push(id);
+      await c.env.DB.prepare(`UPDATE offer_attachments SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    }
+    if (body.product_ids !== undefined) {
+      await c.env.DB.prepare(`DELETE FROM offer_attachment_products WHERE attachment_id = ?`).bind(id).run();
+      for (const pid of body.product_ids) {
+        await c.env.DB.prepare(`INSERT INTO offer_attachment_products (attachment_id, product_id) VALUES (?, ?)`).bind(id, pid).run();
+      }
+    }
+    const row = await c.env.DB.prepare(`SELECT * FROM offer_attachments WHERE id = ?`).bind(id).first();
+    const { results: prods } = await c.env.DB.prepare(`SELECT product_id FROM offer_attachment_products WHERE attachment_id = ?`).bind(id).all();
+    return c.json({ ...row, product_ids: (prods || []).map((p: { product_id: number }) => p.product_id) });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/offer-attachments/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    await c.env.DB.prepare(
+      `UPDATE offer_attachments SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ?`
+    ).bind(id).run();
+    return c.json({ success: true });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+// ========== OFFER TAGS (Dahil/Hariç Etiketleri) ==========
+app.get('/api/offer-tags', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const type = (c.req.query('type') || '').trim();
+    let where = 'WHERE is_deleted = 0';
+    const params: (string | number)[] = [];
+    if (type === 'dahil' || type === 'haric') {
+      where += ' AND type = ?';
+      params.push(type);
+    }
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM offer_tags ${where} ORDER BY type, sort_order, id`
+    ).bind(...params).all();
+    return c.json({ data: results || [] });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.post('/api/offer-tags', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ type: 'dahil' | 'haric'; label: string; description?: string; sort_order?: number }>();
+    const type = body.type === 'haric' ? 'haric' : 'dahil';
+    const label = (body.label || '').trim();
+    if (!label) return c.json({ error: 'Etiket gerekli' }, 400);
+    const description = body.description?.trim() || null;
+    const sort_order = body.sort_order ?? 0;
+    await c.env.DB.prepare(
+      `INSERT INTO offer_tags (type, label, description, sort_order) VALUES (?, ?, ?, ?)`
+    ).bind(type, label, description, sort_order).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM offer_tags WHERE id = last_insert_rowid()`).first();
+    return c.json(row, 201);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.put('/api/offer-tags/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ type?: 'dahil' | 'haric'; label?: string; description?: string; sort_order?: number }>();
+    const updates: string[] = [];
+    const values: (string | number)[] = [];
+    if (body.type !== undefined) { updates.push('type = ?'); values.push(body.type === 'haric' ? 'haric' : 'dahil'); }
+    if (body.label !== undefined) { updates.push('label = ?'); values.push(body.label.trim()); }
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description?.trim() || null); }
+    if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
+    if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+    await c.env.DB.prepare(`UPDATE offer_tags SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    const row = await c.env.DB.prepare(`SELECT * FROM offer_tags WHERE id = ?`).bind(id).first();
+    return c.json(row);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
+app.delete('/api/offer-tags/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = c.req.param('id');
+    await c.env.DB.prepare(
+      `UPDATE offer_tags SET is_deleted = 1, status = 0, updated_at = datetime('now') WHERE id = ?`
+    ).bind(id).run();
     return c.json({ success: true });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
@@ -4475,7 +5290,7 @@ app.post('/api/opencart-mysql/products/bulk-update-prices', async (c) => {
         const modelLower = modelVal.toLowerCase();
         const ppRow = await c.env.DB.prepare(
           `SELECT pp.price FROM product_prices pp
-           JOIN products p ON p.id = pp.product_id AND p.is_deleted = 0
+           JOIN products p ON p.id = pp.product_id AND p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1
            WHERE LOWER(TRIM(COALESCE(p.sku, ''))) = ? AND pp.price_type_id = 1 AND pp.is_deleted = 0 AND (pp.status = 1 OR pp.status IS NULL)
            LIMIT 1`
         )
@@ -4881,42 +5696,12 @@ app.post('/api/dia/cari-kartlar/:id/transfer-parasut', async (c) => {
     const name = (row.unvan || '').trim();
     if (!name) return c.json({ error: 'Ünvan boş, Paraşüt\'e aktarılamaz' }, 400);
 
-    const { results: settingsRows } = await c.env.DB.prepare(
-      `SELECT key, value FROM app_settings WHERE category = 'parasut' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
-    ).all();
-    const settings: Record<string, string> = {};
-    for (const r of settingsRows as { key: string; value: string | null }[]) {
-      if (r.key) settings[r.key] = r.value ?? '';
-    }
-    const clientId = settings.PARASUT_CLIENT_ID?.trim();
-    const clientSecret = settings.PARASUT_CLIENT_SECRET?.trim();
-    const username = settings.PARASUT_USERNAME?.trim();
-    const password = settings.PARASUT_PASSWORD?.trim();
-    const companyId = settings.PARASUT_COMPANY_ID?.trim();
-    if (!clientId || !clientSecret || !username || !password || !companyId) {
-      return c.json({ error: 'Paraşüt ayarları eksik. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
+    const auth = await getParasutAuth(c);
+    if (!auth) {
+      return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
     }
 
     const base = 'https://api.parasut.com';
-    const tokenRes = await fetch(`${base}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: clientId,
-        client_secret: clientSecret,
-        username,
-        password,
-        redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
-      }).toString(),
-    });
-    const tokenData = await tokenRes.json().catch(() => ({}));
-    const token = (tokenData as { access_token?: string }).access_token;
-    if (!token) {
-      const err = (tokenData as { error_description?: string }).error_description || 'Token alınamadı';
-      return c.json({ error: `Paraşüt bağlantı hatası: ${err}` }, 400);
-    }
-
     const taxNumber = (row.verginumarasi || row.tckimlikno || '').trim().replace(/\s/g, '');
     const contactType = taxNumber.length === 11 ? 'person' : 'company';
     const attributes: Record<string, string> = {
@@ -4933,10 +5718,10 @@ app.post('/api/dia/cari-kartlar/:id/transfer-parasut', async (c) => {
     const phone = (row.adresler_adres_telefon1 || row.adresler_adres_ceptel || '').trim();
     if (phone) attributes.phone = phone;
 
-    const createRes = await fetch(`${base}/v4/${companyId}/contacts`, {
+    const createRes = await fetch(`${base}/v4/${auth.companyId}/contacts`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': `Bearer ${auth.token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -5058,6 +5843,84 @@ async function getValidFkIds(db: D1Database, table: string, idCol: string): Prom
     return new Set();
   }
 }
+
+/** Veri aktarım dışa aktarım - veri kaynağına göre ham veri döner */
+app.post('/api/export/fetch', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ dataSource: string }>();
+    const { dataSource } = body;
+    if (!dataSource) return c.json({ error: 'dataSource gerekli' }, 400);
+
+    const limit = 99999;
+    let data: unknown[] = [];
+
+    if (dataSource === 'product') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, p.currency_id,
+         p.price, p.quantity, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
+         pp1.price as ecommerce_price, pp2.price as price_type_2, pp3.price as price_type_3, pp4.price as price_type_4, pp5.price as price_type_5,
+         pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
+         FROM products p
+         LEFT JOIN product_prices pp1 ON pp1.product_id = p.id AND pp1.price_type_id = 1 AND pp1.is_deleted = 0
+         LEFT JOIN product_prices pp2 ON pp2.product_id = p.id AND pp2.price_type_id = 2 AND pp2.is_deleted = 0
+         LEFT JOIN product_prices pp3 ON pp3.product_id = p.id AND pp3.price_type_id = 3 AND pp3.is_deleted = 0
+         LEFT JOIN product_prices pp4 ON pp4.product_id = p.id AND pp4.price_type_id = 4 AND pp4.is_deleted = 0
+         LEFT JOIN product_prices pp5 ON pp5.product_id = p.id AND pp5.price_type_id = 5 AND pp5.is_deleted = 0
+         LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
+         WHERE p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1 ORDER BY p.sort_order, p.id LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'customer') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, title as name, code, group_id as group_id, type_id, tax_no as tax_number, tax_office, email, phone, phone_mobile, status
+         FROM customers WHERE is_deleted = 0 AND status = 1 ORDER BY sort_order, title LIMIT ?`
+      ).bind(limit).all();
+      data = (results ?? []).map((r: Record<string, unknown>) => ({ ...r, address: '' }));
+    } else if (dataSource === 'category') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, code, group_id, category_id, sort_order, status FROM product_categories WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'brand') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, code, description, website, country, sort_order, status FROM product_brands WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'type') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, code, description, sort_order, status FROM product_types WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'unit') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, code, description, sort_order, status FROM product_unit WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'supplier') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, code, currency_id, status FROM suppliers WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'currency') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, code, symbol, is_default, sort_order, status FROM product_currencies WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else if (dataSource === 'tax_rate') {
+      const { results } = await c.env.DB.prepare(
+        `SELECT id, name, value, description, sort_order, status FROM product_tax_rates WHERE is_deleted = 0 ORDER BY sort_order, name LIMIT ?`
+      ).bind(limit).all();
+      data = results ?? [];
+    } else {
+      return c.json({ error: 'Bilinmeyen veri kaynağı' }, 400);
+    }
+
+    return c.json({ data });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
 
 /** Batch aktarım - client'tan gelen satırları işler (gerçek ilerleme için) */
 app.post('/api/transfer/execute-batch', async (c) => {
@@ -5846,9 +6709,12 @@ app.get('/api/app-settings', async (c) => {
       `SELECT key, value FROM app_settings WHERE category = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
     ).bind(category).all();
 
+    const tokenKeys = new Set(['PARASUT_ACCESS_TOKEN', 'PARASUT_REFRESH_TOKEN', 'PARASUT_TOKEN_EXPIRES_AT']);
     const settings: Record<string, string> = {};
     for (const r of results as { key: string; value: string | null }[]) {
-      if (r.key) settings[r.key] = r.value ?? '';
+      if (r.key && (category !== 'parasut' || !tokenKeys.has(r.key))) {
+        settings[r.key] = r.value ?? '';
+      }
     }
     return c.json(settings);
   } catch (err: unknown) {
@@ -5962,42 +6828,10 @@ app.post('/api/integrations/test/parasut', async (c) => {
 app.get('/api/parasut/products', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const { results: settingsRows } = await c.env.DB.prepare(
-      `SELECT key, value FROM app_settings WHERE category = 'parasut' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
-    ).all();
-    const settings: Record<string, string> = {};
-    for (const r of settingsRows as { key: string; value: string | null }[]) {
-      if (r.key) settings[r.key] = r.value ?? '';
-    }
-    const clientId = settings.PARASUT_CLIENT_ID?.trim();
-    const clientSecret = settings.PARASUT_CLIENT_SECRET?.trim();
-    const username = settings.PARASUT_USERNAME?.trim();
-    const password = settings.PARASUT_PASSWORD?.trim();
-    const companyId = settings.PARASUT_COMPANY_ID?.trim();
-    if (!clientId || !clientSecret || !username || !password || !companyId) {
-      return c.json({ error: 'Paraşüt ayarları eksik. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
-    }
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
 
     const base = 'https://api.parasut.com';
-    const tokenRes = await fetch(`${base}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: clientId,
-        client_secret: clientSecret,
-        username,
-        password,
-        redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
-      }).toString(),
-    });
-    const tokenData = await tokenRes.json().catch(() => ({}));
-    const token = (tokenData as { access_token?: string }).access_token;
-    if (!token) {
-      const err = (tokenData as { error_description?: string }).error_description || 'Token alınamadı';
-      return c.json({ error: `Paraşüt bağlantı hatası: ${err}` }, 400);
-    }
-
     const filterName = (c.req.query('filter_name') || '').trim();
     const filterCode = (c.req.query('filter_code') || '').trim();
     const pageNum = Math.max(1, parseInt(c.req.query('page') || '1', 10));
@@ -6012,9 +6846,9 @@ app.get('/api/parasut/products', async (c) => {
     params.set('sort', sort);
     params.set('include', 'category');
 
-    const res = await fetch(`${base}/v4/${companyId}/products?${params.toString()}`, {
+    const res = await fetch(`${base}/v4/${auth.companyId}/products?${params.toString()}`, {
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': `Bearer ${auth.token}`,
         'Accept': 'application/json',
       },
     });
@@ -6033,11 +6867,14 @@ app.get('/api/parasut/products', async (c) => {
 
     return c.json({
       data: data.map((item: unknown) => {
-        const d = item as { id?: string; type?: string; attributes?: Record<string, unknown>; relationships?: Record<string, unknown> };
+        const d = item as { id?: string; type?: string; attributes?: Record<string, unknown>; relationships?: Record<string, { data?: { id?: string } | null }> };
+        const attrs = (d.attributes ?? {}) as Record<string, unknown>;
+        const catId = (d.relationships as Record<string, { data?: { id?: string } | null }> | undefined)?.category?.data?.id;
+        if (catId) attrs.category_id = catId;
         return {
           id: d.id,
           type: d.type,
-          ...(d.attributes ?? {}),
+          ...attrs,
         };
       }),
       meta: {
@@ -6053,7 +6890,28 @@ app.get('/api/parasut/products', async (c) => {
   }
 });
 
-/** Paraşüt ayarları ve token al */
+/** Paraşüt app_settings'e token kaydet (upsert) */
+async function saveParasutTokens(db: D1Database, accessToken: string, refreshToken: string, expiresIn: number): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = String(now + expiresIn);
+  const upsert = async (key: string, value: string) => {
+    const existing = await db.prepare(
+      `SELECT id FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0`
+    ).bind(key).first();
+    if (existing) {
+      await db.prepare(`UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE id = ?`)
+        .bind(value, (existing as { id: number }).id).run();
+    } else {
+      await db.prepare(`INSERT INTO app_settings (category, "key", value) VALUES ('parasut', ?, ?)`)
+        .bind(key, value).run();
+    }
+  };
+  await upsert('PARASUT_ACCESS_TOKEN', accessToken);
+  await upsert('PARASUT_REFRESH_TOKEN', refreshToken);
+  await upsert('PARASUT_TOKEN_EXPIRES_AT', expiresAt);
+}
+
+/** Paraşüt ayarları ve token al. Önce cache/refresh_token dener, gerekirse password grant ile yeni token alır. */
 async function getParasutAuth(c: { env: Bindings }): Promise<{ token: string; companyId: string } | null> {
   if (!c.env.DB) return null;
   const { results: settingsRows } = await c.env.DB.prepare(
@@ -6068,8 +6926,40 @@ async function getParasutAuth(c: { env: Bindings }): Promise<{ token: string; co
   const username = settings.PARASUT_USERNAME?.trim();
   const password = settings.PARASUT_PASSWORD?.trim();
   const companyId = settings.PARASUT_COMPANY_ID?.trim();
-  if (!clientId || !clientSecret || !username || !password || !companyId) return null;
+  if (!clientId || !clientSecret || !companyId) return null;
+  if (!username || !password) return null;
   const base = 'https://api.parasut.com';
+  const redirectUri = (settings.PARASUT_CALLBACK_URL?.trim() || 'urn:ietf:wg:oauth:2.0:oob');
+
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = parseInt(settings.PARASUT_TOKEN_EXPIRES_AT || '0', 10);
+  const bufferSec = 300;
+  if (expiresAt > now + bufferSec && settings.PARASUT_ACCESS_TOKEN?.trim()) {
+    return { token: settings.PARASUT_ACCESS_TOKEN.trim(), companyId };
+  }
+
+  const refreshToken = settings.PARASUT_REFRESH_TOKEN?.trim();
+  if (refreshToken) {
+    const refreshRes = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+      }).toString(),
+    });
+    const refreshData = await refreshRes.json().catch(() => ({}));
+    const newToken = (refreshData as { access_token?: string }).access_token;
+    const newRefresh = (refreshData as { refresh_token?: string }).refresh_token;
+    const expiresIn = (refreshData as { expires_in?: number }).expires_in ?? 7200;
+    if (newToken) {
+      await saveParasutTokens(c.env.DB, newToken, newRefresh || refreshToken, expiresIn);
+      return { token: newToken, companyId };
+    }
+  }
+
   const tokenRes = await fetch(`${base}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -6079,13 +6969,376 @@ async function getParasutAuth(c: { env: Bindings }): Promise<{ token: string; co
       client_secret: clientSecret,
       username,
       password,
-      redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+      redirect_uri: redirectUri,
     }).toString(),
   });
   const tokenData = await tokenRes.json().catch(() => ({}));
   const token = (tokenData as { access_token?: string }).access_token;
+  const refresh = (tokenData as { refresh_token?: string }).refresh_token;
+  const expiresIn = (tokenData as { expires_in?: number }).expires_in ?? 7200;
+  if (token && refresh) {
+    await saveParasutTokens(c.env.DB, token, refresh, expiresIn);
+  }
   return token && companyId ? { token, companyId } : null;
 }
+
+/** Paraşüt API kategori listesi - sadece ürün ve hizmet (Product) kategorileri, 3 level hiyerarşi */
+app.get('/api/parasut/categories', async (c) => {
+  try {
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+    const base = 'https://api.parasut.com';
+    const allData: { id: string; name?: string; parent_id?: number | null; full_path?: string; [k: string]: unknown }[] = [];
+    const seenIds = new Set<string>();
+    let page = 1;
+    let hasMore = true;
+    while (hasMore) {
+      const params = new URLSearchParams();
+      params.set('filter[category_type]', 'Product');
+      params.set('page[number]', String(page));
+      params.set('page[size]', '100');
+      params.set('sort', 'name');
+      params.set('include', 'parent_category');
+      const res = await fetch(`${base}/v4/${auth.companyId}/item_categories?${params.toString()}`, {
+        headers: { 'Authorization': `Bearer ${auth.token}`, 'Accept': 'application/json' },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errMsg = (json as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${res.status}`;
+        return c.json({ error: `Paraşüt API: ${errMsg}` }, 400);
+      }
+      const data = (json as { data?: unknown[] }).data ?? [];
+      const included = (json as { included?: unknown[] }).included ?? [];
+      const meta = (json as { meta?: { total_pages?: number } }).meta ?? {};
+      const pushItem = (item: { id?: string; attributes?: Record<string, unknown>; relationships?: Record<string, { data?: { id?: string } | null }> }) => {
+        const attrs = item.attributes ?? {};
+        const rels = item.relationships ?? {};
+        let parentId = attrs.parent_id;
+        if (parentId == null && rels.parent_category?.data?.id) {
+          const pid = rels.parent_category.data.id;
+          parentId = /^\d+$/.test(String(pid)) ? parseInt(String(pid), 10) : pid;
+        }
+        const normalizedParentId =
+          parentId == null
+            ? null
+            : typeof parentId === 'number'
+              ? parentId
+              : /^\d+$/.test(String(parentId))
+                ? parseInt(String(parentId), 10)
+                : parentId;
+        const idStr = String(item.id ?? '');
+        if (seenIds.has(idStr)) return;
+        seenIds.add(idStr);
+        allData.push({
+          ...attrs,
+          id: idStr,
+          name: attrs.name as string,
+          parent_id: normalizedParentId,
+          full_path: attrs.full_path as string,
+        });
+      };
+      for (const item of included as { id?: string; type?: string; attributes?: Record<string, unknown>; relationships?: Record<string, { data?: { id?: string } | null }> }[]) {
+        if (item.type === 'item_categories') pushItem(item);
+      }
+      for (const item of data as { id?: string; attributes?: Record<string, unknown>; relationships?: Record<string, { data?: { id?: string } | null }> }[]) {
+        pushItem(item);
+      }
+      const totalPages = meta.total_pages ?? 1;
+      hasMore = page < totalPages && data.length > 0;
+      page += 1;
+    }
+    const byId = new Map<string, (typeof allData)[0]>();
+    allData.forEach((d) => byId.set(String(d.id), d));
+    const byParent = new Map<string, (typeof allData)[0][]>();
+    const roots: (typeof allData)[0][] = [];
+    allData.forEach((d) => {
+      const pid = d.parent_id;
+      const pidStr = pid != null && pid !== 0 ? String(pid) : null;
+      const parentInData = pidStr ? byId.has(pidStr) : false;
+      if (!pidStr || !parentInData) {
+        roots.push(d);
+      } else {
+        if (!byParent.has(pidStr)) byParent.set(pidStr, []);
+        byParent.get(pidStr)!.push(d);
+      }
+    });
+    if (roots.length === 0 && allData.length > 0) {
+      roots.push(...allData);
+    }
+    const getLevel = (item: (typeof allData)[0]): 1 | 2 | 3 => {
+      const pid = item.parent_id;
+      if (pid == null || pid === 0) return 1;
+      const parent = byId.get(String(pid));
+      if (!parent) return 1;
+      const ppid = parent.parent_id;
+      if (ppid == null || ppid === 0) return 2;
+      const grandparent = byId.get(String(ppid));
+      if (!grandparent) return 2;
+      return 3;
+    };
+    const buildFullPath = (item: (typeof allData)[0]): string => {
+      const parts: string[] = [];
+      const seen = new Set<string>();
+      let cur: (typeof allData)[0] | undefined = item;
+      while (cur && seen.size < 10) {
+        if (seen.has(String(cur.id))) break;
+        seen.add(String(cur.id));
+        const n = String(cur.name ?? '').trim() || (cur === item ? String(cur.id) : '');
+        if (n) parts.unshift(n);
+        const pid = cur.parent_id;
+        cur = pid != null && pid !== 0 ? byId.get(String(pid)) : undefined;
+      }
+      return parts.join(' > ') || String(item.name ?? '') || String(item.id);
+    };
+    const hierarchical: (typeof allData)[0][] = [];
+    const addInOrder = (items: (typeof allData)[0][], depth: number) => {
+      items.sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? '')));
+      items.forEach((d, idx) => {
+        const level = getLevel(d) as 1 | 2 | 3;
+        const children = byParent.get(String(d.id)) ?? [];
+        const fullPath = buildFullPath(d);
+        hierarchical.push({ ...d, full_path: fullPath, level, _depth: depth, _isLast: idx === items.length - 1 });
+        if (children.length > 0) addInOrder(children, depth + 1);
+      });
+    };
+    addInOrder(roots, 0);
+    return c.json({ data: hierarchical });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Paraşüt kategorileri alınamadı' }, 500);
+  }
+});
+
+/** Paraşüt kategori oluştur (ürün ve hizmet) */
+app.post('/api/parasut/categories', async (c) => {
+  try {
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+    const body = await c.req.json<{ name: string; parent_id?: number | string | null }>().catch(() => ({}));
+    const name = (body?.name ?? '').trim();
+    if (!name) return c.json({ error: 'Kategori adı gerekli' }, 400);
+    const base = 'https://api.parasut.com';
+    const attrs: Record<string, unknown> = { name, category_type: 'Product' };
+    const parentId = body?.parent_id;
+    let relationships: Record<string, { data: { type: string; id: string } | null }> | undefined;
+    if (parentId != null && parentId !== 0 && parentId !== '') {
+      const pidStr = String(parentId).trim();
+      if (pidStr) {
+        const parsed = parseInt(pidStr, 10);
+        attrs.parent_id = String(pidStr) === String(parsed) ? parsed : pidStr;
+        relationships = {
+          parent_category: { data: { type: 'item_categories', id: pidStr } },
+        };
+      }
+    }
+    const payload: { type: string; attributes: Record<string, unknown>; relationships?: Record<string, unknown> } = {
+      type: 'item_categories',
+      attributes: attrs,
+    };
+    if (relationships) payload.relationships = relationships;
+    const res = await fetch(`${base}/v4/${auth.companyId}/item_categories`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ data: payload }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errMsg = (json as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${res.status}`;
+      return c.json({ error: `Paraşüt: ${errMsg}` }, 400);
+    }
+    const created = json as { data?: { id?: string; attributes?: { name?: string } } };
+    return c.json({ id: created.data?.id, name: created.data?.attributes?.name ?? name });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Oluşturma hatası' }, 500);
+  }
+});
+
+/** Paraşüt kategori güncelle (isim) */
+app.put('/api/parasut/categories/:id', async (c) => {
+  try {
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+    const id = c.req.param('id')?.trim();
+    if (!id) return c.json({ error: 'Kategori ID gerekli' }, 400);
+    const body = await c.req.json<{ name?: string }>().catch(() => ({}));
+    const name = (body?.name ?? '').trim();
+    if (!name) return c.json({ error: 'Kategori adı gerekli' }, 400);
+    const base = 'https://api.parasut.com';
+    const res = await fetch(`${base}/v4/${auth.companyId}/item_categories/${id}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        data: { id, type: 'item_categories', attributes: { name } },
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errMsg = (json as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${res.status}`;
+      return c.json({ error: `Paraşüt: ${errMsg}` }, 400);
+    }
+    return c.json({ ok: true, message: 'Kategori güncellendi' });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Güncelleme hatası' }, 500);
+  }
+});
+
+/** Paraşüt kategori eşleştirmeleri (master_id -> parasut_id) */
+const PARASUT_CATEGORY_MAPPINGS_KEY = 'parasut_category_mappings';
+
+app.get('/api/parasut/category-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(PARASUT_CATEGORY_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/parasut/category-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(PARASUT_CATEGORY_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), PARASUT_CATEGORY_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('parasut', ?, ?)`
+      ).bind(PARASUT_CATEGORY_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/** Paraşüt marka eşleştirmeleri (master_brand_id -> parasut_manufacturer_id) */
+const PARASUT_BRAND_MAPPINGS_KEY = 'parasut_brand_mappings';
+
+app.get('/api/parasut/brand-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(PARASUT_BRAND_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/parasut/brand-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(PARASUT_BRAND_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), PARASUT_BRAND_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('parasut', ?, ?)`
+      ).bind(PARASUT_BRAND_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/** Paraşüt e-ticaret üretici/marka listesi - ecommerce_manufacturers veya products include=manufacturer */
+app.get('/api/parasut/manufacturers', async (c) => {
+  try {
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+    const base = 'https://api.parasut.com';
+    const allData: { id: string; name?: string }[] = [];
+    const seenIds = new Set<string>();
+
+    let page = 1;
+    let hasMore = true;
+    while (hasMore) {
+      const params = new URLSearchParams();
+      params.set('page[number]', String(page));
+      params.set('page[size]', '100');
+      params.set('sort', 'name');
+      const res = await fetch(`${base}/v4/${auth.companyId}/ecommerce_manufacturers?${params.toString()}`, {
+        headers: { 'Authorization': `Bearer ${auth.token}`, 'Accept': 'application/json' },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 404 || res.status === 422) break;
+        const errMsg = (json as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${res.status}`;
+        return c.json({ error: `Paraşüt API: ${errMsg}` }, 400);
+      }
+      const data = (json as { data?: unknown[] }).data ?? [];
+      const meta = (json as { meta?: { total_pages?: number } }).meta ?? {};
+      for (const item of data as { id?: string; attributes?: Record<string, unknown> }[]) {
+        const idStr = String(item.id ?? '');
+        if (seenIds.has(idStr)) continue;
+        seenIds.add(idStr);
+        const attrs = item.attributes ?? {};
+        allData.push({ id: idStr, name: (attrs.name as string) ?? idStr });
+      }
+      const totalPages = meta.total_pages ?? 1;
+      hasMore = page < totalPages && data.length > 0;
+      page += 1;
+    }
+
+    if (allData.length === 0) {
+      const prodParams = new URLSearchParams();
+      prodParams.set('page[number]', '1');
+      prodParams.set('page[size]', '100');
+      prodParams.set('include', 'manufacturer');
+      const prodRes = await fetch(`${base}/v4/${auth.companyId}/products?${prodParams.toString()}`, {
+        headers: { 'Authorization': `Bearer ${auth.token}`, 'Accept': 'application/json' },
+      });
+      const prodJson = await prodRes.json().catch(() => ({}));
+      if (prodRes.ok) {
+        const included = (prodJson as { included?: { id?: string; type?: string; attributes?: Record<string, unknown> }[] }).included ?? [];
+        for (const item of included) {
+          if (item.type === 'ecommerce_manufacturers' || item.type === 'manufacturers') {
+            const idStr = String(item.id ?? '');
+            if (seenIds.has(idStr)) continue;
+            seenIds.add(idStr);
+            const name = (item.attributes?.name as string) ?? idStr;
+            allData.push({ id: idStr, name });
+          }
+        }
+      }
+    }
+
+    allData.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+    return c.json({ data: allData });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Paraşüt markaları alınamadı' }, 500);
+  }
+});
 
 /** Paraşüt ürün kodları (products listesi eşleşme göstergesi için) */
 app.get('/api/parasut/product-codes', async (c) => {
@@ -6120,6 +7373,122 @@ app.get('/api/parasut/product-codes', async (c) => {
     return c.json({ codes });
   } catch (err: unknown) {
     return c.json({ codes: [] });
+  }
+});
+
+/** Paraşüt ürününü master olarak ekle + Paraşüt'te güncelle (isim, kod, kategori) */
+app.post('/api/parasut/products/:id/add-as-master', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const parasutId = c.req.param('id')?.trim();
+    if (!parasutId) return c.json({ error: 'Ürün ID gerekli' }, 400);
+
+    const body = await c.req.json<{
+      name: string;
+      sku?: string;
+      category_id?: number | null;
+      brand_id?: number | null;
+      type_id?: number | null;
+      barcode?: string;
+      price?: number;
+      quantity?: number;
+      tax_rate?: number;
+      unit_id?: number | null;
+      currency_id?: number | null;
+      supplier_code?: string;
+      gtip_code?: string;
+      image?: string | null;
+    }>().catch(() => ({}));
+
+    const name = (body?.name ?? '').trim();
+    if (!name) return c.json({ error: 'Ürün adı zorunludur' }, 400);
+
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+
+    const sku = body?.sku != null ? String(body.sku).trim() : null;
+    const categoryId = body?.category_id != null && body.category_id > 0 ? body.category_id : null;
+
+    let parasutCategoryId: string | undefined;
+    if (categoryId) {
+      const { results: mapRows } = await c.env.DB.prepare(
+        `SELECT value FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+      ).bind(PARASUT_CATEGORY_MAPPINGS_KEY).all();
+      const raw = (mapRows as { value?: string }[])[0]?.value;
+      const mappings = (raw ? JSON.parse(raw) : {}) as Record<string, string>;
+      parasutCategoryId = mappings[String(categoryId)];
+      if (!parasutCategoryId) {
+        return c.json({ error: 'Seçilen kategori Paraşüt\'te eşleşmemiş. Önce Paraşüt Kategoriler sayfasından kategori eşleştirmesi yapın.' }, 400);
+      }
+    }
+
+    const nextSort = await c.env.DB.prepare(`SELECT COALESCE(MAX(sort_order), 0) + 1 as n FROM products`).first();
+    const sortOrder = (nextSort as { n: number } | null)?.n ?? 1;
+
+    const price = typeof body?.price === 'number' ? body.price : (body?.price != null ? parseFloat(String(body.price)) || 0 : 0);
+    const quantity = typeof body?.quantity === 'number' ? body.quantity : (body?.quantity != null ? parseFloat(String(body.quantity)) || 0 : 0);
+    const taxRate = body?.tax_rate != null ? (typeof body.tax_rate === 'number' ? body.tax_rate : parseFloat(String(body.tax_rate)) ?? 0) : 0;
+    const barcode = body?.barcode != null ? String(body.barcode).trim() || null : null;
+    const supplierCode = body?.supplier_code != null ? String(body.supplier_code).trim() || null : null;
+    const gtipCode = body?.gtip_code != null ? String(body.gtip_code).trim() || null : null;
+
+    const brandId = body?.brand_id != null && body.brand_id > 0 ? body.brand_id : null;
+    const typeId = body?.type_id != null && body.type_id > 0 ? body.type_id : null;
+    const image = body?.image != null && String(body.image).trim() ? String(body.image).trim() : null;
+    await c.env.DB.prepare(
+      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, price, quantity, tax_rate, unit_id, currency_id, supplier_code, gtip_code, image, sort_order, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(name, sku ?? '', barcode ?? '', brandId, categoryId, typeId, price, quantity, taxRate, body?.unit_id ?? null, body?.currency_id ?? null, supplierCode ?? '', gtipCode ?? '', image, sortOrder).run();
+
+    const inserted = await c.env.DB.prepare(`SELECT id FROM products WHERE id = last_insert_rowid()`).first();
+    const productId = (inserted as { id: number } | null)?.id;
+    if (!productId) return c.json({ error: 'Ürün oluşturulamadı' }, 500);
+
+    const parseImageToFirstPath = (img: unknown): string | null => {
+      if (!img || typeof img !== 'string') return null;
+      const t = img.trim();
+      if (!t || t === '[]') return null;
+      try {
+        const parsed = JSON.parse(t);
+        if (Array.isArray(parsed)) {
+          const first = parsed.find((x: unknown): x is string => typeof x === 'string' && !!x.trim());
+          return first?.trim() ?? null;
+        }
+        return t;
+      } catch {
+        return t;
+      }
+    };
+    const attrs: Record<string, unknown> = { name, code: sku ?? '' };
+    const imagePath = parseImageToFirstPath(image);
+    if (imagePath) {
+      const photoUrl = await storagePathToDataUrl(c.env.STORAGE, imagePath);
+      if (photoUrl) attrs.photo = photoUrl;
+    }
+
+    const payload: { id: string; type: string; attributes: Record<string, unknown>; relationships?: Record<string, unknown> } = {
+      id: parasutId,
+      type: 'products',
+      attributes: attrs,
+    };
+    if (parasutCategoryId) {
+      payload.relationships = { category: { data: { type: 'item_categories', id: parasutCategoryId } } };
+    }
+
+    const base = 'https://api.parasut.com';
+    const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ data: payload }),
+    });
+    const updateJson = await updateRes.json().catch(() => ({}));
+    if (!updateRes.ok) {
+      const errMsg = (updateJson as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${updateRes.status}`;
+      return c.json({ error: `Master ürün oluşturuldu ancak Paraşüt güncellenemedi: ${errMsg}` }, 400);
+    }
+
+    return c.json({ ok: true, product_id: productId, message: 'Master ürün oluşturuldu ve Paraşüt güncellendi' });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'İşlem hatası' }, 500);
   }
 });
 
@@ -6265,8 +7634,6 @@ app.post('/api/parasut/products/push', async (c) => {
     if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
 
     const isEmpty = (v: unknown): boolean => v == null || (typeof v === 'string' && !v.trim());
-    const attrs: Record<string, unknown> = { name: productRow.name };
-    const apiOrigin = new URL(c.req.url).origin;
     const parseImageToFirstPath = (img: unknown): string | null => {
       if (!img || typeof img !== 'string') return null;
       const t = img.trim();
@@ -6282,8 +7649,14 @@ app.post('/api/parasut/products/push', async (c) => {
         return t;
       }
     };
-    const getImageFullUrl = (path: string): string =>
-      path.startsWith('http') ? path : `${apiOrigin}/storage/serve?key=${encodeURIComponent(path)}`;
+    const attrs: Record<string, unknown> = { name: productRow.name };
+    if (!isEmpty(productRow.sku)) attrs.code = productRow.sku!.trim();
+    const imagePath = parseImageToFirstPath(productRow.image);
+    if (imagePath) {
+      const photoUrl = await storagePathToDataUrl(c.env.STORAGE, imagePath);
+      if (photoUrl) attrs.photo = photoUrl;
+    }
+
     for (const { parasut, master } of selected) {
       if (master === 'name') attrs.name = productRow.name;
       else if (master === 'sku' && !isEmpty(productRow.sku)) attrs.code = productRow.sku!.trim();
@@ -6297,7 +7670,10 @@ app.post('/api/parasut/products/push', async (c) => {
       else if (master === 'currency_id') attrs.currency = (productRow.currency_code || 'TRY').toUpperCase();
       else if (master === 'image') {
         const path = parseImageToFirstPath(productRow.image);
-        if (path) attrs[parasut] = getImageFullUrl(path);
+        if (path) {
+          const photoUrl = await storagePathToDataUrl(c.env.STORAGE, path);
+          if (photoUrl) attrs[parasut] = photoUrl;
+        }
       }
     }
 
@@ -6346,6 +7722,7 @@ app.put('/api/parasut/products/:id', async (c) => {
       photo?: string;
       archived?: boolean;
       inventory_tracking?: boolean;
+      category_id?: string;
     }>().catch(() => ({}));
 
     const auth = await getParasutAuth(c);
@@ -6368,19 +7745,23 @@ app.put('/api/parasut/products/:id', async (c) => {
     if (typeof body?.archived === 'boolean') attrs.archived = body.archived;
     if (typeof body?.inventory_tracking === 'boolean') attrs.inventory_tracking = body.inventory_tracking;
 
-    if (Object.keys(attrs).length === 0) return c.json({ error: 'Güncellenecek alan bulunamadı' }, 400);
+    const payload: { id: string; type: string; attributes: Record<string, unknown>; relationships?: Record<string, unknown> } = {
+      id: parasutId,
+      type: 'products',
+      attributes: attrs,
+    };
+    const parasutCategoryId = body?.category_id != null && String(body.category_id).trim() ? String(body.category_id).trim() : undefined;
+    if (parasutCategoryId) {
+      payload.relationships = { category: { data: { type: 'item_categories', id: parasutCategoryId } } };
+    }
+
+    if (Object.keys(attrs).length === 0 && !parasutCategoryId) return c.json({ error: 'Güncellenecek alan bulunamadı' }, 400);
 
     const base = 'https://api.parasut.com';
     const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
       method: 'PUT',
       headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({
-        data: {
-          id: parasutId,
-          type: 'products',
-          attributes: attrs,
-        },
-      }),
+      body: JSON.stringify({ data: payload }),
     });
     const updateJson = await updateRes.json().catch(() => ({}));
     if (!updateRes.ok) {

@@ -16,7 +16,7 @@ export function buildProductCode(
   brandCode: string,
   supplierCode: string
 ): string {
-  const prefixParts = categoryPath.map((p) => p.code).filter(Boolean)
+  const prefixParts = categoryPath.map((p) => (p.code || p.name?.slice(0, 2)?.toUpperCase() || '').trim()).filter(Boolean)
   if (brandCode) prefixParts.push(brandCode)
   const prefix = prefixParts.join('.')
   if (!supplierCode.trim()) return prefix

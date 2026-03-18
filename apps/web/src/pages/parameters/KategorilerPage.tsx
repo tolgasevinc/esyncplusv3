@@ -19,7 +19,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ColorPresetPicker } from '@/components/ColorPresetPicker'
-import { hexToRgba } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 
@@ -339,7 +338,10 @@ export function KategorilerPage() {
                       style={{ backgroundColor: g.color }}
                     />
                   )}
-                  {g.name} ({g.code})
+                  {g.name}
+                  <span className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono font-medium bg-muted text-muted-foreground">
+                    {g.code}
+                  </span>
                 </TabsTrigger>
               ))}
               <Tooltip>
@@ -388,17 +390,16 @@ export function KategorilerPage() {
                             onClick={() => openEdit(mainCat)}
                           >
                             <div className="min-w-0 flex-1 flex items-center gap-2">
-                              <span
-                                className="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium border shrink-0"
-                                style={{
-                                  backgroundColor: mainCat.color ? hexToRgba(mainCat.color, 0.15) : undefined,
-                                  borderColor: mainCat.color || 'var(--border)',
-                                  color: mainCat.color || 'var(--muted-foreground)',
-                                }}
-                              >
+                              {mainCat.color && (
+                                <span
+                                  className="shrink-0 w-3 h-3 rounded-full border"
+                                  style={{ backgroundColor: mainCat.color }}
+                                />
+                              )}
+                              <p className="font-medium truncate min-w-0 flex-1">{mainCat.name}</p>
+                              <span className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono font-medium bg-muted text-muted-foreground">
                                 {mainCat.code}
                               </span>
-                              <p className="font-medium truncate min-w-0 flex-1">{mainCat.name}</p>
                             </div>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -431,17 +432,16 @@ export function KategorilerPage() {
                                     onClick={() => openEdit(sub)}
                                   >
                                     <div className="flex items-center gap-2 min-w-0 flex-1">
-                                      <span
-                                        className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium border shrink-0"
-                                        style={{
-                                          backgroundColor: sub.color ? hexToRgba(sub.color, 0.15) : undefined,
-                                          borderColor: sub.color || 'var(--border)',
-                                          color: sub.color || 'var(--muted-foreground)',
-                                        }}
-                                      >
+                                      {sub.color && (
+                                        <span
+                                          className="shrink-0 w-2.5 h-2.5 rounded-full border"
+                                          style={{ backgroundColor: sub.color }}
+                                        />
+                                      )}
+                                      <span className="truncate">{sub.name}</span>
+                                      <span className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono font-medium bg-muted text-muted-foreground">
                                         {sub.code}
                                       </span>
-                                      <span className="truncate">{sub.name}</span>
                                     </div>
                                   </li>
                                 ))}

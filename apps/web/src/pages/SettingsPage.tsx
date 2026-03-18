@@ -10,6 +10,7 @@ import {
   ArrowRightLeft,
   DollarSign,
   Store,
+  Download,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
@@ -22,7 +23,8 @@ const settingsSections = [
   { id: 'entegrasyonlar', title: 'Entegrasyonlar', icon: Plug, path: '/ayarlar/entegrasyonlar' },
   { id: 'hesaplamalar', title: 'Hesaplamalar', icon: Calculator, path: '/ayarlar/hesaplamalar' },
   { id: 'erisim', title: 'Erişim', icon: Shield, path: '/ayarlar/erisim' },
-  { id: 'veri-aktarimi', title: 'Veri Aktarımı', icon: ArrowRightLeft, path: '/ayarlar/veri-aktarimi' },
+  { id: 'veri-aktarimi', title: 'Veri Aktarımı (MySQL→D1)', icon: ArrowRightLeft, path: '/ayarlar/veri-aktarimi' },
+  { id: 'veri-aktarim', title: 'Veri Aktarım (Dışa/İçe)', icon: Download, path: '/veri-aktarim' },
   { id: 'doviz-kurlari', title: 'Döviz Kurları', icon: DollarSign, path: '/ayarlar/doviz-kurlari' },
   { id: 'marketplace', title: 'Marketplace', icon: Store, path: '/ayarlar/marketplace' },
 ]

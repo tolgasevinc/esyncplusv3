@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt, UsersRound, Scale, Boxes } from 'lucide-react'
+import { Package, PackageSearch, Users, Tag, Ruler, FolderTree, Layers, Type, CircleDollarSign, Percent, UserCircle, Truck, Receipt, UsersRound, Scale, Boxes, FileText, Settings, Paperclip, Tags, FileOutput } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -21,6 +21,14 @@ const customerTables = [
   { id: 'musteri-gruplari', title: 'Müşteri Grupları', icon: UsersRound, path: '/parametreler/musteri-gruplari' },
   { id: 'musteri-tipleri', title: 'Müşteri Tipleri', icon: UserCircle, path: '/parametreler/musteri-tipleri' },
   { id: 'yasal-tipler', title: 'Yasal Tipler', icon: Scale, path: '/parametreler/yasal-tipler' },
+]
+
+const teklifTables = [
+  { id: 'teklif-notlari', title: 'Teklif Notları', icon: FileText, path: '/parametreler/teklif-notlari' },
+  { id: 'teklif-ayarlari', title: 'Teklif Ayarları', icon: Settings, path: '/parametreler/teklif-ayarlari' },
+  { id: 'teklif-cikti-ayarlari', title: 'Teklif Çıktı Ayarları', icon: FileOutput, path: '/parametreler/teklif-cikti-ayarlari' },
+  { id: 'teklif-ekleri', title: 'Teklif Ekleri', icon: Paperclip, path: '/parametreler/teklif-ekleri' },
+  { id: 'teklif-dahil-haric-etiketleri', title: 'Dahil/Hariç Etiketleri', icon: Tags, path: '/parametreler/teklif-dahil-haric-etiketleri' },
 ]
 
 export function ParametersPage() {
@@ -58,6 +66,40 @@ export function ParametersPage() {
                     </p>
                   </div>
                 </div>
+                </Link>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Teklif Tabloları */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <FileText className="h-6 w-6 text-primary" />
+              <CardTitle>Teklif Tabloları</CardTitle>
+            </div>
+            <CardDescription>
+              Teklif notları, ön sayfa ve ek sayfalar
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-12 gap-4">
+              {teklifTables.map((table) => (
+                <Link key={table.id} to={table.path} className="col-span-4">
+                  <div
+                    className="flex items-center gap-3 rounded-lg border p-4 transition-colors hover:bg-accent/50 cursor-pointer"
+                  >
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <table.icon className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <p className="font-medium">{table.title}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {table.title} listesini yönet
+                      </p>
+                    </div>
+                  </div>
                 </Link>
               ))}
             </div>

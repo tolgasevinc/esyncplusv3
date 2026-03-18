@@ -48,6 +48,8 @@ interface ImageInputProps {
   placeholder?: string
   /** İkonlar klasörü için: orijinal dosya adı korunur, boyut/format işlemleri uygulanır */
   preserveFilename?: boolean
+  /** Kompakt: avatar boyutu önizleme, link input + linkten indir + yükle aynı satırda */
+  compact?: boolean
 }
 
 function getImageExtension(blob: Blob): string {
@@ -58,6 +60,8 @@ function getImageExtension(blob: Blob): string {
   return 'png'
 }
 
+const AVATAR_SIZE = 40
+
 export function ImageInput({
   value,
   onChange,
@@ -65,6 +69,7 @@ export function ImageInput({
   folderStorageKey,
   placeholder = 'Görsel linki',
   preserveFilename = false,
+  compact = false,
 }: ImageInputProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
@@ -73,8 +78,8 @@ export function ImageInput({
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const targetSize = SIZE_MAP[size]
-  const defaultFolder = folderStorageKey === 'ikonlar-klasor' ? 'icons/' : 'images/'
+  const targetSize = compact ? 400 : SIZE_MAP[size]
+  const defaultFolder = folderStorageKey === 'ikonlar-klasor' ? 'icons/' : folderStorageKey === 'urunler-klasor' ? 'images/products/' : 'images/'
 
   function getUploadFolder(): string {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(folderStorageKey) : null
@@ -176,6 +181,40 @@ export function ImageInput({
     }
   }
 
+  async function processAndUploadBlob(blob: Blob): Promise<string> {
+    if (!blob.type.startsWith('image/')) {
+      throw new Error('Geçersiz görsel formatı')
+    }
+    let toUpload: Blob
+    let ext: string
+    if (blob.type === 'image/svg+xml') {
+      toUpload = blob
+      ext = 'svg'
+    } else {
+      const img = new Image()
+      img.src = URL.createObjectURL(blob)
+      try {
+        await new Promise<void>((r, reject) => {
+          img.onload = () => r()
+          img.onerror = () => reject(new Error('Görsel yüklenemedi'))
+        })
+        try {
+          toUpload = await processToSquareWebP(img, targetSize)
+          ext = getImageExtension(toUpload)
+        } catch {
+          toUpload = blob
+          ext = blob.type === 'image/jpeg' || blob.type === 'image/jpg' ? 'jpg' : blob.type === 'image/gif' ? 'gif' : 'png'
+        }
+      } finally {
+        URL.revokeObjectURL(img.src)
+      }
+    }
+    const linkFilename = preserveFilename ? `icon.${ext}` : `image.${ext}`
+    const url = await uploadBlob(toUpload, linkFilename, preserveFilename)
+    if (value) await deleteOldImage(value)
+    return url
+  }
+
   async function handleLinkConfirm() {
     if (!linkPreview) return
     setUploading(true)
@@ -183,36 +222,7 @@ export function ImageInput({
     try {
       const res = await fetch(linkPreview)
       const blob = await res.blob()
-      if (!blob.type.startsWith('image/')) {
-        throw new Error('Geçersiz görsel formatı')
-      }
-      let toUpload: Blob
-      let ext: string
-      if (blob.type === 'image/svg+xml') {
-        toUpload = blob
-        ext = 'svg'
-      } else {
-        const img = new Image()
-        img.src = URL.createObjectURL(blob)
-        try {
-          await new Promise<void>((r, reject) => {
-            img.onload = () => r()
-            img.onerror = () => reject(new Error('Görsel yüklenemedi'))
-          })
-          try {
-            toUpload = await processToSquareWebP(img, targetSize)
-            ext = getImageExtension(toUpload)
-          } catch {
-            toUpload = blob
-            ext = blob.type === 'image/jpeg' || blob.type === 'image/jpg' ? 'jpg' : blob.type === 'image/gif' ? 'gif' : 'png'
-          }
-        } finally {
-          URL.revokeObjectURL(img.src)
-        }
-      }
-      const linkFilename = preserveFilename ? `icon.${ext}` : `image.${ext}`
-      const url = await uploadBlob(toUpload, linkFilename, preserveFilename)
-      if (value) await deleteOldImage(value)
+      const url = await processAndUploadBlob(blob)
       onChange(url)
       setLinkModalOpen(false)
       setLinkUrl('')
@@ -224,7 +234,96 @@ export function ImageInput({
     }
   }
 
+  async function handleInlineLinkFetch() {
+    if (!linkUrl.trim()) return
+    setUploading(true)
+    setError(null)
+    try {
+      let blob: Blob
+      try {
+        const res = await fetch(linkUrl)
+        if (!res.ok) throw new Error('Görsel alınamadı')
+        blob = await res.blob()
+      } catch {
+        const proxyUrl = `${API_URL}/storage/proxy-image?url=${encodeURIComponent(linkUrl)}`
+        const res = await fetch(proxyUrl)
+        if (!res.ok) throw new Error('Görsel alınamadı (CORS veya geçersiz link)')
+        blob = await res.blob()
+      }
+      const url = await processAndUploadBlob(blob)
+      onChange(url)
+      setLinkUrl('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Görsel alınamadı')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   const logoBoxSize = Math.max(targetSize, 40)
+
+  if (compact) {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <div
+            className="shrink-0 rounded-full border bg-muted flex items-center justify-center overflow-hidden"
+            style={{
+              width: AVATAR_SIZE,
+              height: AVATAR_SIZE,
+              ...(value
+                ? {
+                    backgroundImage: `url(${getImageDisplayUrl(value)})`,
+                    backgroundSize: 'cover',
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'center',
+                  }
+                : {}),
+            }}
+            role="img"
+            aria-label={value ? 'Önizleme' : 'Görsel'}
+          >
+            {!value && <span className="text-muted-foreground text-xs">?</span>}
+          </div>
+          <Input
+            value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)}
+            placeholder="Görsel linki yapıştır..."
+            className="flex-1 min-w-0 h-9"
+            onKeyDown={(e) => e.key === 'Enter' && handleInlineLinkFetch()}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleInlineLinkFetch}
+            disabled={uploading || !linkUrl.trim()}
+            className="shrink-0 h-9"
+          >
+            {uploading ? '...' : 'Linkten indir'}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => fileRef.current?.click()}
+            disabled={uploading}
+            className="shrink-0 h-9"
+          >
+            Yükle
+          </Button>
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleFileSelect}
+        />
+        {error && <p className="text-sm text-destructive">{error}</p>}
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-2">

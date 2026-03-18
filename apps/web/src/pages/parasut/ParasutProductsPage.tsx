@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, RefreshCw, Package, AlertCircle, SlidersHorizontal, Plus, Trash2, Download, Upload, Pencil, Link2 } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Search, RefreshCw, Package, AlertCircle, SlidersHorizontal, Plus, Trash2, Download, Upload, Pencil, Link2, AlertTriangle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -18,6 +18,9 @@ import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePag
 import { API_URL } from '@/lib/api'
 import { cn, formatPriceWithSymbol } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { CategorySelect, getCategoryPath, type CategoryItem } from '@/components/CategorySelect'
+import { ImageInput } from '@/components/ImageInput'
+import { buildProductCode } from '@/lib/productCode'
 
 /** Paraşüt API ürün alanları */
 const PARASUT_FIELDS = [
@@ -109,6 +112,7 @@ interface ParasutProduct {
   updated_at?: string
   gtip?: string
   photo?: string
+  category_id?: string
 }
 
 interface EditForm {
@@ -181,7 +185,23 @@ export function ParasutProductsPage() {
   const [editModalProduct, setEditModalProduct] = useState<ParasutProduct | null>(null)
   const [editForm, setEditForm] = useState<EditForm>(emptyEditForm)
   const [editSaving, setEditSaving] = useState(false)
-  const [pullFormValues, setPullFormValues] = useState<Record<string, string>>({})
+  const [addMasterForm, setAddMasterForm] = useState<{
+    name: string
+    sku: string
+    category_id: number | ''
+    brand_id: number | ''
+    type_id: number | ''
+    unit_id: number | ''
+    tax_rate: number | ''
+    supplier_code: string
+    image: string
+  }>({ name: '', sku: '', category_id: '', brand_id: '', type_id: '', unit_id: '', tax_rate: '', supplier_code: '', image: '' })
+  const [masterCategories, setMasterCategories] = useState<CategoryItem[]>([])
+  const [categoryMappings, setCategoryMappings] = useState<Record<string, string>>({})
+  const [brands, setBrands] = useState<{ id: number; name: string; code?: string }[]>([])
+  const [types, setTypes] = useState<{ id: number; name: string; code?: string }[]>([])
+  const [units, setUnits] = useState<{ id: number; name: string; code?: string }[]>([])
+  const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
   const [matchModalProduct, setMatchModalProduct] = useState<ParasutProduct | null>(null)
   const [matchMasterProduct, setMatchMasterProduct] = useState<{ id: number; name: string; sku?: string } | null>(null)
   const [matchMasterSearch, setMatchMasterSearch] = useState('')
@@ -190,6 +210,24 @@ export function ParasutProductsPage() {
   const [matchLoading, setMatchLoading] = useState(false)
 
   const limit = pageSize === 'fit' ? fitLimit : pageSize
+
+  const addMasterCategoryPath = useMemo(
+    () => getCategoryPath(masterCategories, addMasterForm.category_id),
+    [masterCategories, addMasterForm.category_id]
+  )
+  const addMasterBrandCode = useMemo(
+    () => (addMasterForm.brand_id ? brands.find((b) => b.id === addMasterForm.brand_id)?.code ?? '' : ''),
+    [brands, addMasterForm.brand_id]
+  )
+  const addMasterGeneratedSku = useMemo(
+    () => buildProductCode(addMasterCategoryPath, addMasterBrandCode, addMasterForm.supplier_code ?? ''),
+    [addMasterCategoryPath, addMasterBrandCode, addMasterForm.supplier_code]
+  )
+
+  useEffect(() => {
+    if (!pullModalProduct) return
+    setAddMasterForm((f) => ({ ...f, sku: addMasterGeneratedSku }))
+  }, [addMasterGeneratedSku, pullModalProduct])
 
   const getParasutValueForMaster = useCallback((parasut: string, product: ParasutProduct | null): string => {
     if (!product) return ''
@@ -241,6 +279,19 @@ export function ParasutProductsPage() {
   const openPullModal = useCallback((p: ParasutProduct) => {
     setPullModalProduct(p)
     setPushModalProduct(null)
+    const pr = p as ParasutProduct & { photo?: string }
+    const nameVal = String(p.name ?? '').trim() || String(p.code ?? '').trim() || 'Ürün'
+    setAddMasterForm({
+      name: nameVal,
+      sku: '',
+      category_id: '',
+      brand_id: '',
+      type_id: '',
+      unit_id: '',
+      tax_rate: pr.vat_rate != null ? pr.vat_rate : '',
+      supplier_code: '',
+      image: String(pr.photo ?? '').trim(),
+    })
   }, [])
 
   const openPushModal = useCallback((p: ParasutProduct) => {
@@ -286,21 +337,98 @@ export function ParasutProductsPage() {
     }
   }, [pullModalProduct, pushModalProduct])
 
+  /** Çek modalı açıldığında formu ürün verisiyle doldur (name, image vb.) */
+  useEffect(() => {
+    if (!pullModalProduct) return
+    const pr = pullModalProduct as ParasutProduct & { photo?: string }
+    const nameVal = String(pr.name ?? '').trim() || String(pr.code ?? '').trim() || 'Ürün'
+    setAddMasterForm((f) => ({
+      ...f,
+      name: nameVal,
+      image: String(pr.photo ?? '').trim(),
+    }))
+  }, [pullModalProduct])
+
+  useEffect(() => {
+    if (!pullModalProduct) return
+    Promise.all([
+      fetch(`${API_URL}/api/product-categories?limit=9999`).then((r) => r.json()),
+      fetch(`${API_URL}/api/parasut/category-mappings`).then((r) => r.json()),
+      fetch(`${API_URL}/api/product-brands?limit=9999`).then((r) => r.json()),
+      fetch(`${API_URL}/api/product-types?limit=9999`).then((r) => r.json()),
+      fetch(`${API_URL}/api/product-units?limit=9999`).then((r) => r.json()),
+      fetch(`${API_URL}/api/product-tax-rates?limit=9999`).then((r) => r.json()),
+    ]).then(([catData, mapData, brandData, typeData, unitData, taxData]) => {
+      setMasterCategories(
+        (catData.data ?? []).map((x: { id: number; name: string; code?: string; group_id?: number | null; category_id?: number | null; sort_order?: number; color?: string }) => ({
+          id: x.id,
+          name: x.name,
+          code: (x.code || x.name?.slice(0, 2)?.toUpperCase()) ?? '',
+          group_id: x.group_id,
+          category_id: x.category_id,
+          sort_order: x.sort_order ?? 0,
+          color: x.color,
+        }))
+      )
+      const mappings = (mapData.mappings ?? {}) as Record<string, string>
+      setCategoryMappings(mappings)
+      setBrands((brandData.data ?? []).map((x: { id: number; name: string; code?: string }) => ({
+        id: x.id,
+        name: x.name,
+        code: (x.code || x.name?.slice(0, 2)?.toUpperCase()) ?? '',
+      })))
+      setTypes((typeData.data ?? []).map((x: { id: number; name: string; code?: string }) => ({
+        id: x.id,
+        name: x.name,
+        code: x.code ?? '',
+      })))
+      setUnits((unitData.data ?? []).map((x: { id: number; name: string; code?: string }) => ({
+        id: x.id,
+        name: x.name,
+        code: (x.code || x.name?.slice(0, 2)?.toUpperCase()) ?? '',
+      })))
+      setTaxRates((taxData.data ?? []).map((x: { id: number; name: string; value: number }) => ({
+        id: x.id,
+        name: x.name,
+        value: x.value ?? 0,
+      })))
+      let updates: Partial<{ category_id: number; unit_id: number }> = {}
+      const parasutCatId = pullModalProduct.category_id != null ? String(pullModalProduct.category_id) : ''
+      if (parasutCatId) {
+        const masterId = Object.entries(mappings).find(([, v]) => String(v) === parasutCatId)?.[0]
+        if (masterId) {
+          const mid = parseInt(masterId, 10)
+          if (!Number.isNaN(mid)) updates.category_id = mid
+        }
+      }
+      const parasutUnit = (pullModalProduct.unit ?? '').toString().trim().toUpperCase()
+      if (parasutUnit) {
+        const unitList = (unitData.data ?? []) as { id: number; name: string; code?: string }[]
+        const matchedUnit = unitList.find(
+          (u) =>
+            (u.code ?? '').toUpperCase() === parasutUnit ||
+            (u.name ?? '').toUpperCase() === parasutUnit ||
+            (u.code ?? '').toUpperCase().startsWith(parasutUnit) ||
+            (u.name ?? '').toUpperCase().startsWith(parasutUnit)
+        )
+        if (matchedUnit) updates.unit_id = matchedUnit.id
+      }
+      if (Object.keys(updates).length > 0) {
+        setAddMasterForm((f) => ({ ...f, ...updates }))
+      }
+    }).catch(() => {})
+  }, [pullModalProduct])
+
   useEffect(() => {
     if ((pullModalProduct || pushModalProduct) && rules.length > 0) {
       const initial: Record<string, boolean> = {}
-      const formVals: Record<string, string> = {}
       rules.forEach((r) => {
         const key = `${r.parasut}:${r.master}`
         initial[key] = true
-        if (pullModalProduct) {
-          formVals[key] = getParasutValueForMaster(r.parasut, pullModalProduct)
-        }
       })
       setFieldCheckboxes(initial)
-      if (pullModalProduct) setPullFormValues(formVals)
     }
-  }, [pullModalProduct, pushModalProduct, rules, getParasutValueForMaster])
+  }, [pullModalProduct, pushModalProduct, rules])
 
   useEffect(() => {
     const t = setTimeout(() => setPushMasterSearchDebounced(pushMasterSearch), 300)
@@ -430,44 +558,59 @@ export function ParasutProductsPage() {
     fetchProducts()
   }, [fetchProducts])
 
-  const handlePull = useCallback(async () => {
+  const handleAddAsMaster = useCallback(async () => {
     if (!pullModalProduct) return
-    const selected = rules
-      .filter((r) => fieldCheckboxes[`${r.parasut}:${r.master}`])
-      .map((r) => ({ parasut: r.parasut, master: r.master }))
-    if (selected.length === 0) {
-      toastError('Hata', 'En az bir alan seçin')
+    const name = addMasterForm.name.trim()
+    if (!name) {
+      toastError('Hata', 'Ürün adı zorunludur')
       return
     }
-    const override_values: Record<string, string | number> = {}
-    for (const { parasut, master } of selected) {
-      const key = `${parasut}:${master}`
-      const raw = pullFormValues[key] ?? ''
-      if (master === 'price' || master === 'quantity' || master === 'tax_rate') {
-        const n = parseFloat(raw)
-        override_values[master] = Number.isNaN(n) ? 0 : n
-      } else {
-        override_values[master] = raw.trim()
-      }
+    if (!addMasterForm.type_id) {
+      toastError('Hata', 'Ürün tipi seçin')
+      return
+    }
+    const categoryId = addMasterForm.category_id
+    if (categoryId && !categoryMappings[String(categoryId)]) {
+      toastError('Hata', 'Seçilen kategori Paraşüt\'te eşleşmemiş. Önce Paraşüt Kategoriler sayfasından kategori eşleştirmesi yapın.')
+      return
+    }
+    const effectiveSku = addMasterForm.sku.trim() || addMasterGeneratedSku
+    if (!effectiveSku) {
+      toastError('Hata', 'Kod oluşturmak için kategori, marka veya tedarikçi kodu girin')
+      return
     }
     setTransferLoading(true)
     try {
-      const res = await fetch(`${API_URL}/api/parasut/products/${pullModalProduct.id}/pull`, {
+      const res = await fetch(`${API_URL}/api/parasut/products/${pullModalProduct.id}/add-as-master`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_fields: selected, override_values }),
+        body: JSON.stringify({
+          name,
+          sku: effectiveSku,
+          category_id: categoryId || null,
+          brand_id: addMasterForm.brand_id || null,
+          type_id: addMasterForm.type_id || null,
+          unit_id: addMasterForm.unit_id || null,
+          tax_rate: addMasterForm.tax_rate !== '' ? addMasterForm.tax_rate : (pullModalProduct.vat_rate ?? 0),
+          supplier_code: addMasterForm.supplier_code?.trim() || null,
+          image: addMasterForm.image?.trim() || null,
+          price: pullModalProduct.list_price ?? 0,
+          quantity: pullModalProduct.stock_count ?? 0,
+          barcode: pullModalProduct.barcode?.trim() || undefined,
+          gtip: (pullModalProduct as ParasutProduct & { gtip?: string }).gtip?.trim() || undefined,
+        }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error((data as { error?: string }).error || 'Çekme başarısız')
-      toastSuccess('Başarılı', 'Ürün master products\'a çekildi.')
+      if (!res.ok) throw new Error((data as { error?: string }).error || 'İşlem başarısız')
+      toastSuccess('Başarılı', 'Master ürün oluşturuldu ve Paraşüt güncellendi.')
       setPullModalProduct(null)
       fetchProducts()
     } catch (err) {
-      toastError('Hata', err instanceof Error ? err.message : 'Çekme başarısız')
+      toastError('Hata', err instanceof Error ? err.message : 'İşlem başarısız')
     } finally {
       setTransferLoading(false)
     }
-  }, [pullModalProduct, rules, fieldCheckboxes, pullFormValues, fetchProducts])
+  }, [pullModalProduct, addMasterForm, addMasterGeneratedSku, categoryMappings, fetchProducts])
 
   const handlePush = useCallback(async () => {
     if (!pushModalProduct || !pushMasterProduct) return
@@ -915,70 +1058,147 @@ export function ParasutProductsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Çek modal - Paraşüt → Master */}
-      <Dialog open={!!pullModalProduct} onOpenChange={(o) => !o && (setPullModalProduct(null), setPullFormValues({}))}>
-        <DialogContent className="max-w-xl p-6 sm:p-8">
+      {/* Çek modal - Master Ürün Ekle */}
+      <Dialog open={!!pullModalProduct} onOpenChange={(o) => !o && (setPullModalProduct(null), setAddMasterForm({ name: '', sku: '', category_id: '', brand_id: '', type_id: '', unit_id: '', tax_rate: '', supplier_code: '', image: '' }))}>
+        <DialogContent className="max-w-xl p-6 sm:p-8 max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Paraşüt → Master Çek</DialogTitle>
+            <DialogTitle>Master Ürün Ekle</DialogTitle>
             <DialogDescription>
-              {pullModalProduct?.name ?? pullModalProduct?.code ?? 'Ürün'} — Çekilecek alanları seçin ve değerleri düzenleyin.
+              {pullModalProduct?.name ?? pullModalProduct?.code ?? 'Ürün'} — Paraşüt ürününü master olarak ekleyin. Kaydet ile hem master hem Paraşüt güncellenir.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 py-4 max-h-[70vh] overflow-y-auto overflow-x-hidden min-w-0">
-            {rules.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Önce Kurallar ile eşleştirme tanımlayın.</p>
-            ) : (
-              rules.map((r) => {
-                const key = `${r.parasut}:${r.master}`
-                const isChecked = fieldCheckboxes[key] ?? true
-                const isNumeric = ['price', 'quantity', 'tax_rate'].includes(r.master)
-                const isCurrency = r.master === 'currency_id'
-                return (
-                  <div key={key} className="flex flex-col sm:flex-row sm:items-center gap-2 p-2 rounded-lg border bg-muted/20">
-                    <label className="flex items-center gap-2 cursor-pointer shrink-0 sm:w-48">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={(e) => setFieldCheckboxes((prev) => ({ ...prev, [key]: e.target.checked }))}
-                        className="rounded border-input"
-                      />
-                      <span className="text-sm font-medium">{getFieldLabel(r.parasut, r.master)}</span>
-                    </label>
-                    <div className="flex-1 min-w-0">
-                      {isCurrency ? (
-                        <select
-                          value={pullFormValues[key] ?? ''}
-                          onChange={(e) => setPullFormValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                          disabled={!isChecked}
-                          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm disabled:opacity-50"
-                          aria-label={getFieldLabel(r.parasut, r.master)}
-                        >
-                          <option value="">Seçin</option>
-                          {CURRENCY_OPTIONS.map((c) => (
-                            <option key={c} value={c}>{c}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <Input
-                          type={isNumeric ? 'number' : 'text'}
-                          step={isNumeric ? '0.01' : undefined}
-                          value={pullFormValues[key] ?? ''}
-                          onChange={(e) => setPullFormValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                          disabled={!isChecked}
-                          placeholder={r.master === 'unit_id' ? 'Birim kodu (örn: ADET)' : getFieldLabel(r.parasut, r.master)}
-                          className="h-9 text-sm"
-                        />
-                      )}
-                    </div>
-                  </div>
-                )
-              })
+          <div className="space-y-4 py-4 min-w-0">
+            {pullModalProduct?.category_id && !Object.values(categoryMappings).includes(pullModalProduct.category_id) && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200 text-sm">
+                <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
+                <span>Paraşüt ürününde kategori var ancak eşleşme bulunamadı. Kategori seçerseniz önce Paraşüt Kategoriler sayfasından eşleştirme yapın.</span>
+              </div>
             )}
+            <div className="space-y-2">
+              <Label htmlFor="add-master-name">Ürün Adı *</Label>
+              <Input
+                id="add-master-name"
+                value={addMasterForm.name}
+                onChange={(e) => setAddMasterForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="Ürün adı"
+              />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="add-master-brand">Marka</Label>
+                <select
+                  id="add-master-brand"
+                  value={addMasterForm.brand_id}
+                  onChange={(e) => setAddMasterForm((f) => ({ ...f, brand_id: e.target.value ? Number(e.target.value) : '' }))}
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                >
+                  <option value="">Seçin</option>
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>{b.name} {b.code ? `[${b.code}]` : ''}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="add-master-type">Ürün Tipi *</Label>
+                <select
+                  id="add-master-type"
+                  value={addMasterForm.type_id}
+                  onChange={(e) => setAddMasterForm((f) => ({ ...f, type_id: e.target.value ? Number(e.target.value) : '' }))}
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                >
+                  <option value="">Seçin</option>
+                  {types.map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Kategori</Label>
+              <CategorySelect
+                categories={masterCategories}
+                value={addMasterForm.category_id}
+                onChange={(id) => setAddMasterForm((f) => ({ ...f, category_id: id }))}
+                placeholder="Kategori seçin (eşleşmiş olmalı)"
+                variant="badge"
+              />
+              {addMasterForm.category_id && !categoryMappings[String(addMasterForm.category_id)] && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                  <AlertTriangle className="h-3.5 w-3" />
+                  Eşleşen kategori yok — kaydetmeden önce Paraşüt Kategoriler sayfasından eşleştirin.
+                </p>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="add-master-unit">Birim (opsiyonel)</Label>
+                <select
+                  id="add-master-unit"
+                  value={addMasterForm.unit_id}
+                  onChange={(e) => setAddMasterForm((f) => ({ ...f, unit_id: e.target.value ? Number(e.target.value) : '' }))}
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                >
+                  <option value="">Birim seçilmeden kaydedilebilir</option>
+                  {units.map((u) => (
+                    <option key={u.id} value={u.id}>{u.name} {u.code ? `[${u.code}]` : ''}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="add-master-tax">Vergi Oranı (%)</Label>
+                <select
+                  id="add-master-tax"
+                  value={addMasterForm.tax_rate === '' ? '' : String(addMasterForm.tax_rate)}
+                  onChange={(e) => setAddMasterForm((f) => ({ ...f, tax_rate: e.target.value === '' ? '' : parseFloat(e.target.value) }))}
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                >
+                  <option value="">Seçin</option>
+                  {taxRates.map((tr) => (
+                    <option key={tr.id} value={tr.value}>{tr.name} ({tr.value}%)</option>
+                  ))}
+                  {addMasterForm.tax_rate !== '' && !taxRates.some((tr) => tr.value === addMasterForm.tax_rate) && (
+                    <option value={String(addMasterForm.tax_rate)}>{addMasterForm.tax_rate}%</option>
+                  )}
+                </select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="add-master-supplier">Tedarikçi Kodu</Label>
+              <Input
+                id="add-master-supplier"
+                value={addMasterForm.supplier_code}
+                onChange={(e) => setAddMasterForm((f) => ({ ...f, supplier_code: e.target.value }))}
+                placeholder="Tedarikçi kodu girildiğinde kod otomatik oluşur"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Görsel</Label>
+              <ImageInput
+                value={addMasterForm.image}
+                onChange={(v) => setAddMasterForm((f) => ({ ...f, image: v }))}
+                folderStorageKey="urunler-klasor"
+                placeholder="Ürün görseli"
+                compact
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="add-master-sku">Kod (SKU)</Label>
+              <Input
+                id="add-master-sku"
+                value={addMasterForm.sku}
+                onChange={(e) => setAddMasterForm((f) => ({ ...f, sku: e.target.value }))}
+                placeholder="Kategori + marka + tedarikçi kodundan otomatik oluşur"
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                {addMasterGeneratedSku ? `Otomatik: ${addMasterGeneratedSku}` : 'Kategori, marka veya tedarikçi kodu girin'}
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setPullModalProduct(null)}>İptal</Button>
-            <Button onClick={handlePull} disabled={transferLoading || rules.length === 0}>
-              {transferLoading ? 'Çekiliyor...' : 'Çek'}
+            <Button onClick={handleAddAsMaster} disabled={transferLoading || !addMasterForm.name.trim() || !addMasterForm.type_id}>
+              {transferLoading ? 'Kaydediliyor...' : 'Kaydet'}
             </Button>
           </DialogFooter>
         </DialogContent>
