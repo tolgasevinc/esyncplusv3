@@ -943,11 +943,12 @@ export function TeklifFormPage() {
                 />
                 <Label htmlFor="include-cover-top" className="text-sm cursor-pointer">Ön sayfa ekle (PDF'de firma tanıtım sayfası gösterilir)</Label>
               </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Müşteri</Label>
-                <div className="flex items-center gap-2">
-                  {(customerEditMode || !editingId) ? (
-                    <div className="flex gap-2 flex-1 min-w-0">
+              <div className="flex gap-4 flex-wrap">
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Müşteri</Label>
+                  <div className="flex items-center gap-2">
+                    {(customerEditMode || !editingId) ? (
+                      <div className="flex gap-2 flex-1 min-w-0">
                       <Popover open={customerSearchResults.length > 0}>
                         <PopoverAnchor asChild>
                           <div className="relative flex-1 min-w-0">
@@ -1045,6 +1046,16 @@ export function TeklifFormPage() {
                     </Tooltip>
                   )}
                 </div>
+                </div>
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Yetkili Adı</Label>
+                  <Input
+                    value={form.authorized_name || ''}
+                    onChange={(e) => setForm((f) => ({ ...f, authorized_name: e.target.value }))}
+                    placeholder="Yetkili adı"
+                    className="h-9 w-full"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1062,10 +1073,6 @@ export function TeklifFormPage() {
                     <div className="space-y-2">
                       <Label className="text-xs">Firma Adı</Label>
                       <Input value={form.company_name || ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} placeholder="Firma adı" className="h-9" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs">Yetkili Adı</Label>
-                      <Input value={form.authorized_name || ''} onChange={(e) => setForm((f) => ({ ...f, authorized_name: e.target.value }))} placeholder="Yetkili adı" className="h-9" />
                     </div>
                     <div className="space-y-2">
                       <Label className="text-xs">Telefon</Label>

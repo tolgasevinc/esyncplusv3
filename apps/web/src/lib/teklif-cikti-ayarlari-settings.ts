@@ -13,6 +13,7 @@ export type PdfBlockType =
   | 'image'
   | 'text'
   | 'qr_code'
+  | 'line'
 
 /** Tek bir PDF blok tanımı */
 export type PdfBlock = {
@@ -47,11 +48,28 @@ export type PdfBlock = {
   text_content?: string
   // qr_code (QR kod - encode edilecek metin/URL)
   qr_content?: string
+  // line (çizgi)
+  lineOrientation?: 'horizontal' | 'vertical'
+  lineLength?: number
+  lineThickness?: number
+  lineColor?: string
 }
+
+/** Sayfa boyutu preset'leri */
+export const PAGE_PRESETS = [
+  { label: 'A4 (210 × 297 mm)', width: 2100, height: 2970 },
+  { label: 'A3 (297 × 420 mm)', width: 2970, height: 4200 },
+  { label: 'Letter (216 × 279 mm)', width: 2160, height: 2790 },
+  { label: 'Legal (216 × 356 mm)', width: 2160, height: 3560 },
+] as const
 
 /** Layout config - bloklar dizisi */
 export type TeklifCiktiLayoutConfig = {
   blocks: PdfBlock[]
+  /** Sayfa genişliği piksel (10px = 1mm). Varsayılan: 2100 = A4 210mm */
+  pageWidth?: number
+  /** Sayfa yüksekliği piksel (10px = 1mm). Varsayılan: 2970 = A4 297mm */
+  pageHeight?: number
 }
 
 /** Blok tipi etiketleri */
@@ -65,6 +83,7 @@ export const BLOCK_TYPE_LABELS: Record<PdfBlockType, string> = {
   image: 'Görsel Bloğu',
   text: 'Yazı Bloğu',
   qr_code: 'QR Kod',
+  line: 'Çizgi',
 }
 
 /** Google Fonts listesi - teklif çıktısında kullanılabilir yazı tipleri */
@@ -210,6 +229,8 @@ export function createDefaultBlock(type: PdfBlockType, sortOrder: number): PdfBl
       return { ...base, x: 20, y: 20, width: 170, height: 30, text_content: 'Serbest metin' }
     case 'qr_code':
       return { ...base, x: 20, y: 20, width: 40, height: 40, qr_content: 'https://example.com' }
+    case 'line':
+      return { ...base, x: 20, y: 20, width: 170, height: 0.5, lineOrientation: 'horizontal', lineLength: 170, lineThickness: 0.5, lineColor: '#000000' }
     default:
       return base as PdfBlock
   }
@@ -260,7 +281,7 @@ function migrateLegacyToBlocks(legacy: Record<string, unknown>): PdfBlock[] {
 
 /** Varsayılan layout - boş (kullanıcı blok ekleyecek) */
 export function getDefaultLayoutConfig(): TeklifCiktiLayoutConfig {
-  return { blocks: [] }
+  return { blocks: [], pageWidth: 2100, pageHeight: 2970 }
 }
 
 export function parseLayoutConfig(json: string | undefined): TeklifCiktiLayoutConfig {

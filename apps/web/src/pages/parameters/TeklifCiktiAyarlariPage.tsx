@@ -22,8 +22,9 @@ import {
   AlignLeft,
   AlignCenter,
   AlignRight,
+  Layout,
 } from 'lucide-react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
@@ -41,6 +42,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Check } from 'lucide-react'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { toastSuccess, toastError } from '@/lib/toast'
@@ -54,10 +56,63 @@ import {
   createDefaultBlock,
   BLOCK_TYPE_LABELS,
   FONT_FAMILIES,
+  PAGE_PRESETS,
   type TeklifCiktiLayoutConfig,
   type PdfBlock,
   type PdfBlockType,
 } from '@/lib/teklif-cikti-ayarlari-settings'
+
+/** Sayısal giriş — sağda tek spinner (yukarı/aşağı oklar) */
+function NumericInput({
+  value,
+  onChange,
+  step = 1,
+  min,
+  max,
+  className,
+}: {
+  value: number
+  onChange: (v: number) => void
+  step?: number
+  min?: number
+  max?: number
+  className?: string
+}) {
+  const clamp = (v: number) => {
+    if (min !== undefined && v < min) return min
+    if (max !== undefined && v > max) return max
+    return v
+  }
+  return (
+    <div className={`flex h-10 rounded-md border border-input bg-background overflow-hidden focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-0 ${className ?? ''}`}>
+      <input
+        type="number"
+        value={value}
+        step={step}
+        onChange={(e) => onChange(clamp(Number(e.target.value)))}
+        className="flex-1 min-w-0 px-3 py-2 text-sm bg-transparent outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+      />
+      <div className="flex flex-col w-8 shrink-0 bg-muted/60 border-l border-input">
+        <button
+          type="button"
+          tabIndex={-1}
+          className="flex-1 flex items-center justify-center min-h-0 text-muted-foreground hover:bg-muted/80 active:bg-muted transition-colors"
+          onClick={() => onChange(clamp(Number((value + step).toFixed(10))))}
+        >
+          <ChevronUp className="h-3 w-3" strokeWidth={2.5} />
+        </button>
+        <button
+          type="button"
+          tabIndex={-1}
+          className="flex-1 flex items-center justify-center min-h-0 text-muted-foreground hover:bg-muted/80 active:bg-muted transition-colors"
+          onClick={() => onChange(clamp(Number((value - step).toFixed(10))))}
+        >
+          <ChevronDown className="h-3 w-3" strokeWidth={2.5} />
+        </button>
+      </div>
+    </div>
+  )
+}
 
 const BLOCK_ICONS: Record<PdfBlockType, typeof Building2> = {
   company: Building2,
@@ -69,10 +124,11 @@ const BLOCK_ICONS: Record<PdfBlockType, typeof Building2> = {
   image: Image,
   text: Type,
   qr_code: QrCode,
+  line: Minus,
 }
 
 /** Birden fazla eklenebilen blok tipleri */
-const MULTIPLE_BLOCK_TYPES: PdfBlockType[] = ['text', 'qr_code']
+const MULTIPLE_BLOCK_TYPES: PdfBlockType[] = ['text', 'qr_code', 'line']
 
 /** Yazı tipi seçici - her seçenek kendi fontuyla gösterilir */
 function FontSelect({
@@ -140,6 +196,8 @@ function BlockEditDialog({
   const isImage = edited.type === 'image'
   const isText = edited.type === 'text'
   const isQrCode = edited.type === 'qr_code'
+  const isLine = edited.type === 'line'
+  const isOfferHeader = edited.type === 'offer_header'
 
   const handleSave = () => {
     onSave(edited)
@@ -212,6 +270,44 @@ function BlockEditDialog({
               </div>
             </>
           )}
+          {isOfferHeader && (
+            <div>
+              <Label className="text-xs">Hizalama</Label>
+              <p className="text-xs text-muted-foreground mb-1">Teklif No ve Tarih hizalaması</p>
+              <div className="flex gap-1 mt-1">
+                <Button
+                  type="button"
+                  variant={edited.textAlign === 'left' ? 'default' : 'outline'}
+                  size="icon"
+                  className={`h-10 w-10 shrink-0 ${edited.textAlign === 'left' ? 'ring-2 ring-primary ring-offset-2' : ''}`}
+                  onClick={() => setEdited((b) => (b ? { ...b, textAlign: 'left' as const } : b))}
+                  title="Sola yaslı"
+                >
+                  <AlignLeft className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={edited.textAlign === 'center' ? 'default' : 'outline'}
+                  size="icon"
+                  className={`h-10 w-10 shrink-0 ${edited.textAlign === 'center' ? 'ring-2 ring-primary ring-offset-2' : ''}`}
+                  onClick={() => setEdited((b) => (b ? { ...b, textAlign: 'center' as const } : b))}
+                  title="Ortala"
+                >
+                  <AlignCenter className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={edited.textAlign === 'right' ? 'default' : 'outline'}
+                  size="icon"
+                  className={`h-10 w-10 shrink-0 ${edited.textAlign === 'right' ? 'ring-2 ring-primary ring-offset-2' : ''}`}
+                  onClick={() => setEdited((b) => (b ? { ...b, textAlign: 'right' as const } : b))}
+                  title="Sağa yaslı"
+                >
+                  <AlignRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          )}
           {isQrCode && (
             <div>
               <Label className="text-xs">QR Kod İçeriği</Label>
@@ -225,58 +321,129 @@ function BlockEditDialog({
               </p>
             </div>
           )}
+          {isLine && (
+            <div className="space-y-3 rounded-lg border p-4 bg-muted/30">
+              <Label className="text-sm font-medium">Çizgi Ayarları</Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs">Yön</Label>
+                  <div className="flex gap-2 mt-1">
+                    <Button
+                      type="button"
+                      variant={(edited.lineOrientation ?? 'horizontal') === 'horizontal' ? 'default' : 'outline'}
+                      className="flex-1"
+                      size="sm"
+                      onClick={() => setEdited((b) => (b ? { ...b, lineOrientation: 'horizontal' } : b))}
+                    >
+                      Yatay ─
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={(edited.lineOrientation ?? 'horizontal') === 'vertical' ? 'default' : 'outline'}
+                      className="flex-1"
+                      size="sm"
+                      onClick={() => setEdited((b) => (b ? { ...b, lineOrientation: 'vertical' } : b))}
+                    >
+                      Dikey │
+                    </Button>
+                  </div>
+                </div>
+                <div>
+                  <Label className="text-xs">Uzunluk (mm)</Label>
+                  <NumericInput
+                    value={edited.lineLength ?? 170}
+                    min={1}
+                    max={500}
+                    onChange={(v) => setEdited((b) => (b ? { ...b, lineLength: v } : b))}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">Kalınlık (mm)</Label>
+                  <NumericInput
+                    value={edited.lineThickness ?? 0.5}
+                    min={0.1}
+                    max={20}
+                    step={0.1}
+                    onChange={(v) => setEdited((b) => (b ? { ...b, lineThickness: v } : b))}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">Renk</Label>
+                  <div className="flex gap-2 items-center">
+                    <Input
+                      type="color"
+                      value={edited.lineColor ?? '#000000'}
+                      onChange={(e) => setEdited((b) => (b ? { ...b, lineColor: e.target.value } : b))}
+                      className="w-14 h-10 p-1 cursor-pointer"
+                    />
+                    <Input
+                      type="text"
+                      value={edited.lineColor ?? '#000000'}
+                      onChange={(e) => setEdited((b) => (b ? { ...b, lineColor: e.target.value } : b))}
+                      className="flex-1"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
-              <Label className="text-xs">X (mm)</Label>
-              <Input
-                type="number"
+              <Label className="text-xs">
+                {edited.x < 0 ? 'X — Sağdan (mm)' : 'X — Soldan (mm)'}
+              </Label>
+              <NumericInput
                 value={edited.x}
-                onChange={(e) => setEdited((b) => (b ? { ...b, x: Number(e.target.value) || 0 } : b))}
-                min={0}
-                max={210}
+                onChange={(v) => setEdited((b) => (b ? { ...b, x: v } : b))}
               />
+              {edited.x < 0 && (
+                <p className="text-xs text-muted-foreground mt-0.5">Sağ kenardan {Math.abs(edited.x)} mm</p>
+              )}
             </div>
             <div>
-              <Label className="text-xs">Y (mm)</Label>
-              <Input
-                type="number"
+              <Label className="text-xs">
+                {edited.y < 0 ? 'Y — Alttan (mm)' : 'Y — Üstten (mm)'}
+              </Label>
+              <NumericInput
                 value={edited.y}
-                onChange={(e) => setEdited((b) => (b ? { ...b, y: Number(e.target.value) || 0 } : b))}
-                min={0}
-                max={297}
+                onChange={(v) => setEdited((b) => (b ? { ...b, y: v } : b))}
               />
+              {edited.y < 0 && (
+                <p className="text-xs text-muted-foreground mt-0.5">Alt kenardan {Math.abs(edited.y)} mm</p>
+              )}
             </div>
-            <div>
-              <Label className="text-xs">Genişlik (mm)</Label>
-              <Input
-                type="number"
-                value={edited.width}
-                onChange={(e) => setEdited((b) => (b ? { ...b, width: Number(e.target.value) || 0 } : b))}
-                min={1}
-                max={210}
-              />
-            </div>
-            <div>
-              <Label className="text-xs">Yükseklik (mm)</Label>
-              <Input
-                type="number"
-                value={edited.height}
-                onChange={(e) => setEdited((b) => (b ? { ...b, height: Number(e.target.value) || 0 } : b))}
-                min={1}
-                max={297}
-              />
-            </div>
+            {!isLine && (
+              <div>
+                <Label className="text-xs">Genişlik (mm)</Label>
+                <NumericInput
+                  value={edited.width}
+                  min={1}
+                  max={210}
+                  onChange={(v) => setEdited((b) => (b ? { ...b, width: v } : b))}
+                />
+              </div>
+            )}
+            {!isLine && (
+              <div>
+                <Label className="text-xs">Yükseklik (mm)</Label>
+                <NumericInput
+                  value={edited.height}
+                  min={1}
+                  max={297}
+                  onChange={(v) => setEdited((b) => (b ? { ...b, height: v } : b))}
+                />
+              </div>
+            )}
           </div>
-          {!isImage && !isQrCode && (
+          {!isImage && !isQrCode && !isLine && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
               <Label className="text-xs">Yazı Boyutu (px)</Label>
-              <Input
-                type="number"
+              <NumericInput
                 value={edited.fontSize}
-                onChange={(e) => setEdited((b) => (b ? { ...b, fontSize: Number(e.target.value) || 11 } : b))}
-                min={8}
-                max={24}
+                min={6}
+                max={72}
+                onChange={(v) => setEdited((b) => (b ? { ...b, fontSize: v } : b))}
               />
             </div>
             <div>
@@ -362,22 +529,20 @@ function BlockEditDialog({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="text-xs">Logo Genişlik</Label>
-                  <Input
-                    type="number"
+                  <NumericInput
                     value={edited.logo_width ?? 60}
-                    onChange={(e) => setEdited((b) => (b ? { ...b, logo_width: Number(e.target.value) || 60 } : b))}
-                    min={20}
+                    min={10}
                     max={200}
+                    onChange={(v) => setEdited((b) => (b ? { ...b, logo_width: v } : b))}
                   />
                 </div>
                 <div>
                   <Label className="text-xs">Logo Yükseklik</Label>
-                  <Input
-                    type="number"
+                  <NumericInput
                     value={edited.logo_height ?? 40}
-                    onChange={(e) => setEdited((b) => (b ? { ...b, logo_height: Number(e.target.value) || 40 } : b))}
-                    min={20}
+                    min={10}
                     max={150}
+                    onChange={(v) => setEdited((b) => (b ? { ...b, logo_height: v } : b))}
                   />
                 </div>
               </div>
@@ -553,16 +718,15 @@ export function TeklifCiktiAyarlariPage() {
     })
   }
 
-  const STEP = 5
-  const adjustBlockValue = (block: PdfBlock, field: 'x' | 'y' | 'width' | 'height', delta: number) => {
+  const updateBlockField = (
+    block: PdfBlock,
+    field: 'x' | 'y' | 'width' | 'height' | 'lineLength' | 'lineThickness',
+    value: number
+  ) => {
     setConfig((prev) => {
       const blocks = prev.blocks.map((b) => {
         if (b.id !== block.id) return b
-        const val = b[field] ?? (field === 'x' || field === 'y' ? 20 : 80)
-        let next = Math.round(val) + delta
-        if (field === 'x' || field === 'y') next = Math.max(0, Math.min(next, field === 'x' ? 210 : 297))
-        else next = Math.max(1, Math.min(next, 210))
-        return { ...b, [field]: next }
+        return { ...b, [field]: value }
       })
       const next = { ...prev, blocks }
       saveConfig(next)
@@ -582,6 +746,107 @@ export function TeklifCiktiAyarlariPage() {
       title="Teklif Çıktı Ayarları"
       description="PDF teklif çıktısında blokları ekleyin, konum ve stil ayarlarını yapın"
       backTo="/parametreler"
+      headerActions={
+        <div className="flex items-center gap-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline">
+                <Layout className="h-4 w-4 mr-2" />
+                Sayfa Boyutu
+                <ChevronDown className="h-4 w-4 ml-2" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80 p-4">
+              <div className="space-y-4">
+                <p className="text-sm font-medium">Sayfa Boyutu</p>
+                <p className="text-xs text-muted-foreground">10 px = 1 mm. Preset seçin veya özel girin.</p>
+                <div className="flex flex-wrap gap-2">
+                  {PAGE_PRESETS.map((p) => {
+                    const active = (config.pageWidth ?? 2100) === p.width && (config.pageHeight ?? 2970) === p.height
+                    return (
+                      <Button
+                        key={p.label}
+                        type="button"
+                        variant={active ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => {
+                          const next = { ...config, pageWidth: p.width, pageHeight: p.height }
+                          setConfig(next)
+                          saveConfig(next)
+                        }}
+                      >
+                        {p.label}
+                      </Button>
+                    )
+                  })}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs">Genişlik (px)</Label>
+                    <Input
+                      type="number"
+                      min={500}
+                      max={10000}
+                      step={10}
+                      value={config.pageWidth ?? 2100}
+                      onChange={(e) => {
+                        const next = { ...config, pageWidth: Number(e.target.value) || 2100 }
+                        setConfig(next)
+                        saveConfig(next)
+                      }}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-0.5">{((config.pageWidth ?? 2100) / 10).toFixed(0)} mm</p>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Yükseklik (px)</Label>
+                    <Input
+                      type="number"
+                      min={500}
+                      max={15000}
+                      step={10}
+                      value={config.pageHeight ?? 2970}
+                      onChange={(e) => {
+                        const next = { ...config, pageHeight: Number(e.target.value) || 2970 }
+                        setConfig(next)
+                        saveConfig(next)
+                      }}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-0.5">{((config.pageHeight ?? 2970) / 10).toFixed(0)} mm</p>
+                  </div>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button>
+                <Plus className="h-4 w-4 mr-2" />
+                Blok Ekle
+                <ChevronDown className="h-4 w-4 ml-2" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {(Object.keys(BLOCK_TYPE_LABELS) as PdfBlockType[]).map((type) => {
+                const canAddMultiple = MULTIPLE_BLOCK_TYPES.includes(type)
+                const isDisabled = !canAddMultiple && usedTypes.has(type)
+                return (
+                  <DropdownMenuItem
+                    key={type}
+                    onClick={() => !isDisabled && addBlock(type)}
+                    disabled={isDisabled}
+                    className={isDisabled ? 'opacity-60' : ''}
+                  >
+                    {BLOCK_TYPE_LABELS[type]}
+                    {isDisabled && <span className="ml-2 text-xs text-muted-foreground">(eklendi)</span>}
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      }
       footerActions={
         <Button variant="outline" onClick={handleSamplePdf}>
           <FileText className="h-4 w-4 mr-2" />
@@ -590,44 +855,6 @@ export function TeklifCiktiAyarlariPage() {
       }
     >
       <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Bloklar</CardTitle>
-            <CardDescription>
-              Blok ekle butonu ile firma, müşteri, teklif satırları vb. blokları ekleyin. Her blokta konum, yazı tipi,
-              renk ve boyut ayarlanabilir.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Blok Ekle
-                  <ChevronDown className="h-4 w-4 ml-2" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                {(Object.keys(BLOCK_TYPE_LABELS) as PdfBlockType[]).map((type) => {
-                  const canAddMultiple = MULTIPLE_BLOCK_TYPES.includes(type)
-                  const isDisabled = !canAddMultiple && usedTypes.has(type)
-                  return (
-                    <DropdownMenuItem
-                      key={type}
-                      onClick={() => !isDisabled && addBlock(type)}
-                      disabled={isDisabled}
-                      className={isDisabled ? 'opacity-60' : ''}
-                    >
-                      {BLOCK_TYPE_LABELS[type]}
-                      {isDisabled && <span className="ml-2 text-xs text-muted-foreground">(eklendi)</span>}
-                    </DropdownMenuItem>
-                  )
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </CardContent>
-        </Card>
-
         {loading ? (
           <p className="text-muted-foreground">Yükleniyor...</p>
         ) : config.blocks.length === 0 ? (
@@ -637,110 +864,102 @@ export function TeklifCiktiAyarlariPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {config.blocks.map((block, index) => {
               const Icon = BLOCK_ICONS[block.type]
               const canMoveUp = index > 0
               const canMoveDown = index < config.blocks.length - 1
               return (
-                <Card key={block.id}>
-                  <CardContent className="py-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3 min-w-0 flex-1">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                          <Icon className="h-5 w-5" />
+                <Card key={block.id} className={!block.visible ? 'opacity-60' : ''}>
+                  <CardContent className="py-3 px-4">
+                    {/* Başlık + sıra butonları + eylem butonları */}
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                          <Icon className="h-4 w-4" />
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium">{BLOCK_TYPE_LABELS[block.type]}</p>
-                          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
-                            <div className="flex items-center gap-0.5">
-                              <span className="text-xs text-muted-foreground w-5">X</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'x', -STEP)} title={`X -${STEP}`}>
-                                <Minus className="h-3 w-3" />
-                              </Button>
-                              <span className="text-xs font-mono w-8 text-center">{block.x}</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'x', STEP)} title={`X +${STEP}`}>
-                                <Plus className="h-3 w-3" />
-                              </Button>
-                            </div>
-                            <div className="flex items-center gap-0.5">
-                              <span className="text-xs text-muted-foreground w-5">Y</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'y', -STEP)} title={`Y -${STEP}`}>
-                                <Minus className="h-3 w-3" />
-                              </Button>
-                              <span className="text-xs font-mono w-8 text-center">{block.y}</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'y', STEP)} title={`Y +${STEP}`}>
-                                <Plus className="h-3 w-3" />
-                              </Button>
-                            </div>
-                            <div className="flex items-center gap-0.5">
-                              <span className="text-xs text-muted-foreground w-5">W</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'width', -STEP)} title={`Genişlik -${STEP}`}>
-                                <Minus className="h-3 w-3" />
-                              </Button>
-                              <span className="text-xs font-mono w-8 text-center">{block.width}</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'width', STEP)} title={`Genişlik +${STEP}`}>
-                                <Plus className="h-3 w-3" />
-                              </Button>
-                            </div>
-                            <div className="flex items-center gap-0.5">
-                              <span className="text-xs text-muted-foreground w-5">H</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'height', -STEP)} title={`Yükseklik -${STEP}`}>
-                                <Minus className="h-3 w-3" />
-                              </Button>
-                              <span className="text-xs font-mono w-8 text-center">{block.height}</span>
-                              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => adjustBlockValue(block, 'height', STEP)} title={`Yükseklik +${STEP}`}>
-                                <Plus className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          </div>
-                          <p className="text-xs text-muted-foreground mt-1">
-                            {block.type === 'image' && block.image_key ? ` · ${block.image_key.split('/').pop()}` : ''}
-                            {block.type === 'text' ? '' : block.type === 'qr_code' && block.qr_content ? ` · ${block.qr_content.slice(0, 25)}${block.qr_content.length > 25 ? '…' : ''}` : ''}
-                            {!['image', 'text', 'qr_code'].includes(block.type) ? `Yazı: ${block.fontSize}px ${block.fontFamily || 'Roboto'}` : ''}
-                          </p>
-                          {(block.type === 'text' && block.text_content) || (block.type === 'footer' && block.footer_text) ? (
-                            <div
-                              className="mt-2 rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground line-clamp-3"
-                              style={block.type === 'text' ? { fontFamily: block.fontFamily || 'Roboto' } : undefined}
-                            >
-                              {block.type === 'text' ? block.text_content : block.footer_text}
-                            </div>
-                          ) : null}
+                        <div className="min-w-0">
+                          <p className="font-medium text-sm leading-tight truncate">{BLOCK_TYPE_LABELS[block.type]}</p>
+                          {!block.visible && (
+                            <span className="text-xs text-muted-foreground">Gizli</span>
+                          )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          onClick={() => moveBlockUp(block)}
-                          disabled={!canMoveUp}
-                          title="Yukarı taşı"
-                        >
-                          <ChevronUp className="h-4 w-4" />
+                      <div className="flex items-center gap-0.5 shrink-0">
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => moveBlockUp(block)} disabled={!canMoveUp} title="Yukarı taşı">
+                          <ChevronUp className="h-3.5 w-3.5" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          onClick={() => moveBlockDown(block)}
-                          disabled={!canMoveDown}
-                          title="Aşağı taşı"
-                        >
-                          <ChevronDown className="h-4 w-4" />
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => moveBlockDown(block)} disabled={!canMoveDown} title="Aşağı taşı">
+                          <ChevronDown className="h-3.5 w-3.5" />
                         </Button>
-                        {!block.visible && (
-                          <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">Gizli</span>
-                        )}
-                        <Button variant="ghost" size="icon" onClick={() => openEdit(block)} title="Düzenle">
-                          <Pencil className="h-4 w-4" />
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(block)} title="Düzenle">
+                          <Pencil className="h-3.5 w-3.5" />
                         </Button>
-                        <Button variant="ghost" size="icon" onClick={() => setDeleteBlock(block)} title="Sil">
-                          <Trash2 className="h-4 w-4 text-destructive" />
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setDeleteBlock(block)} title="Sil">
+                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
                         </Button>
                       </div>
                     </div>
+                    {/* Konum/boyut — textbox + spinner */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {(block.type === 'line'
+                        ? [
+                            { field: 'x' as const, label: 'X', val: block.x ?? 20, step: 5, min: -210, max: 210 },
+                            { field: 'y' as const, label: 'Y', val: block.y ?? 20, step: 5, min: -297, max: 297 },
+                            {
+                              field: 'lineLength' as const,
+                              label: 'Uzunluk',
+                              val: block.lineLength ?? 170,
+                              step: 5,
+                              min: 1,
+                              max: 500,
+                            },
+                            {
+                              field: 'lineThickness' as const,
+                              label: 'Kalınlık',
+                              val: block.lineThickness ?? 0.5,
+                              step: 0.1,
+                              min: 0.1,
+                              max: 20,
+                            },
+                          ]
+                        : (['x', 'y', 'width', 'height'] as const).map((field) => ({
+                            field,
+                            label: field.toUpperCase(),
+                            val: block[field] ?? (field === 'x' || field === 'y' ? 20 : 80),
+                            step: 5,
+                            min: field === 'x' ? -210 : field === 'y' ? -297 : 1,
+                            max: field === 'x' ? 210 : field === 'y' ? 297 : 210,
+                          }))
+                      ).map(({ field, label, val, step, min, max }) => (
+                        <div key={field}>
+                          <Label className="text-xs text-muted-foreground">{label}</Label>
+                          <NumericInput
+                            value={val}
+                            onChange={(v) => updateBlockField(block, field, v)}
+                            step={step}
+                            min={min}
+                            max={max}
+                            className="mt-0.5 h-8"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    {/* Alt bilgi */}
+                    {(block.type === 'text' && block.text_content) || (block.type === 'footer' && block.footer_text) ? (
+                      <p
+                        className="mt-2 text-xs text-muted-foreground line-clamp-2 border-t pt-2"
+                        style={block.type === 'text' ? { fontFamily: block.fontFamily || 'Roboto' } : undefined}
+                      >
+                        {block.type === 'text' ? block.text_content : block.footer_text}
+                      </p>
+                    ) : block.type === 'line' ? (
+                      <p className="mt-2 text-xs text-muted-foreground border-t pt-2">
+                        {block.lineOrientation === 'vertical' ? 'Dikey' : 'Yatay'} · {block.lineLength ?? 170}mm · {block.lineThickness ?? 0.5}mm kalınlık
+                      </p>
+                    ) : block.type === 'image' && block.image_key ? (
+                      <p className="mt-2 text-xs text-muted-foreground truncate border-t pt-2">{block.image_key.split('/').pop()}</p>
+                    ) : null}
                   </CardContent>
                 </Card>
               )
