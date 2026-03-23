@@ -4009,24 +4009,110 @@ app.get('/api/offers/:id/pdf', async (c) => {
     if (!row) return c.json({ error: 'Teklif bulunamadı' }, 404);
     const offer = row as Record<string, unknown>;
     const { results: items } = await c.env.DB.prepare(
-      `SELECT oi.*, p.name as product_name, p.sku as product_sku, u.name as unit_name
+      `SELECT oi.*, p.name as product_name, p.sku as product_sku, u.name as unit_name,
+              p.currency_id as line_currency_id, cur_line.symbol as line_currency_symbol, cur_line.code as line_currency_code
        FROM offer_items oi
        LEFT JOIN products p ON oi.product_id = p.id AND p.is_deleted = 0
-       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND p.is_deleted = 0
+       LEFT JOIN product_currencies cur_line ON p.currency_id = cur_line.id AND cur_line.is_deleted = 0
        WHERE oi.offer_id = ? AND oi.is_deleted = 0 ORDER BY oi.sort_order, oi.id`
     ).bind(id).all();
-    const offerItems = (items || []) as { product_id?: number; product_name?: string; product_sku?: string; description?: string; amount?: number; unit_price?: number; line_discount?: number; tax_rate?: number; unit_name?: string }[];
-    const subtotal = offerItems.reduce((s, it) => s + (Number(it.amount) || 0) * (Number(it.unit_price) || 0) - (Number(it.line_discount) || 0), 0);
+    type PdfOfferItem = {
+      product_id?: number;
+      product_name?: string;
+      product_sku?: string;
+      description?: string;
+      amount?: number;
+      unit_price?: number;
+      line_discount?: number;
+      tax_rate?: number;
+      unit_name?: string;
+      line_currency_id?: number | null;
+      line_currency_symbol?: string | null;
+      line_currency_code?: string | null;
+    };
+    const offerItems = (items || []) as PdfOfferItem[];
+
+    let exchangeRates: Record<string, number> = {};
+    try {
+      const ratesRow = await c.env.DB.prepare(
+        `SELECT value FROM app_settings WHERE category = 'parabirimleri' AND "key" = 'exchange_rates' AND is_deleted = 0 LIMIT 1`
+      ).first<{ value: string | null }>();
+      if (ratesRow?.value) {
+        const parsed = JSON.parse(ratesRow.value) as Record<string, number>;
+        if (parsed && typeof parsed === 'object') exchangeRates = parsed;
+      }
+    } catch { /* ignore */ }
+    const { results: curRows } = await c.env.DB.prepare(
+      `SELECT id, code, symbol FROM product_currencies WHERE is_deleted = 0`
+    ).all();
+    const pdfCurrencies = (curRows || []) as { id: number; code: string; symbol?: string | null }[];
+
+    const rateToTRY = (code: string | undefined, rates: Record<string, number>): number => {
+      const c0 = (code || '').toUpperCase();
+      if (c0 === 'TRY' || c0 === 'TL' || !c0) return 1;
+      return rates[c0] ?? 1;
+    };
+    const convertToOfferCurrency = (
+      amount: number,
+      itemCurrencyId: number | null | undefined,
+      offerCurrencyId: number | null | undefined,
+      rates: Record<string, number>
+    ): number => {
+      const itemCode = itemCurrencyId ? pdfCurrencies.find((x) => x.id === itemCurrencyId)?.code : undefined;
+      const offerCode = offerCurrencyId ? pdfCurrencies.find((x) => x.id === offerCurrencyId)?.code : undefined;
+      const rateItem = rateToTRY(itemCode, rates);
+      const rateOffer = rateToTRY(offerCode, rates);
+      return (amount * rateItem) / rateOffer;
+    };
+    const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
+
+    const offerCurrencyId = offer.currency_id != null ? Number(offer.currency_id) : null;
+
+    let grossTotalOffer = 0;
+    let lineDiscountTotalOffer = 0;
+    for (const it of offerItems) {
+      const amt = Number(it.amount) || 0;
+      const up = Number(it.unit_price) || 0;
+      const disc = Number(it.line_discount) || 0;
+      const lineCur = it.line_currency_id != null ? Number(it.line_currency_id) : null;
+      grossTotalOffer += convertToOfferCurrency(amt * up, lineCur, offerCurrencyId, exchangeRates);
+      lineDiscountTotalOffer += convertToOfferCurrency(disc, lineCur, offerCurrencyId, exchangeRates);
+    }
+    const subtotal = grossTotalOffer - lineDiscountTotalOffer;
     const discountPct = Number(offer.discount_1) ?? 0;
-    const afterDiscount = subtotal * (1 - discountPct / 100);
+    const araToplam = subtotal * (1 - discountPct / 100);
+    const offerDiscountAmount = subtotal * (discountPct / 100);
     const totalVat = offerItems.reduce((s, it) => {
-      const net = (Number(it.amount) || 0) * (Number(it.unit_price) || 0) - (Number(it.line_discount) || 0);
-      const share = subtotal > 0 ? net / subtotal : 0;
-      return s + (afterDiscount * share) * ((Number(it.tax_rate) || 0) / 100);
+      const amt = Number(it.amount) || 0;
+      const up = Number(it.unit_price) || 0;
+      const disc = Number(it.line_discount) || 0;
+      const netLine = amt * up - disc;
+      const lineCur = it.line_currency_id != null ? Number(it.line_currency_id) : null;
+      const itemNetOffer = convertToOfferCurrency(netLine, lineCur, offerCurrencyId, exchangeRates);
+      const share = subtotal > 0 ? itemNetOffer / subtotal : 0;
+      return s + (araToplam * share) * ((Number(it.tax_rate) || 0) / 100);
     }, 0);
-    const grandTotal = afterDiscount + totalVat;
+    const grandTotal = araToplam + totalVat;
+
+    const grossR = round2(grossTotalOffer);
+    const lineDiscR = round2(lineDiscountTotalOffer);
+    const subtotalR = round2(subtotal);
+    const araToplamR = round2(araToplam);
+    const totalVatR = round2(totalVat);
+    const grandTotalR = round2(grandTotal);
+    const offerDiscountAmountR = round2(offerDiscountAmount);
+    const lineDiscPctOfGross =
+      grossTotalOffer > 1e-9 ? (100 * lineDiscountTotalOffer) / grossTotalOffer : 0;
+
     const sym = (offer.currency_symbol as string) || (offer.currency_code as string) || '₺';
     const fmt = (n: number) => (n ?? 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const fmtPct = (n: number) =>
+      round2(n).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const hasLineDiscount = lineDiscountTotalOffer > 1e-9;
+    const hasOfferDiscount = discountPct > 0;
+    const hasAnyDiscount = hasLineDiscount || hasOfferDiscount;
+
     let coverHtml = '';
     if (offer.include_cover_page) {
       const { results: coverRes } = await c.env.DB.prepare(
@@ -4130,6 +4216,35 @@ app.get('/api/offers/:id/pdf', async (c) => {
     const { blocks, pageWidth, pageHeight } = parseLayoutConfig(raw);
     const pageWidthMm = pageWidth / 10;
     const pageHeightMm = pageHeight / 10;
+    const pdfTdL = 'style="padding:4px 8px;border:1px solid #333;text-align:left"';
+    const pdfTdR = 'style="padding:4px 8px;border:1px solid #333;text-align:right;white-space:nowrap"';
+    const pdfTotalsRows: string[] = [];
+    if (!hasAnyDiscount) {
+      pdfTotalsRows.push(`<tr><td ${pdfTdL}>Ara toplam</td><td ${pdfTdR}>${fmt(subtotalR)} ${sym}</td></tr>`);
+      pdfTotalsRows.push(`<tr><td ${pdfTdL}>KDV</td><td ${pdfTdR}>${fmt(totalVatR)} ${sym}</td></tr>`);
+      pdfTotalsRows.push(
+        `<tr><td ${pdfTdL}><strong>Genel toplam</strong></td><td ${pdfTdR}><strong>${fmt(grandTotalR)} ${sym}</strong></td></tr>`
+      );
+    } else {
+      pdfTotalsRows.push(`<tr><td ${pdfTdL}>Toplam (brüt)</td><td ${pdfTdR}>${fmt(grossR)} ${sym}</td></tr>`);
+      if (hasLineDiscount) {
+        pdfTotalsRows.push(
+          `<tr><td ${pdfTdL}>Satır iskontosu (${fmtPct(lineDiscPctOfGross)}%)</td><td ${pdfTdR}>−${fmt(lineDiscR)} ${sym}</td></tr>`
+        );
+      }
+      if (hasOfferDiscount) {
+        pdfTotalsRows.push(
+          `<tr><td ${pdfTdL}>Teklif iskontosu (${fmtPct(discountPct)}%)</td><td ${pdfTdR}>−${fmt(offerDiscountAmountR)} ${sym}</td></tr>`
+        );
+      }
+      pdfTotalsRows.push(`<tr><td ${pdfTdL}>Ara toplam</td><td ${pdfTdR}>${fmt(araToplamR)} ${sym}</td></tr>`);
+      pdfTotalsRows.push(`<tr><td ${pdfTdL}>KDV</td><td ${pdfTdR}>${fmt(totalVatR)} ${sym}</td></tr>`);
+      pdfTotalsRows.push(
+        `<tr><td ${pdfTdL}><strong>Genel toplam</strong></td><td ${pdfTdR}><strong>${fmt(grandTotalR)} ${sym}</strong></td></tr>`
+      );
+    }
+    const pdfTotalsTable = `<table style="margin-top:0.75rem;margin-left:auto;border-collapse:collapse;font-size:11px"><tbody>${pdfTotalsRows.join('')}</tbody></table>`;
+    const pdfCurrencyNote = `<p style="margin-top:0.5rem;font-size:10px;color:#555;text-align:right">Satır birim fiyat ve tutarlar satır para birimindedir. Özet tutarlar teklif para birimine (${escapeHtml(sym)}) çevrilmiştir.</p>`;
     const itemsTableHtml = `<table><thead><tr><th>Ürün / Açıklama</th><th class="text-center">Miktar</th><th class="text-right">Birim Fiyat</th><th class="text-right">Tutar</th></tr></thead><tbody>
 ${offerItems.map((it) => {
   const name = it.product_name || it.product_sku || it.description || '—';
@@ -4137,10 +4252,12 @@ ${offerItems.map((it) => {
   const up = Number(it.unit_price) || 0;
   const disc = Number(it.line_discount) || 0;
   const lineTotal = amt * up - disc;
-  return `<tr><td>${escapeHtml(name)}</td><td class="text-center">${amt}</td><td class="text-right">${fmt(up)} ${sym}</td><td class="text-right">${fmt(lineTotal)} ${sym}</td></tr>`;
+  const lineSym = (it.line_currency_symbol as string) || (it.line_currency_code as string) || '₺';
+  return `<tr><td>${escapeHtml(name)}</td><td class="text-center">${amt}</td><td class="text-right">${fmt(up)} ${escapeHtml(lineSym)}</td><td class="text-right">${fmt(lineTotal)} ${escapeHtml(lineSym)}</td></tr>`;
 }).join('')}
 </tbody></table>
-<p class="text-right" style="margin-top:1rem"><strong>Genel Toplam:</strong> ${fmt(grandTotal)} ${sym}</p>
+${pdfTotalsTable}
+${pdfCurrencyNote}
 ${offer.project_name ? `<p style="margin-top:1rem"><strong>Proje:</strong> ${escapeHtml(String(offer.project_name))}</p>` : ''}`;
     let blocksHtml = '';
     for (const b of blocks) {

@@ -31,6 +31,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
@@ -53,13 +54,16 @@ import {
   filterCustomersByWords,
 } from './teklif-common'
 
+type RowDetailPanels = { discount: boolean; description: boolean; tax: boolean }
+const emptyRowPanels = (): RowDetailPanels => ({ discount: false, description: false, tax: false })
+
 export function TeklifFormPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [dateEditMode, setDateEditMode] = useState(false)
   const [orderNoEditMode, setOrderNoEditMode] = useState(false)
   const [customerEditMode, setCustomerEditMode] = useState(false)
-  const [expandedRowIndex, setExpandedRowIndex] = useState<number | null>(null)
+  const [rowDetailPanels, setRowDetailPanels] = useState<Record<number, RowDetailPanels>>({})
   const [totalEditMode, setTotalEditMode] = useState(false)
   const [productTypeFilter] = useState<'' | number>('')
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -91,7 +95,7 @@ export function TeklifFormPage() {
   const [newContactSaving, setNewContactSaving] = useState(false)
   const [activeProductSearchRow, setActiveProductSearchRow] = useState<number | null>(null)
   const [addRowFormOpen, setAddRowFormOpen] = useState(false)
-  const [addRowExpanded, setAddRowExpanded] = useState(false)
+  const [addRowPanels, setAddRowPanels] = useState<RowDetailPanels>(() => emptyRowPanels())
   const [addRowDraft, setAddRowDraft] = useState<OfferItem>(() => emptyItem())
   const [addRowProductInput, setAddRowProductInput] = useState('')
   const [addRowProductDebounced, setAddRowProductDebounced] = useState('')
@@ -763,8 +767,16 @@ export function TeklifFormPage() {
       }
       return { ...f, items: f.items.filter((_, i) => i !== idx) }
     })
-    if (expandedRowIndex === idx) setExpandedRowIndex(null)
-    else if (expandedRowIndex != null && expandedRowIndex > idx) setExpandedRowIndex(expandedRowIndex - 1)
+    setRowDetailPanels((p) => {
+      const next: Record<number, RowDetailPanels> = {}
+      for (const k of Object.keys(p)) {
+        const i = Number(k)
+        if (Number.isNaN(i) || p[i] == null) continue
+        if (i === idx) continue
+        next[i > idx ? i - 1 : i] = p[i]!
+      }
+      return next
+    })
     if (activeProductSearchRow === idx) setActiveProductSearchRow(null)
     else if (activeProductSearchRow != null && activeProductSearchRow > idx) setActiveProductSearchRow(activeProductSearchRow - 1)
     if (currencyPopoverRow === idx) setCurrencyPopoverRow(null)
@@ -780,7 +792,16 @@ export function TeklifFormPage() {
       newItems.splice(idx + 1, 0, copy)
       return { ...f, items: newItems }
     })
-    if (expandedRowIndex != null && expandedRowIndex > idx) setExpandedRowIndex(expandedRowIndex + 1)
+    setRowDetailPanels((p) => {
+      const next: Record<number, RowDetailPanels> = {}
+      for (const k of Object.keys(p)) {
+        const i = Number(k)
+        if (Number.isNaN(i) || p[i] == null) continue
+        const nk = i > idx ? i + 1 : i
+        next[nk] = p[i]!
+      }
+      return next
+    })
     if (activeProductSearchRow != null && activeProductSearchRow > idx) setActiveProductSearchRow(activeProductSearchRow + 1)
     if (currencyPopoverRow != null && currencyPopoverRow > idx) setCurrencyPopoverRow(currencyPopoverRow + 1)
   }
@@ -792,7 +813,11 @@ export function TeklifFormPage() {
       ;[newItems[idx - 1], newItems[idx]] = [newItems[idx], newItems[idx - 1]]
       return { ...f, items: newItems }
     })
-    setExpandedRowIndex((prev) => (prev === idx ? idx - 1 : prev === idx - 1 ? idx : prev))
+    setRowDetailPanels((p) => {
+      const a = p[idx] ?? emptyRowPanels()
+      const b = p[idx - 1] ?? emptyRowPanels()
+      return { ...p, [idx]: b, [idx - 1]: a }
+    })
     setActiveProductSearchRow((prev) => (prev === idx ? idx - 1 : prev === idx - 1 ? idx : prev))
     setCurrencyPopoverRow((prev) => (prev === idx ? idx - 1 : prev === idx - 1 ? idx : prev))
   }
@@ -804,7 +829,11 @@ export function TeklifFormPage() {
       ;[newItems[idx], newItems[idx + 1]] = [newItems[idx + 1], newItems[idx]]
       return { ...f, items: newItems }
     })
-    setExpandedRowIndex((prev) => (prev === idx ? idx + 1 : prev === idx + 1 ? idx : prev))
+    setRowDetailPanels((p) => {
+      const a = p[idx] ?? emptyRowPanels()
+      const b = p[idx + 1] ?? emptyRowPanels()
+      return { ...p, [idx]: b, [idx + 1]: a }
+    })
     setActiveProductSearchRow((prev) => (prev === idx ? idx + 1 : prev === idx + 1 ? idx : prev))
     setCurrencyPopoverRow((prev) => (prev === idx ? idx + 1 : prev === idx + 1 ? idx : prev))
   }
@@ -816,7 +845,22 @@ export function TeklifFormPage() {
     }))
   }
 
+  const mergeRowPanels = useCallback((idx: number, patch: Partial<RowDetailPanels>) => {
+    setRowDetailPanels((p) => {
+      const cur = { ...emptyRowPanels(), ...(p[idx] || {}) }
+      return { ...p, [idx]: { ...cur, ...patch } }
+    })
+  }, [])
+
+  const getRowPanels = (idx: number) => ({ ...emptyRowPanels(), ...(rowDetailPanels[idx] || {}) })
+  const rowDetailOpen = (idx: number) => {
+    const x = getRowPanels(idx)
+    return x.discount || x.description || x.tax
+  }
+
   const roundMoney2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100
+  const formatPctLabel = (n: number) =>
+    roundMoney2(n).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
 
   const toOffer = (amount: number, it: OfferItem) =>
     convertToOfferCurrency(amount, it.currency_id, form.currency_id, currencies, exchangeRates)
@@ -837,13 +881,14 @@ export function TeklifFormPage() {
   const grandTotal = araToplam + totalVat
 
   const grossTotalR = roundMoney2(grossTotal)
-  const lineDiscountTotalR = roundMoney2(lineDiscountTotal)
   const subtotalR = roundMoney2(subtotal)
   const araToplamR = roundMoney2(araToplam)
   const totalVatR = roundMoney2(totalVat)
   const grandTotalR = roundMoney2(grandTotal)
-  const offerDiscountAmountR = roundMoney2(offerDiscountAmount)
   const totalDiscountAmountR = roundMoney2(lineDiscountTotal + offerDiscountAmount)
+  /** Brüt üzerinden toplam iskonto (satır + teklif) için eşdeğer yüzde — alt toplam etiketi */
+  const discountEquivPctGross =
+    grossTotal > 1e-9 ? (100 * (lineDiscountTotal + offerDiscountAmount)) / grossTotal : 0
   const offerCurrencySymbol = form.currency_id === '' ? '₺' : (currencies.find((c) => c.id === form.currency_id)?.symbol || currencies.find((c) => c.id === form.currency_id)?.code || '₺')
   const isTry = form.currency_id === ''
 
@@ -912,7 +957,7 @@ export function TeklifFormPage() {
           variant="ghost"
           size="icon"
           className="h-7 w-7 shrink-0"
-          onClick={() => setTotalEditMode((v) => (isSave ? false : true))}
+          onClick={() => setTotalEditMode(isSave ? false : true)}
         >
           {isSave ? <Save className="h-3.5 w-3.5" /> : <SquarePen className="h-3.5 w-3.5" />}
         </Button>
@@ -993,7 +1038,9 @@ export function TeklifFormPage() {
                   <td className={`${cellBorder} w-10 align-middle`} />
                 </tr>
                 <tr>
-                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>İskonto</td>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>
+                    İskonto ({formatPctLabel(discountEquivPctGross)}%)
+                  </td>
                   <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-destructive`}>
                     {totalEditMode ? (
                       <div className="flex flex-col gap-1 items-end">
@@ -1558,7 +1605,7 @@ export function TeklifFormPage() {
                           <span className="w-px h-4 bg-border" aria-hidden />
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1" onClick={() => { setAddRowFormOpen(true); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); setAddRowExpanded(false); }}>
+                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1" onClick={() => { setAddRowFormOpen(true); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); setAddRowPanels(emptyRowPanels()); }}>
                                 <Plus className="h-3.5 w-3.5" /> Satır ekle
                               </Button>
                             </TooltipTrigger>
@@ -1784,14 +1831,33 @@ export function TeklifFormPage() {
                                   <TooltipContent>Aşağı taşı</TooltipContent>
                                 </Tooltip>
                               </div>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setExpandedRowIndex(expandedRowIndex === idx ? null : idx)}>
-                                    {expandedRowIndex === idx ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" title="Satıra ekle">
+                                    <Plus className="h-3.5 w-3.5" />
                                   </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>{expandedRowIndex === idx ? 'Detayları kapat' : 'KDV, İskonto, Satır notu'}</TooltipContent>
-                              </Tooltip>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-52">
+                                  <DropdownMenuItem
+                                    onSelect={() => {
+                                      mergeRowPanels(idx, { discount: true })
+                                      setForm((f) => ({
+                                        ...f,
+                                        items: f.items.map((item, i) =>
+                                          i === idx && !item.discount_type
+                                            ? { ...item, discount_type: 'percent', discount_value: item.discount_value ?? 0 }
+                                            : item
+                                        ),
+                                      }))
+                                    }}
+                                  >
+                                    Satır iskontosu
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onSelect={() => mergeRowPanels(idx, { description: true })}>Satır açıklaması</DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem onSelect={() => mergeRowPanels(idx, { tax: true })}>KDV ve para birimi</DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => removeItem(idx)}>
@@ -1803,78 +1869,159 @@ export function TeklifFormPage() {
                             </div>
                           </td>
                         </tr>
-                        {expandedRowIndex === idx && (
-                          <tr className="border-b bg-muted/20">
-                            <td colSpan={6} className="p-3">
-                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                                <div className="space-y-2">
-                                  <Label className="text-xs">Para Birimi</Label>
-                                  <select
-                                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
-                                    value={it.currency_id ?? ''}
-                                    onChange={(e) => {
-                                      const val = e.target.value === '' ? null : Number(e.target.value)
-                                      const cur = val ? currencies.find((c) => c.id === val) : null
-                                      const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
-                                      const oldId = it.currency_id
-                                      const newUnitPrice = convertBetweenCurrencies(it.unit_price, oldId, val, currencies, exchangeRates)
-                                      const newDiscountValue = it.discount_type === 'fixed' && it.discount_value != null
-                                        ? convertBetweenCurrencies(it.discount_value, oldId, val, currencies, exchangeRates)
-                                        : it.discount_value
-                                      setForm((f) => ({
-                                        ...f,
-                                        items: f.items.map((item, i) =>
-                                          i === idx
-                                            ? { ...item, currency_id: val, currency_symbol: symbol, unit_price: newUnitPrice, discount_value: newDiscountValue }
-                                            : item
-                                        ),
-                                      }))
-                                    }}
-                                  >
-                                    <option value="">TRY (₺)</option>
-                                    {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
-                                      <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
-                                    ))}
-                                  </select>
-                                </div>
-                                <div className="space-y-2">
-                                  <Label className="text-xs">KDV (%)</Label>
-                                  <select
-                                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
-                                    value={it.tax_rate != null ? String(it.tax_rate) : ''}
-                                    onChange={(e) => updateItem(idx, 'tax_rate', e.target.value === '' ? 0 : parseFloat(e.target.value))}
-                                  >
-                                    <option value="">Seçin</option>
-                                    {taxRates.map((tr) => (
-                                      <option key={tr.id} value={String(tr.value)}>{tr.name} ({tr.value}%)</option>
-                                    ))}
-                                    {it.tax_rate != null && !taxRates.some((tr) => tr.value === it.tax_rate) && (
-                                      <option value={String(it.tax_rate)}>{it.tax_rate}%</option>
-                                    )}
-                                  </select>
-                                </div>
-                                <div className="space-y-2">
-                                  <Label className="text-xs">İskonto</Label>
-                                  <div className="flex items-center gap-2">
-                                    <select className="h-8 rounded-md border border-input bg-transparent px-2 text-sm w-24 shrink-0" value={it.discount_type ?? ''} onChange={(e) => updateItem(idx, 'discount_type', e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed'))}>
-                                      <option value="">—</option>
-                                      <option value="percent">Yüzde</option>
-                                      <option value="fixed">Sabit</option>
-                                    </select>
-                                    <div className="relative flex-1 min-w-0">
-                                      <DecimalInput className="h-8 text-right pr-8" value={it.discount_value ?? 0} onChange={(n) => updateItem(idx, 'discount_value', n ?? 0)} placeholder="0" maxDecimals={2} />
-                                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{it.discount_type === 'percent' ? '%' : it.discount_type === 'fixed' ? (it.currency_symbol || '₺') : ''}</span>
+                        {rowDetailOpen(idx) && (() => {
+                          const rp = getRowPanels(idx)
+                          const lineSym = it.currency_symbol || '₺'
+                          const lineDiscAmt = getItemLineDiscount(it)
+                          const lineNetAmt = getItemRowTotal(it)
+                          return (
+                            <tr className="border-b bg-muted/20">
+                              <td colSpan={6} className="p-3">
+                                <div className="space-y-3">
+                                  {rp.tax && (
+                                    <div className="relative rounded-md border border-border/70 bg-background/60 p-3 pr-10">
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="absolute right-1 top-1 h-7 w-7 text-muted-foreground"
+                                        onClick={() => mergeRowPanels(idx, { tax: false })}
+                                        aria-label="KDV panelini kapat"
+                                      >
+                                        <X className="h-3.5 w-3.5" />
+                                      </Button>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl">
+                                        <div className="space-y-2">
+                                          <Label className="text-xs">Para birimi</Label>
+                                          <select
+                                            className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                            value={it.currency_id ?? ''}
+                                            onChange={(e) => {
+                                              const val = e.target.value === '' ? null : Number(e.target.value)
+                                              const cur = val ? currencies.find((c) => c.id === val) : null
+                                              const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
+                                              const oldId = it.currency_id
+                                              const newUnitPrice = convertBetweenCurrencies(it.unit_price, oldId, val, currencies, exchangeRates)
+                                              const newDiscountValue = it.discount_type === 'fixed' && it.discount_value != null
+                                                ? convertBetweenCurrencies(it.discount_value, oldId, val, currencies, exchangeRates)
+                                                : it.discount_value
+                                              setForm((f) => ({
+                                                ...f,
+                                                items: f.items.map((item, i) =>
+                                                  i === idx
+                                                    ? { ...item, currency_id: val, currency_symbol: symbol, unit_price: newUnitPrice, discount_value: newDiscountValue }
+                                                    : item
+                                                ),
+                                              }))
+                                            }}
+                                          >
+                                            <option value="">TRY (₺)</option>
+                                            {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
+                                              <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                        <div className="space-y-2">
+                                          <Label className="text-xs">KDV (%)</Label>
+                                          <select
+                                            className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                            value={it.tax_rate != null ? String(it.tax_rate) : ''}
+                                            onChange={(e) => updateItem(idx, 'tax_rate', e.target.value === '' ? 0 : parseFloat(e.target.value))}
+                                          >
+                                            <option value="">Seçin</option>
+                                            {taxRates.map((tr) => (
+                                              <option key={tr.id} value={String(tr.value)}>{tr.name} ({tr.value}%)</option>
+                                            ))}
+                                            {it.tax_rate != null && !taxRates.some((tr) => tr.value === it.tax_rate) && (
+                                              <option value={String(it.tax_rate)}>{it.tax_rate}%</option>
+                                            )}
+                                          </select>
+                                        </div>
+                                      </div>
                                     </div>
-                                  </div>
+                                  )}
+                                  {(rp.discount || rp.description) && (
+                                    <div className="flex flex-wrap items-end gap-4 gap-y-3">
+                                      {rp.discount && (
+                                        <div className="flex flex-wrap items-end gap-3 min-w-0">
+                                          <div className="flex flex-col gap-1">
+                                            <div className="flex items-center gap-1">
+                                              <Label className="text-xs">Satır iskontosu</Label>
+                                              <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-6 w-6 shrink-0 text-muted-foreground"
+                                                onClick={() => mergeRowPanels(idx, { discount: false })}
+                                                aria-label="İskonto panelini kapat"
+                                              >
+                                                <X className="h-3 w-3" />
+                                              </Button>
+                                            </div>
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                              <select
+                                                className="h-8 rounded-md border border-input bg-background px-2 text-sm w-[5.5rem] shrink-0"
+                                                value={it.discount_type ?? ''}
+                                                onChange={(e) => updateItem(idx, 'discount_type', e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed'))}
+                                              >
+                                                <option value="">—</option>
+                                                <option value="percent">Yüzde %</option>
+                                                <option value="fixed">Sabit</option>
+                                              </select>
+                                              <div className="relative w-28 min-w-[6rem]">
+                                                <DecimalInput
+                                                  className="h-8 text-right pr-7"
+                                                  value={it.discount_value ?? 0}
+                                                  onChange={(n) => updateItem(idx, 'discount_value', n ?? 0)}
+                                                  placeholder="0"
+                                                  maxDecimals={2}
+                                                />
+                                                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-xs pointer-events-none">
+                                                  {it.discount_type === 'percent' ? '%' : it.discount_type === 'fixed' ? lineSym : ''}
+                                                </span>
+                                              </div>
+                                              <div className="text-xs text-muted-foreground tabular-nums flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-0.5 border-l border-border pl-3 ml-0 sm:ml-1">
+                                                <span>
+                                                  İskonto: −{formatPrice(lineDiscAmt)} {lineSym}
+                                                </span>
+                                                <span className="text-foreground font-medium">
+                                                  İskontolu: {formatPrice(lineNetAmt)} {lineSym}
+                                                </span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {rp.description && (
+                                        <div className="flex-1 min-w-[min(100%,14rem)] space-y-1">
+                                          <div className="flex items-center gap-1">
+                                            <Label className="text-xs">Satır açıklaması</Label>
+                                            <Button
+                                              type="button"
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-6 w-6 shrink-0 text-muted-foreground"
+                                              onClick={() => mergeRowPanels(idx, { description: false })}
+                                              aria-label="Açıklama panelini kapat"
+                                            >
+                                              <X className="h-3 w-3" />
+                                            </Button>
+                                          </div>
+                                          <Input
+                                            className="h-8 text-sm"
+                                            value={it.description || ''}
+                                            onChange={(e) => updateItem(idx, 'description', e.target.value || null)}
+                                            placeholder="Açıklama metni"
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
-                                <div className="space-y-2 sm:col-span-1">
-                                  <Label className="text-xs">Satır notu</Label>
-                                  <Input className="h-8 text-sm" value={it.description || ''} onChange={(e) => updateItem(idx, 'description', e.target.value)} placeholder="Satır notu" />
-                                </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
+                              </td>
+                            </tr>
+                          )
+                        })()}
                       </React.Fragment>
                     ))}
                     {addRowFormOpen && (
@@ -1916,7 +2063,7 @@ export function TeklifFormPage() {
                                         setAddRowDraft(emptyItem())
                                         setAddRowProductInput('')
                                         setAddRowProductResults([])
-                                        setAddRowExpanded(false)
+                                        setAddRowPanels(emptyRowPanels())
                                       } else if (addRowDraft.product_id || addRowDraft.description) {
                                         e.preventDefault()
                                         const name = addRowDraft.product_name || addRowDraft.description || 'Yeni satır'
@@ -1925,7 +2072,7 @@ export function TeklifFormPage() {
                                         setAddRowDraft(emptyItem())
                                         setAddRowProductInput('')
                                         setAddRowProductResults([])
-                                        setAddRowExpanded(false)
+                                        setAddRowPanels(emptyRowPanels())
                                       }
                                     }
                                   }}
@@ -1964,7 +2111,7 @@ export function TeklifFormPage() {
                                         setAddRowDraft(emptyItem())
                                         setAddRowProductInput('')
                                         setAddRowProductResults([])
-                                        setAddRowExpanded(false)
+                                        setAddRowPanels(emptyRowPanels())
                                       }}
                                       onMouseEnter={() => setAddRowProductHighlightIndex(i)}
                                     >
@@ -2045,17 +2192,35 @@ export function TeklifFormPage() {
                         <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(addRowDraft))} {addRowDraft.currency_symbol || '₺'}</td>
                         <td className="p-2">
                           <div className="flex items-center justify-end gap-1">
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setAddRowExpanded((v) => !v)}>
-                                  {addRowExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button type="button" variant="outline" size="icon" className="h-8 w-8" title="Satıra ekle">
+                                  <Plus className="h-3.5 w-3.5" />
                                 </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>{addRowExpanded ? 'Detayları kapat' : 'KDV, İskonto, Satır notu'}</TooltipContent>
-                            </Tooltip>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-52">
+                                <DropdownMenuItem
+                                  onSelect={() => {
+                                    setAddRowPanels((p) => ({ ...emptyRowPanels(), ...p, discount: true }))
+                                    setAddRowDraft((d) =>
+                                      !d.discount_type ? { ...d, discount_type: 'percent', discount_value: d.discount_value ?? 0 } : d
+                                    )
+                                  }}
+                                >
+                                  Satır iskontosu
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => setAddRowPanels((p) => ({ ...emptyRowPanels(), ...p, description: true }))}>
+                                  Satır açıklaması
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onSelect={() => setAddRowPanels((p) => ({ ...emptyRowPanels(), ...p, tax: true }))}>
+                                  KDV ve para birimi
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => { setAddRowFormOpen(false); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); setAddRowExpanded(false); }}>
+                                <Button type="button" variant="outline" size="icon" className="h-8 w-8 text-destructive" onClick={() => { setAddRowFormOpen(false); setAddRowDraft(emptyItem()); setAddRowProductInput(''); setAddRowProductResults([]); setAddRowPanels(emptyRowPanels()); }}>
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </Button>
                               </TooltipTrigger>
@@ -2065,67 +2230,161 @@ export function TeklifFormPage() {
                         </td>
                       </tr>
                     )}
-                    {addRowFormOpen && addRowExpanded && (
+                    {addRowFormOpen &&
+                      (addRowPanels.discount || addRowPanels.description || addRowPanels.tax) && (
                       <tr className="border-b bg-muted/20">
                         <td colSpan={6} className="p-3">
-                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                            <div className="space-y-2">
-                              <Label className="text-xs">Para Birimi</Label>
-                              <select
-                                className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
-                                value={addRowDraft.currency_id ?? ''}
-                                onChange={(e) => {
-                                  const val = e.target.value === '' ? null : Number(e.target.value)
-                                  const cur = val ? currencies.find((c) => c.id === val) : null
-                                  const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
-                                  const oldId = addRowDraft.currency_id
-                                  const newUnitPrice = convertBetweenCurrencies(addRowDraft.unit_price, oldId, val, currencies, exchangeRates)
-                                  const newDiscountValue = addRowDraft.discount_type === 'fixed' && addRowDraft.discount_value != null
-                                    ? convertBetweenCurrencies(addRowDraft.discount_value, oldId, val, currencies, exchangeRates)
-                                    : addRowDraft.discount_value
-                                  setAddRowDraft((d) => ({ ...d, currency_id: val, currency_symbol: symbol, unit_price: newUnitPrice, discount_value: newDiscountValue }))
-                                }}
-                              >
-                                <option value="">TRY (₺)</option>
-                                {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
-                                  <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-xs">KDV (%)</Label>
-                              <select
-                                className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
-                                value={addRowDraft.tax_rate != null ? String(addRowDraft.tax_rate) : ''}
-                                onChange={(e) => setAddRowDraft((d) => ({ ...d, tax_rate: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
-                              >
-                                <option value="">Seçin</option>
-                                {taxRates.map((tr) => (
-                                  <option key={tr.id} value={String(tr.value)}>{tr.name} ({tr.value}%)</option>
-                                ))}
-                                {addRowDraft.tax_rate != null && !taxRates.some((tr) => tr.value === addRowDraft.tax_rate) && (
-                                  <option value={String(addRowDraft.tax_rate)}>{addRowDraft.tax_rate}%</option>
-                                )}
-                              </select>
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-xs">İskonto</Label>
-                              <div className="flex items-center gap-2">
-                                <select className="h-8 rounded-md border border-input bg-transparent px-2 text-sm w-24 shrink-0" value={addRowDraft.discount_type ?? ''} onChange={(e) => setAddRowDraft((d) => ({ ...d, discount_type: e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed') }))}>
-                                  <option value="">—</option>
-                                  <option value="percent">Yüzde</option>
-                                  <option value="fixed">Sabit</option>
-                                </select>
-                                <div className="relative flex-1 min-w-0">
-                                  <DecimalInput className="h-8 text-right pr-8" value={addRowDraft.discount_value ?? 0} onChange={(n) => setAddRowDraft((d) => ({ ...d, discount_value: n ?? 0 }))} placeholder="0" maxDecimals={2} />
-                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{addRowDraft.discount_type === 'percent' ? '%' : addRowDraft.discount_type === 'fixed' ? (addRowDraft.currency_symbol || '₺') : ''}</span>
+                          <div className="space-y-3">
+                            {addRowPanels.tax && (
+                              <div className="relative rounded-md border border-border/70 bg-background/60 p-3 pr-10">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="absolute right-1 top-1 h-7 w-7 text-muted-foreground"
+                                  onClick={() => setAddRowPanels((p) => ({ ...p, tax: false }))}
+                                  aria-label="KDV panelini kapat"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </Button>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl">
+                                  <div className="space-y-2">
+                                    <Label className="text-xs">Para birimi</Label>
+                                    <select
+                                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                      value={addRowDraft.currency_id ?? ''}
+                                      onChange={(e) => {
+                                        const val = e.target.value === '' ? null : Number(e.target.value)
+                                        const cur = val ? currencies.find((c) => c.id === val) : null
+                                        const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
+                                        const oldId = addRowDraft.currency_id
+                                        const newUnitPrice = convertBetweenCurrencies(addRowDraft.unit_price, oldId, val, currencies, exchangeRates)
+                                        const newDiscountValue =
+                                          addRowDraft.discount_type === 'fixed' && addRowDraft.discount_value != null
+                                            ? convertBetweenCurrencies(addRowDraft.discount_value, oldId, val, currencies, exchangeRates)
+                                            : addRowDraft.discount_value
+                                        setAddRowDraft((d) => ({
+                                          ...d,
+                                          currency_id: val,
+                                          currency_symbol: symbol,
+                                          unit_price: newUnitPrice,
+                                          discount_value: newDiscountValue,
+                                        }))
+                                      }}
+                                    >
+                                      <option value="">TRY (₺)</option>
+                                      {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
+                                        <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label className="text-xs">KDV (%)</Label>
+                                    <select
+                                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                      value={addRowDraft.tax_rate != null ? String(addRowDraft.tax_rate) : ''}
+                                      onChange={(e) => setAddRowDraft((d) => ({ ...d, tax_rate: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
+                                    >
+                                      <option value="">Seçin</option>
+                                      {taxRates.map((tr) => (
+                                        <option key={tr.id} value={String(tr.value)}>{tr.name} ({tr.value}%)</option>
+                                      ))}
+                                      {addRowDraft.tax_rate != null && !taxRates.some((tr) => tr.value === addRowDraft.tax_rate) && (
+                                        <option value={String(addRowDraft.tax_rate)}>{addRowDraft.tax_rate}%</option>
+                                      )}
+                                    </select>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                            <div className="space-y-2 sm:col-span-1">
-                              <Label className="text-xs">Satır notu</Label>
-                              <Input className="h-8 text-sm" value={addRowDraft.description || ''} onChange={(e) => setAddRowDraft((d) => ({ ...d, description: e.target.value || null }))} placeholder="Satır notu" />
-                            </div>
+                            )}
+                            {(addRowPanels.discount || addRowPanels.description) && (
+                              <div className="flex flex-wrap items-end gap-4 gap-y-3">
+                                {addRowPanels.discount && (
+                                  <div className="flex flex-wrap items-end gap-3 min-w-0">
+                                    <div className="flex flex-col gap-1">
+                                      <div className="flex items-center gap-1">
+                                        <Label className="text-xs">Satır iskontosu</Label>
+                                        <Button
+                                          type="button"
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-6 w-6 shrink-0 text-muted-foreground"
+                                          onClick={() => setAddRowPanels((p) => ({ ...p, discount: false }))}
+                                          aria-label="İskonto panelini kapat"
+                                        >
+                                          <X className="h-3 w-3" />
+                                        </Button>
+                                      </div>
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <select
+                                          className="h-8 rounded-md border border-input bg-background px-2 text-sm w-[5.5rem] shrink-0"
+                                          value={addRowDraft.discount_type ?? ''}
+                                          onChange={(e) =>
+                                            setAddRowDraft((d) => ({
+                                              ...d,
+                                              discount_type: e.target.value === '' ? null : (e.target.value as 'percent' | 'fixed'),
+                                            }))
+                                          }
+                                        >
+                                          <option value="">—</option>
+                                          <option value="percent">Yüzde %</option>
+                                          <option value="fixed">Sabit</option>
+                                        </select>
+                                        <div className="relative w-28 min-w-[6rem]">
+                                          <DecimalInput
+                                            className="h-8 text-right pr-7"
+                                            value={addRowDraft.discount_value ?? 0}
+                                            onChange={(n) => setAddRowDraft((d) => ({ ...d, discount_value: n ?? 0 }))}
+                                            placeholder="0"
+                                            maxDecimals={2}
+                                          />
+                                          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-xs pointer-events-none">
+                                            {addRowDraft.discount_type === 'percent'
+                                              ? '%'
+                                              : addRowDraft.discount_type === 'fixed'
+                                                ? addRowDraft.currency_symbol || '₺'
+                                                : ''}
+                                          </span>
+                                        </div>
+                                        <div className="text-xs text-muted-foreground tabular-nums flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-0.5 border-l border-border pl-3 ml-0 sm:ml-1">
+                                          <span>
+                                            İskonto: −{formatPrice(getItemLineDiscount(addRowDraft))}{' '}
+                                            {addRowDraft.currency_symbol || '₺'}
+                                          </span>
+                                          <span className="text-foreground font-medium">
+                                            İskontolu: {formatPrice(getItemRowTotal(addRowDraft))}{' '}
+                                            {addRowDraft.currency_symbol || '₺'}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                                {addRowPanels.description && (
+                                  <div className="flex-1 min-w-[min(100%,14rem)] space-y-1">
+                                    <div className="flex items-center gap-1">
+                                      <Label className="text-xs">Satır açıklaması</Label>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                                        onClick={() => setAddRowPanels((p) => ({ ...p, description: false }))}
+                                        aria-label="Açıklama panelini kapat"
+                                      >
+                                        <X className="h-3 w-3" />
+                                      </Button>
+                                    </div>
+                                    <Input
+                                      className="h-8 text-sm"
+                                      value={addRowDraft.description || ''}
+                                      onChange={(e) => setAddRowDraft((d) => ({ ...d, description: e.target.value || null }))}
+                                      placeholder="Açıklama metni"
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </td>
                       </tr>
