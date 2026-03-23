@@ -22,6 +22,8 @@ interface PageLayoutProps {
   contentRef?: React.RefObject<HTMLDivElement>
   /** İçerik alanı overflow - hidden: tablo gibi iç scroll için */
   contentOverflow?: 'auto' | 'hidden'
+  /** false: footer'da © eSync+ gösterilmez */
+  showFooterBranding?: boolean
   children: ReactNode
 }
 
@@ -37,6 +39,7 @@ export function PageLayout({
   footerActions,
   contentRef,
   contentOverflow = 'auto',
+  showFooterBranding = true,
   children,
 }: PageLayoutProps) {
   return (
@@ -88,9 +91,11 @@ export function PageLayout({
         <div className="flex-1 min-w-0">{footerContent}</div>
         <div className="flex items-center gap-2 shrink-0">
           {footerActions}
-          <span className="text-xs text-muted-foreground">
-            © {new Date().getFullYear()} eSync+
-          </span>
+          {showFooterBranding && (
+            <span className="text-xs text-muted-foreground">
+              © {new Date().getFullYear()} eSync+
+            </span>
+          )}
         </div>
       </footer>
     </div>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Search, Plus, Trash2, SquarePen, Save, ArrowDownToLine, ChevronDown, ChevronUp, Copy, ArrowUp, ArrowDown, FileDown, Check, X } from 'lucide-react'
+import { Search, Plus, Trash2, SquarePen, Save, ArrowDownToLine, ChevronDown, ChevronUp, Copy, FileDown, Check, X, Share2, Mail, MessageCircle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -20,12 +20,19 @@ import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL, parseJsonResponse } from '@/lib/api'
 import { formatDate, formatPrice, normalizeForSearch, parseDecimal, cn } from '@/lib/utils'
 import { DecimalInput } from '@/components/DecimalInput'
+import { DecimalInputWithSpinner } from '@/components/DecimalInputWithSpinner'
 import { PhoneInput } from '@/components/PhoneInput'
 import { CustomerTitleInput } from '@/components/CustomerTitleInput'
-import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import {
   type OfferItem,
   type Customer,
@@ -99,6 +106,7 @@ export function TeklifFormPage() {
   const [focusUnitPriceRow, setFocusUnitPriceRow] = useState<number | null>(null)
   const unitPriceFocusRef = useRef<HTMLInputElement>(null)
   const [currencyPopoverRow, setCurrencyPopoverRow] = useState<number | null>(null)
+  const [addRowCurrencyPopoverOpen, setAddRowCurrencyPopoverOpen] = useState(false)
   const [currencies, setCurrencies] = useState<ProductCurrency[]>([])
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
   const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
@@ -711,10 +719,12 @@ export function TeklifFormPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const json = await parseJsonResponse<{ error?: string }>(res)
+      const json = await parseJsonResponse<{ id?: number; error?: string }>(res)
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       toastSuccess(editingId ? 'Teklif güncellendi' : 'Teklif eklendi')
-      navigate('/teklifler')
+      if (!editingId && json.id != null) {
+        navigate(`/teklifler/${json.id}`, { replace: true })
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Kaydedilemedi')
       toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Kaydedilemedi')
@@ -806,44 +816,323 @@ export function TeklifFormPage() {
     }))
   }
 
+  const roundMoney2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100
+
   const toOffer = (amount: number, it: OfferItem) =>
     convertToOfferCurrency(amount, it.currency_id, form.currency_id, currencies, exchangeRates)
   const grossTotal = form.items.reduce((s, it) => s + toOffer(it.amount * it.unit_price, it), 0)
   const lineDiscountTotal = form.items.reduce((s, it) => s + toOffer(getItemLineDiscount(it), it), 0)
   const subtotal = grossTotal - lineDiscountTotal
-  const offerDiscountPercent = form.discount_1 ?? 0
-  const offerDiscountAmount = subtotal * (offerDiscountPercent / 100)
-  const araToplam = subtotal - offerDiscountAmount
-  const hasLineDiscount = lineDiscountTotal > 0
+  const discountPct = form.discount_1 ?? 0
+  /** Teklif iskontosu sonrası KDV matrahı — PDF/API ile aynı: subtotal * (1 - discount_1%) */
+  const araToplam = subtotal * (1 - discountPct / 100)
+  const offerDiscountAmount = subtotal * (discountPct / 100)
+  const hasLineDiscount = lineDiscountTotal > 1e-9
+  /** PDF/API ile aynı: her satırın payı × matrah × KDV oranı */
   const totalVat = form.items.reduce((s, it) => {
     const itemNet = toOffer(getItemRowTotal(it), it)
-    const itemShare = subtotal > 0 ? itemNet / subtotal : 0
-    const itemAfterDiscount = itemNet - offerDiscountAmount * itemShare
-    return s + itemAfterDiscount * ((it.tax_rate ?? 0) / 100)
+    const share = subtotal > 0 ? itemNet / subtotal : 0
+    return s + (araToplam * share) * ((it.tax_rate ?? 0) / 100)
   }, 0)
   const grandTotal = araToplam + totalVat
+
+  const grossTotalR = roundMoney2(grossTotal)
+  const lineDiscountTotalR = roundMoney2(lineDiscountTotal)
+  const subtotalR = roundMoney2(subtotal)
+  const araToplamR = roundMoney2(araToplam)
+  const totalVatR = roundMoney2(totalVat)
+  const grandTotalR = roundMoney2(grandTotal)
+  const offerDiscountAmountR = roundMoney2(offerDiscountAmount)
+  const totalDiscountAmountR = roundMoney2(lineDiscountTotal + offerDiscountAmount)
   const offerCurrencySymbol = form.currency_id === '' ? '₺' : (currencies.find((c) => c.id === form.currency_id)?.symbol || currencies.find((c) => c.id === form.currency_id)?.code || '₺')
   const isTry = form.currency_id === ''
+
+  const getOfferPdfUrl = () => (editingId ? `${API_URL}/api/offers/${editingId}/pdf` : '')
+
+  const sharePdfByMail = useCallback(() => {
+    if (!editingId) {
+      toastError('Paylaşım', 'Önce teklifi kaydedin.')
+      return
+    }
+    const pdfUrl = getOfferPdfUrl()
+    const subject = encodeURIComponent(`Teklif: ${form.order_no || ''}`)
+    const body = encodeURIComponent(`Teklif PDF bağlantısı:\n${pdfUrl}\n\n(Tarayıcıda oturum açıkken bağlantıyı açabilirsiniz.)`)
+    window.location.href = `mailto:?subject=${subject}&body=${body}`
+  }, [editingId, form.order_no])
+
+  const sharePdfByWhatsApp = useCallback(() => {
+    if (!editingId) {
+      toastError('Paylaşım', 'Önce teklifi kaydedin.')
+      return
+    }
+    const pdfUrl = getOfferPdfUrl()
+    const text = encodeURIComponent(`Teklif ${form.order_no || ''}\n${pdfUrl}`)
+    window.open(`https://wa.me/?text=${text}`, '_blank', 'noopener')
+  }, [editingId, form.order_no])
 
   const hasNewCustomerPending = customerInput.trim() && !form.customer_id
   const hasNewContactPending = form.customer_id && contactInput.trim() && !form.contact_id
 
   if (loading) {
     return (
-      <PageLayout title={editingId ? 'Teklif Düzenle' : 'Yeni Teklif'} backTo="/teklifler">
+      <PageLayout title={editingId ? 'Teklif Düzenle' : 'Yeni Teklif'} backTo="/teklifler" showFooterBranding={false}>
         <div className="flex items-center justify-center p-8 text-muted-foreground">Yükleniyor...</div>
       </PageLayout>
     )
   }
 
+  const hasOfferDiscount = discountPct > 0
+  const hasAnyDiscount = hasLineDiscount || hasOfferDiscount
+
+  /** KDV modeli: totalVat = araToplam × k → genelToplam = araToplam×(1+k), k sabit (satırlar sabitken) */
+  const vatWeightFactor =
+    subtotal > 0
+      ? form.items.reduce((s, it) => {
+          const itemNet = toOffer(getItemRowTotal(it), it)
+          const share = itemNet / subtotal
+          return s + share * ((it.tax_rate ?? 0) / 100)
+        }, 0)
+      : 0
+  const maxGrandTotal = subtotal > 0 ? subtotal * (1 + vatWeightFactor) : 0
+
+  const pctFromGrandTotal = (targetG: number) => {
+    if (subtotal <= 0 || maxGrandTotal <= 0) return 0
+    const t = Math.max(0, Math.min(targetG, maxGrandTotal))
+    const denom = subtotal * (1 + vatWeightFactor)
+    const pct = (1 - t / denom) * 100
+    return Math.max(0, Math.min(100, pct))
+  }
+
+  const cellBorder = 'border border-border px-2 py-1.5 sm:px-3'
+  const editBtn = (isSave: boolean) => (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          onClick={() => setTotalEditMode((v) => (isSave ? false : true))}
+        >
+          {isSave ? <Save className="h-3.5 w-3.5" /> : <SquarePen className="h-3.5 w-3.5" />}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{isSave ? 'Kaydet' : 'Düzenle'}</TooltipContent>
+    </Tooltip>
+  )
+
+  const totalsFooter = (
+    <>
+      <div className="flex flex-col items-end gap-2 w-full py-1">
+        <table className="text-xs sm:text-sm border-collapse ml-auto border border-border rounded-sm overflow-hidden">
+          <tbody>
+            {!hasAnyDiscount ? (
+              <>
+                <tr>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>Ara Toplam</td>
+                  <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-foreground`}>
+                    {formatPrice(subtotalR)} {offerCurrencySymbol}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle text-center`} />
+                </tr>
+                <tr>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>KDV</td>
+                  <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-foreground`}>
+                    {formatPrice(totalVatR)} {offerCurrencySymbol}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle`} />
+                </tr>
+                <tr>
+                  <td className={`${cellBorder} font-bold text-destructive text-right align-middle bg-muted/30`}>Genel Toplam</td>
+                  <td className={`${cellBorder} text-right font-bold tabular-nums whitespace-nowrap text-destructive bg-muted/30`}>
+                    {totalEditMode ? (
+                      <div className="flex flex-col gap-2 items-end">
+                        <div className="flex items-center gap-1 justify-end">
+                          <span className="text-[10px] font-normal text-muted-foreground shrink-0">İsk. %</span>
+                          <Input
+                            type="text"
+                            inputMode="decimal"
+                            className="h-7 w-14 text-right text-xs font-normal"
+                            value={discountPct === 0 ? '' : String(roundMoney2(discountPct))}
+                            onChange={(e) => setForm((f) => ({ ...f, discount_1: parseDecimal(e.target.value) ?? 0 }))}
+                            placeholder="0"
+                          />
+                          <span className="text-xs font-normal text-muted-foreground">%</span>
+                        </div>
+                        <div className="flex items-center gap-1 justify-end">
+                          <Input
+                            type="text"
+                            inputMode="decimal"
+                            className="h-7 w-28 text-right text-xs font-bold text-destructive"
+                            value={grandTotal === 0 ? '' : grandTotal.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            onChange={(e) => {
+                              const v = parseDecimal(e.target.value)
+                              if (v != null) setForm((f) => ({ ...f, discount_1: pctFromGrandTotal(v) }))
+                            }}
+                            placeholder="0,00"
+                          />
+                          <span className="text-xs">{offerCurrencySymbol}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {formatPrice(grandTotalR)} {offerCurrencySymbol}
+                      </>
+                    )}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle text-center bg-muted/30`}>{totalEditMode ? editBtn(true) : editBtn(false)}</td>
+                </tr>
+              </>
+            ) : (
+              <>
+                <tr>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>Toplam</td>
+                  <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-foreground`}>
+                    {formatPrice(grossTotalR)} {offerCurrencySymbol}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle`} />
+                </tr>
+                <tr>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>İskonto</td>
+                  <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-destructive`}>
+                    {totalEditMode ? (
+                      <div className="flex flex-col gap-1 items-end">
+                        <div className="flex items-center gap-1 flex-wrap justify-end">
+                          <span className="text-[10px] text-muted-foreground">Teklif isk.</span>
+                          <Input
+                            type="text"
+                            inputMode="decimal"
+                            className="h-7 w-14 text-right text-xs"
+                            value={discountPct === 0 ? '' : String(roundMoney2(discountPct))}
+                            onChange={(e) => setForm((f) => ({ ...f, discount_1: parseDecimal(e.target.value) ?? 0 }))}
+                            placeholder="0"
+                          />
+                          <span className="text-xs text-muted-foreground">%</span>
+                        </div>
+                        <span className="text-[10px] text-muted-foreground font-normal">
+                          Toplam −{formatPrice(totalDiscountAmountR)} {offerCurrencySymbol}
+                        </span>
+                      </div>
+                    ) : (
+                      <>-{formatPrice(totalDiscountAmountR)} {offerCurrencySymbol}</>
+                    )}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle text-center`}>{!totalEditMode ? editBtn(false) : null}</td>
+                </tr>
+                <tr>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>Ara Toplam</td>
+                  <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-foreground`}>
+                    {formatPrice(araToplamR)} {offerCurrencySymbol}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle`} />
+                </tr>
+                <tr>
+                  <td className={`${cellBorder} text-muted-foreground text-right align-middle`}>KDV</td>
+                  <td className={`${cellBorder} text-right tabular-nums whitespace-nowrap font-medium text-foreground`}>
+                    {formatPrice(totalVatR)} {offerCurrencySymbol}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle`} />
+                </tr>
+                <tr>
+                  <td className={`${cellBorder} font-bold text-destructive text-right align-middle bg-muted/30`}>Genel Toplam</td>
+                  <td className={`${cellBorder} text-right font-bold tabular-nums whitespace-nowrap text-destructive bg-muted/30`}>
+                    {totalEditMode ? (
+                      <div className="flex items-center gap-1 justify-end">
+                        <Input
+                          type="text"
+                          inputMode="decimal"
+                          className="h-7 w-28 text-right text-xs font-bold text-destructive"
+                          value={grandTotal === 0 ? '' : grandTotal.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          onChange={(e) => {
+                            const v = parseDecimal(e.target.value)
+                            if (v != null) setForm((f) => ({ ...f, discount_1: pctFromGrandTotal(v) }))
+                          }}
+                          placeholder="0,00"
+                        />
+                        <span className="text-xs">{offerCurrencySymbol}</span>
+                      </div>
+                    ) : (
+                      <>
+                        {formatPrice(grandTotalR)} {offerCurrencySymbol}
+                      </>
+                    )}
+                  </td>
+                  <td className={`${cellBorder} w-10 align-middle text-center bg-muted/30`}>{totalEditMode ? editBtn(true) : editBtn(false)}</td>
+                </tr>
+              </>
+            )}
+          </tbody>
+        </table>
+        <p className="text-xs text-muted-foreground text-right tabular-nums w-full max-w-md ml-auto">
+          Yaklaşık TL karşılığı:{' '}
+          <span className="font-medium text-foreground">
+            {isTry ? `${formatPrice(grandTotalR)} ₺` : `≈ ${formatPrice(roundMoney2(grandTotal * (form.exchange_rate || 1)))} ₺`}
+          </span>
+        </p>
+      </div>
+    </>
+  )
+
   return (
     <PageLayout
       backTo="/teklifler"
       title={editingId ? 'Teklif Düzenle' : 'Yeni Teklif'}
+      contentOverflow="hidden"
+      showFooterBranding={false}
+      footerContent={totalsFooter}
+      headerActions={
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {editingId && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="outline" size="icon" className="text-destructive" onClick={() => openDeleteConfirm(editingId, goBack)} disabled={saving}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Sil</TooltipContent>
+            </Tooltip>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="outline" size="sm" disabled={!editingId}>
+                <Share2 className="h-4 w-4 mr-2" />
+                Paylaş
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={sharePdfByMail}>
+                <Mail className="h-4 w-4 mr-2" />
+                E-posta (PDF bağlantısı)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={sharePdfByWhatsApp}>
+                <MessageCircle className="h-4 w-4 mr-2" />
+                WhatsApp (PDF bağlantısı)
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!editingId}
+            onClick={() => editingId && window.open(`${API_URL}/api/offers/${editingId}/pdf`, '_blank', 'noopener')}
+          >
+            <FileDown className="h-4 w-4 mr-2" />
+            PDF
+          </Button>
+          <Button type="submit" form="teklif-form" size="sm" disabled={saving || !form.date || !form.order_no?.trim()}>
+            {saving ? 'Kaydediliyor...' : 'Kaydet'}
+          </Button>
+          <Button type="button" variant="secondary" size="sm" onClick={() => navigate('/teklifler')}>
+            <X className="h-4 w-4 mr-2" />
+            Kapat
+          </Button>
+        </div>
+      }
     >
-      <Card>
-        <form onSubmit={handleSubmit} className="flex flex-col min-h-0">
-          <CardContent className="p-6 flex flex-col gap-6">
+      <Card className="flex flex-1 min-h-0 flex-col border-0 shadow-none rounded-none bg-transparent">
+        <form id="teklif-form" onSubmit={handleSubmit} className="flex flex-1 min-h-0 flex-col overflow-hidden">
+          <CardContent className="p-4 sm:p-6 flex flex-1 min-h-0 flex-col gap-6 overflow-y-auto">
             {error && <p className="text-sm text-destructive shrink-0 mt-1">{error}</p>}
 
             {/* Üst bilgiler */}
@@ -1388,7 +1677,14 @@ export function TeklifFormPage() {
                             )}
                           </td>
                           <td className="p-2">
-                            <DecimalInput className="h-8 w-full min-w-14 text-right" value={it.amount} onChange={(n) => updateItem(idx, 'amount', n || 0)} placeholder="0" />
+                            <DecimalInputWithSpinner
+                              className="w-full min-w-14"
+                              value={it.amount}
+                              onChange={(n) => updateItem(idx, 'amount', n || 0)}
+                              step={1}
+                              min={0}
+                              placeholder="0"
+                            />
                           </td>
                           <td className="p-2 text-center text-muted-foreground text-sm">{it.unit_name || 'Adet'}</td>
                           <td className="p-2">
@@ -1402,15 +1698,15 @@ export function TeklifFormPage() {
                                 maxDecimals={2}
                               />
                               <Popover open={currencyPopoverRow === idx} onOpenChange={(open) => setCurrencyPopoverRow(open ? idx : null)}>
-                                <PopoverAnchor asChild>
+                                <PopoverTrigger asChild>
                                   <button
                                     type="button"
                                     title="Para birimini değiştir"
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm hover:text-foreground cursor-pointer min-w-[1.5rem] text-right"
+                                    className="absolute right-2 top-1/2 z-10 -translate-y-1/2 text-muted-foreground text-sm hover:text-foreground cursor-pointer min-w-[1.5rem] text-right rounded px-0.5 hover:bg-muted/60"
                                   >
                                     {it.currency_symbol || '₺'}
                                   </button>
-                                </PopoverAnchor>
+                                </PopoverTrigger>
                                 <PopoverContent align="end" className="w-36 p-2">
                                   <div className="space-y-1.5">
                                     <p className="text-xs font-medium text-muted-foreground px-1">Para birimi</p>
@@ -1458,22 +1754,36 @@ export function TeklifFormPage() {
                                 </TooltipTrigger>
                                 <TooltipContent>Satırı kopyala</TooltipContent>
                               </Tooltip>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => moveItemUp(idx)} disabled={idx === 0}>
-                                    <ArrowUp className="h-3.5 w-3.5" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Yukarı taşı</TooltipContent>
-                              </Tooltip>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => moveItemDown(idx)} disabled={idx === form.items.length - 1}>
-                                    <ArrowDown className="h-3.5 w-3.5" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Aşağı taşı</TooltipContent>
-                              </Tooltip>
+                              <div className="flex flex-col h-8 w-8 shrink-0 rounded-md border border-input bg-muted/60 overflow-hidden">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      tabIndex={-1}
+                                      className="flex-1 flex items-center justify-center min-h-0 text-muted-foreground hover:bg-muted/80 active:bg-muted transition-colors disabled:pointer-events-none disabled:opacity-40"
+                                      onClick={() => moveItemUp(idx)}
+                                      disabled={idx === 0}
+                                    >
+                                      <ChevronUp className="h-3 w-3" strokeWidth={2.5} />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Yukarı taşı</TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      tabIndex={-1}
+                                      className="flex-1 flex items-center justify-center min-h-0 text-muted-foreground hover:bg-muted/80 active:bg-muted transition-colors disabled:pointer-events-none disabled:opacity-40"
+                                      onClick={() => moveItemDown(idx)}
+                                      disabled={idx === form.items.length - 1}
+                                    >
+                                      <ChevronDown className="h-3 w-3" strokeWidth={2.5} />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Aşağı taşı</TooltipContent>
+                                </Tooltip>
+                              </div>
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Button type="button" variant="outline" size="icon" className="h-8 w-8" onClick={() => setExpandedRowIndex(expandedRowIndex === idx ? null : idx)}>
@@ -1673,13 +1983,63 @@ export function TeklifFormPage() {
                           </Popover>
                         </td>
                         <td className="p-2">
-                          <DecimalInput className="h-8 w-full min-w-14 text-right" value={addRowDraft.amount} onChange={(n) => setAddRowDraft((d) => ({ ...d, amount: n || 0 }))} placeholder="1" />
+                          <DecimalInputWithSpinner
+                            className="w-full min-w-14"
+                            value={addRowDraft.amount}
+                            onChange={(n) => setAddRowDraft((d) => ({ ...d, amount: n || 0 }))}
+                            step={1}
+                            min={0}
+                            placeholder="1"
+                          />
                         </td>
                         <td className="p-2 text-center text-muted-foreground text-sm">{addRowDraft.unit_name || 'Adet'}</td>
                         <td className="p-2">
                           <div className="relative">
                             <DecimalInput className="h-8 w-full min-w-20 text-right pr-8" value={addRowDraft.unit_price} onChange={(n) => setAddRowDraft((d) => ({ ...d, unit_price: n ?? 0 }))} placeholder="0,00" maxDecimals={2} />
-                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">{addRowDraft.currency_symbol || '₺'}</span>
+                            <Popover open={addRowCurrencyPopoverOpen} onOpenChange={setAddRowCurrencyPopoverOpen}>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  title="Para birimini değiştir"
+                                  className="absolute right-2 top-1/2 z-10 -translate-y-1/2 text-muted-foreground text-sm hover:text-foreground cursor-pointer min-w-[1.5rem] text-right rounded px-0.5 hover:bg-muted/60"
+                                >
+                                  {addRowDraft.currency_symbol || '₺'}
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent align="end" className="w-36 p-2">
+                                <div className="space-y-1.5">
+                                  <p className="text-xs font-medium text-muted-foreground px-1">Para birimi</p>
+                                  <select
+                                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                    value={addRowDraft.currency_id ?? ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value === '' ? null : Number(e.target.value)
+                                      const cur = val ? currencies.find((c) => c.id === val) : null
+                                      const symbol = cur?.symbol || cur?.code || (val ? null : '₺')
+                                      const oldId = addRowDraft.currency_id
+                                      const newUnitPrice = convertBetweenCurrencies(addRowDraft.unit_price, oldId, val, currencies, exchangeRates)
+                                      const newDiscountValue =
+                                        addRowDraft.discount_type === 'fixed' && addRowDraft.discount_value != null
+                                          ? convertBetweenCurrencies(addRowDraft.discount_value, oldId, val, currencies, exchangeRates)
+                                          : addRowDraft.discount_value
+                                      setAddRowDraft((d) => ({
+                                        ...d,
+                                        currency_id: val,
+                                        currency_symbol: symbol,
+                                        unit_price: newUnitPrice,
+                                        discount_value: newDiscountValue,
+                                      }))
+                                      setAddRowCurrencyPopoverOpen(false)
+                                    }}
+                                  >
+                                    <option value="">TRY (₺)</option>
+                                    {currencies.filter((c) => (c.code || '').toUpperCase() !== 'TRY' && (c.code || '').toUpperCase() !== 'TL').map((c) => (
+                                      <option key={c.id} value={c.id}>{c.name} ({c.symbol || c.code})</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
                           </div>
                         </td>
                         <td className="p-2 text-right font-medium tabular-nums">{formatPrice(getItemRowTotal(addRowDraft))} {addRowDraft.currency_symbol || '₺'}</td>
@@ -1773,111 +2133,15 @@ export function TeklifFormPage() {
                   </tbody>
                 </table>
               </div>
-
-              {/* Toplamlar */}
-              <div className="shrink-0 border rounded-lg p-4 bg-muted/10 space-y-2 max-w-xs ml-auto">
-                {hasLineDiscount ? (
-                  <>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Toplam</span>
-                      <span className="font-medium tabular-nums">{formatPrice(grossTotal)} {offerCurrencySymbol}</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">İskonto</span>
-                      <span className="font-medium tabular-nums text-destructive">-{formatPrice(lineDiscountTotal)} {offerCurrencySymbol}</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Ara Toplam</span>
-                      <span className="font-medium tabular-nums">{formatPrice(subtotal)} {offerCurrencySymbol}</span>
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Toplam</span>
-                    <span className="font-medium tabular-nums">{formatPrice(subtotal)} {offerCurrencySymbol}</span>
-                  </div>
-                )}
-                {(offerDiscountPercent > 0 || totalEditMode) && (
-                  <>
-                    <div className="flex justify-between text-sm items-center gap-2">
-                      <span className="text-muted-foreground">İskonto (Yüzde)</span>
-                      {totalEditMode ? (
-                        <div className="flex items-center gap-1">
-                          <Input type="text" inputMode="decimal" className="h-8 w-16 text-right" value={offerDiscountPercent === 0 ? '' : String(offerDiscountPercent)} onChange={(e) => setForm((f) => ({ ...f, discount_1: parseDecimal(e.target.value) ?? 0 }))} placeholder="0" />
-                          <span className="text-muted-foreground">%</span>
-                        </div>
-                      ) : (
-                        <span className="font-medium tabular-nums">%{offerDiscountPercent}</span>
-                      )}
-                    </div>
-                    {offerDiscountPercent > 0 && (
-                      <>
-                        <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">İskonto Miktarı</span>
-                          <span className="font-medium tabular-nums text-destructive">-{formatPrice(offerDiscountAmount)} {offerCurrencySymbol}</span>
-                        </div>
-                        <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">Ara Toplam</span>
-                          <span className="font-medium tabular-nums">{formatPrice(araToplam)} {offerCurrencySymbol}</span>
-                        </div>
-                      </>
-                    )}
-                  </>
-                )}
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">K.D.V.</span>
-                  <span className="font-medium tabular-nums">{formatPrice(totalVat)} {offerCurrencySymbol}</span>
-                </div>
-                <div className="flex justify-between text-sm pt-2 border-t">
-                  <span className="font-bold text-destructive">Genel Toplam</span>
-                  {totalEditMode ? (
-                    <div className="flex items-center gap-1">
-                      <Input type="text" inputMode="decimal" className="h-8 w-28 text-right font-medium" value={grandTotal === 0 ? '' : grandTotal.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} onChange={(e) => {
-                        const v = parseDecimal(e.target.value)
-                        if (v != null && subtotal > 0) {
-                          const pct = Math.max(0, Math.min(100, (1 - (v - totalVat) / subtotal) * 100))
-                          setForm((f) => ({ ...f, discount_1: pct }))
-                        }
-                      }} placeholder="0,00" />
-                      <span>{offerCurrencySymbol}</span>
-                    </div>
-                  ) : (
-                    <span className="font-bold text-destructive tabular-nums">{formatPrice(grandTotal)} {offerCurrencySymbol}</span>
-                  )}
-                </div>
-                {!isTry && (
-                  <div className="flex justify-between text-xs pt-1 text-muted-foreground">
-                    <span>Yaklaşık TL karşılığı</span>
-                    <span className="tabular-nums">≈ {formatPrice(grandTotal * (form.exchange_rate || 1))} ₺</span>
-                  </div>
-                )}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button type="button" variant="ghost" size="sm" className="h-7 text-xs -mt-1" onClick={() => setTotalEditMode((v) => !v)}>
-                      {totalEditMode ? <Save className="h-3 w-3 mr-1" /> : <SquarePen className="h-3 w-3 mr-1" />} {totalEditMode ? 'Kaydet' : 'Toplam düzenle'}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Genel toplam veya iskonto oranını düzenle</TooltipContent>
-                </Tooltip>
-              </div>
             </div>
 
-            <div className="sticky bottom-0 flex flex-row justify-between items-center border-t border-border bg-muted/30 p-4 pt-4 -mx-6 px-6 pb-6">
-              <div className="flex items-center gap-2">
-                {editingId && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button type="button" variant="outline" size="icon" className="text-destructive" onClick={() => openDeleteConfirm(editingId!, goBack)} disabled={saving}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Sil</TooltipContent>
-                  </Tooltip>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {customerEditMode && (hasNewCustomerPending || hasNewContactPending) && (
-                  <Button type="button" variant="outline" onClick={() => {
+            {customerEditMode && (hasNewCustomerPending || hasNewContactPending) && (
+              <div className="flex justify-end shrink-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
                     if (hasNewCustomerPending) {
                       setExternalSearchInput(customerInput.trim())
                       setNewCustomerForm({ title: customerInput.trim(), email: '', phone: '', tax_no: '', tax_office: '', group_id: '', type_id: '', legal_type_id: '' })
@@ -1887,25 +2151,12 @@ export function TeklifFormPage() {
                       setNewContactForm({ full_name: contactInput.trim(), phone: '', role: '' })
                       setNewContactModalOpen(true)
                     }
-                  }}>
-                    Yeni {hasNewCustomerPending ? 'müşteri' : 'iletişim'} oluştur
-                  </Button>
-                )}
-                {editingId && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => window.open(`${API_URL}/api/offers/${editingId}/pdf`, '_blank', 'noopener')}
-                  >
-                    <FileDown className="h-4 w-4 mr-2" />
-                    PDF
-                  </Button>
-                )}
-                <Button type="submit" disabled={saving || !form.date || !form.order_no?.trim()}>
-                  {saving ? 'Kaydediliyor...' : 'Kaydet'}
+                  }}
+                >
+                  Yeni {hasNewCustomerPending ? 'müşteri' : 'iletişim'} oluştur
                 </Button>
               </div>
-            </div>
+            )}
           </CardContent>
         </form>
       </Card>
