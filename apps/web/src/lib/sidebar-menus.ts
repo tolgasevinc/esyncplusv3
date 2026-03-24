@@ -1,4 +1,5 @@
 import { API_URL } from '@/lib/api'
+import { getImageDisplayUrl } from '@/components/ImageInput'
 
 const STORAGE_KEY = 'esync-sidebar-menus'
 
@@ -45,7 +46,8 @@ export interface SidebarHeaderConfig {
 }
 
 const DEFAULT_TITLE = 'eSync+'
-const STORAGE_EVENT = 'esync-sidebar-menus-updated'
+/** Sidebar menü önbelleği güncellendiğinde `window` üzerinde tetiklenir */
+export const SIDEBAR_MENUS_UPDATED_EVENT = 'esync-sidebar-menus-updated'
 
 // ---------- Senkron (localStorage - fallback / cache) ----------
 
@@ -72,6 +74,34 @@ export function getSidebarHeader(): SidebarHeaderConfig {
   } catch {
     return { title: DEFAULT_TITLE }
   }
+}
+
+function isSidebarMenuRow(m: SidebarMenuItem): boolean {
+  return m.type !== 'separator'
+}
+
+/**
+ * Sidebar’daki Paraşüt kök menü satırı ile aynı ikon kaynağı (PNG storage path veya data URL).
+ * Sidebar linkte kullanılan `iconPath` / `iconDataUrl` çözümlemesiyle uyumludur.
+ */
+export function getParasutSidebarIconSrc(menus: SidebarMenuItem[]): string | undefined {
+  const rows = menus.filter(isSidebarMenuRow)
+  const root =
+    rows.find((m) => m.moduleId === 'parasut') ??
+    rows.find((m) => m.link?.trim() === '/parasut')
+  const item =
+    root ??
+    rows.find((m) => {
+      const l = m.label.toLowerCase()
+      const n = l.normalize('NFD').replace(/\u0307/g, '').replace(/ş/g, 's').replace(/ı/g, 'i')
+      return l.includes('paraşüt') || n.includes('parasut')
+    })
+  if (!item) return undefined
+  const path = item.iconPath?.trim()
+  if (path) return getImageDisplayUrl(path)
+  const data = item.iconDataUrl?.trim()
+  if (data) return data
+  return undefined
 }
 
 // ---------- API (sidebar_menu_items tablosu) ----------
@@ -130,7 +160,7 @@ export async function fetchSidebarHeader(): Promise<SidebarHeaderConfig> {
 export async function saveSidebarMenus(items: SidebarMenuItem[]): Promise<void> {
   const toSave = items.map(({ iconDataUrl, ...rest }) => rest)
   localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
-  window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
+  window.dispatchEvent(new CustomEvent(SIDEBAR_MENUS_UPDATED_EVENT))
   try {
     const res = await fetch(`${API_URL}/api/sidebar-menu-items`, {
       method: 'PUT',
@@ -162,7 +192,7 @@ export async function syncSidebarMenusToApi(items: SidebarMenuItem[]): Promise<v
   }
   const saved = (await res.json()) as SidebarMenuItem[]
   localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
-  window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
+  window.dispatchEvent(new CustomEvent(SIDEBAR_MENUS_UPDATED_EVENT))
 }
 
 /** Header'ı API'ye ve localStorage'a kaydeder */
@@ -172,7 +202,7 @@ export async function saveSidebarHeader(config: SidebarHeaderConfig): Promise<vo
     title: config.title ?? DEFAULT_TITLE,
   }
   localStorage.setItem(HEADER_STORAGE_KEY, JSON.stringify(toSave))
-  window.dispatchEvent(new CustomEvent(STORAGE_EVENT))
+  window.dispatchEvent(new CustomEvent(SIDEBAR_MENUS_UPDATED_EVENT))
   try {
     await fetch(`${API_URL}/api/app-settings`, {
       method: 'PUT',

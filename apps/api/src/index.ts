@@ -7412,7 +7412,12 @@ app.get('/api/parasut/products', async (c) => {
       return c.json({ error: `Paraşüt API hatası: ${errMsg}` }, 400);
     }
 
-    const data = (json as { data?: unknown[] }).data ?? [];
+    const rawList = (json as { data?: unknown }).data;
+    const data: unknown[] = Array.isArray(rawList)
+      ? rawList
+      : rawList != null && typeof rawList === 'object'
+        ? [rawList]
+        : [];
     const meta = (json as { meta?: { total_count?: number; current_page?: number; total_pages?: number } }).meta ?? {};
     const included = (json as { included?: unknown[] }).included ?? [];
 
@@ -8151,84 +8156,407 @@ app.post('/api/parasut/products/:id/pull', async (c) => {
   }
 });
 
-/** Master → Paraşüt gönder */
-app.post('/api/parasut/products/push', async (c) => {
+const PARASUT_PRODUCT_MAPPINGS_KEY = 'product_mappings';
+
+type ParasutPushSelected = { parasut: string; master: string };
+
+type ProductRowForParasutPush = {
+  id: number; name: string; sku: string | null; barcode: string | null; price: number; quantity: number;
+  tax_rate: number | null; unit_id: number | null; currency_id: number | null; supplier_code: string | null; gtip_code: string | null; image: string | null;
+  category_id: number | null;
+  unit_code: string | null; currency_code: string | null;
+};
+
+function parseProductImageToFirstPath(img: unknown): string | null {
+  if (!img || typeof img !== 'string') return null;
+  const t = img.trim();
+  if (!t || t === '[]') return null;
+  try {
+    const parsed = JSON.parse(t);
+    if (Array.isArray(parsed)) {
+      const first = parsed.find((x: unknown): x is string => typeof x === 'string' && !!x.trim());
+      return first?.trim() ?? null;
+    }
+    return t;
+  } catch {
+    return t;
+  }
+}
+
+function isEmptyParasutVal(v: unknown): boolean {
+  return v == null || (typeof v === 'string' && !v.trim());
+}
+
+/** Master satırı + alan kurallarından Paraşüt PUT attributes nesnesi üretir */
+async function buildParasutPushAttributes(
+  storage: R2Bucket | undefined,
+  productRow: ProductRowForParasutPush,
+  selected: ParasutPushSelected[],
+): Promise<Record<string, unknown>> {
+  const attrs: Record<string, unknown> = { name: productRow.name };
+  if (!isEmptyParasutVal(productRow.sku)) attrs.code = productRow.sku!.trim();
+  const imagePath = parseProductImageToFirstPath(productRow.image);
+  if (imagePath) {
+    const photoUrl = await storagePathToDataUrl(storage, imagePath);
+    if (photoUrl) attrs.photo = photoUrl;
+  }
+
+  for (const { parasut, master } of selected) {
+    if (master === 'name') attrs.name = productRow.name;
+    else if (master === 'sku' && !isEmptyParasutVal(productRow.sku)) attrs.code = productRow.sku!.trim();
+    else if (master === 'barcode' && !isEmptyParasutVal(productRow.barcode)) attrs.barcode = productRow.barcode!.trim();
+    else if (master === 'price') attrs.list_price = productRow.price;
+    else if (master === 'quantity' && parasut?.trim()) {
+      const q = Number(productRow.quantity);
+      const n = Number.isFinite(q) ? Math.round(q) : 0;
+      attrs[parasut.trim()] = n;
+    }
+    else if (master === 'tax_rate') attrs.vat_rate = productRow.tax_rate ?? 0;
+    else if (master === 'supplier_code' && !isEmptyParasutVal(productRow.supplier_code)) attrs.supplier_code = productRow.supplier_code!.trim();
+    else if (master === 'gtip_code' && !isEmptyParasutVal(productRow.gtip_code)) attrs.gtip = productRow.gtip_code!.trim();
+    else if (master === 'unit_id' && !isEmptyParasutVal(productRow.unit_code)) attrs.unit = productRow.unit_code!.trim();
+    else if (master === 'currency_id') attrs.currency = (productRow.currency_code || 'TRY').toUpperCase();
+    else if (master === 'image') {
+      const path = parseProductImageToFirstPath(productRow.image);
+      if (path) {
+        const photoUrl = await storagePathToDataUrl(storage, path);
+        if (photoUrl) attrs[parasut] = photoUrl;
+      }
+    }
+  }
+  return attrs;
+}
+
+/** POST create: stok alanı stock_count ise initial_stock_count olmalı (Paraşüt şeması) */
+function prepareAttrsForParasutProductCreate(attrs: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...attrs };
+  if (Object.prototype.hasOwnProperty.call(out, 'stock_count')) {
+    const sc = out.stock_count;
+    const n = typeof sc === 'number' ? sc : parseFloat(String(sc).replace(',', '.'));
+    if (Number.isFinite(n) && !Object.prototype.hasOwnProperty.call(out, 'initial_stock_count')) {
+      out.initial_stock_count = Math.round(n);
+    }
+    delete out.stock_count;
+  }
+  return out;
+}
+
+/** Paraşüt ürün attributes içinde yalnızca API'nin kabul ettiği yazılabilir alanlar (supplier_code vb. reddedilir) */
+const PARASUT_PRODUCT_WRITABLE_ATTR_KEYS = new Set([
+  'name', 'code', 'list_price', 'currency', 'buying_price', 'buying_currency',
+  'unit', 'vat_rate', 'barcode', 'gtip', 'photo', 'initial_stock_count', 'stock_count',
+  'inventory_tracking', 'archived',
+  'sales_excise_duty', 'sales_excise_duty_type', 'purchase_excise_duty', 'purchase_excise_duty_type',
+  'communications_tax_rate',
+]);
+
+function pickWritableParasutProductAttributes(attrs: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(attrs)) {
+    if (!PARASUT_PRODUCT_WRITABLE_ATTR_KEYS.has(k)) continue;
+    if (v === undefined) continue;
+    if (v === null) continue;
+    if (typeof v === 'string' && v.trim() === '' && k !== 'name' && k !== 'code') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function parasutApiErrorMessage(json: unknown, httpStatus: number): string {
+  const j = json as { errors?: Array<{ detail?: string; title?: string; code?: string }> };
+  const errs = j?.errors;
+  if (Array.isArray(errs) && errs.length > 0) {
+    const parts = errs.map((e) => (e.detail || e.title || e.code || '').trim()).filter(Boolean);
+    if (parts.length > 0) return parts.join(' — ');
+  }
+  return `HTTP ${httpStatus}`;
+}
+
+/** Yeni ürün: Paraşüt çoğu hesapta alış fiyatı / para birimi bekler */
+function applyParasutCreateDefaults(attrs: Record<string, unknown>): void {
+  const listRaw = attrs.list_price;
+  const listNum = typeof listRaw === 'number' && Number.isFinite(listRaw)
+    ? listRaw
+    : parseFloat(String(listRaw ?? '0').replace(',', '.')) || 0;
+  attrs.list_price = listNum;
+  const buyRaw = attrs.buying_price;
+  const buyNum = typeof buyRaw === 'number' && Number.isFinite(buyRaw)
+    ? buyRaw
+    : parseFloat(String(buyRaw ?? '').replace(',', '.'));
+  attrs.buying_price = Number.isFinite(buyNum) ? buyNum : listNum;
+  const cur = attrs.currency != null ? String(attrs.currency).trim().toUpperCase() : '';
+  attrs.currency = cur || 'TRY';
+  const bcur = attrs.buying_currency != null ? String(attrs.buying_currency).trim().toUpperCase() : '';
+  attrs.buying_currency = bcur || (attrs.currency as string) || 'TRY';
+  if (attrs.vat_rate == null || attrs.vat_rate === '') {
+    attrs.vat_rate = 0;
+  } else if (typeof attrs.vat_rate === 'string') {
+    const vr = parseFloat(String(attrs.vat_rate).replace(',', '.'));
+    attrs.vat_rate = Number.isFinite(vr) ? vr : 0;
+  }
+  if (attrs.initial_stock_count != null && typeof attrs.initial_stock_count === 'string') {
+    const q = parseFloat(String(attrs.initial_stock_count).replace(',', '.'));
+    attrs.initial_stock_count = Number.isFinite(q) ? Math.round(q) : 0;
+  }
+}
+
+function mergeParasutAttributeOverrides(
+  attrs: Record<string, unknown>,
+  overrides: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!overrides || typeof overrides !== 'object') return attrs;
+  const numericKeys = new Set(['list_price', 'buying_price', 'vat_rate', 'stock_count', 'initial_stock_count']);
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) continue;
+    if (v === null || v === '') {
+      delete attrs[k];
+      continue;
+    }
+    if (numericKeys.has(k)) {
+      const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+      if (!Number.isNaN(n)) {
+        attrs[k] = (k === 'stock_count' || k === 'initial_stock_count') ? Math.round(n) : n;
+      }
+    } else {
+      attrs[k] = typeof v === 'string' ? v.trim() : v;
+    }
+  }
+  return attrs;
+}
+
+async function loadParasutProductMappingRules(db: D1Database): Promise<ParasutPushSelected[]> {
+  const row = await db.prepare(
+    `SELECT value FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+  ).bind(PARASUT_PRODUCT_MAPPINGS_KEY).first() as { value: string | null } | null;
+  const raw = row?.value?.trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as ParasutPushSelected[] | Record<string, string>;
+    if (Array.isArray(parsed)) {
+      return parsed.filter((r) => r.parasut?.trim() && r.master?.trim());
+    }
+    if (typeof parsed === 'object' && parsed !== null) {
+      return Object.entries(parsed)
+        .filter(([k, v]) => k && v)
+        .map(([parasut, master]) => ({ parasut, master: String(master) }));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+/** Kayıtlı ürün + kurallara göre Paraşüt'e gidecek alanların önizlemesi; SKU ile Paraşüt ürünü aranır */
+app.post('/api/parasut/products/push-preview', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const body = await c.req.json<{
-      parasut_id: string;
       product_id: number;
-      selected_fields?: Array<{ parasut: string; master: string }>;
+      selected_fields?: ParasutPushSelected[];
     }>();
-    const parasutId = body?.parasut_id?.trim();
     const productId = body?.product_id;
-    const selected = body?.selected_fields ?? [];
-    if (!parasutId || !productId || selected.length === 0) {
-      return c.json({ error: 'parasut_id, product_id ve selected_fields gerekli' }, 400);
+    if (!productId) return c.json({ error: 'product_id gerekli' }, 400);
+
+    let selected = body.selected_fields ?? [];
+    if (selected.length === 0) {
+      selected = await loadParasutProductMappingRules(c.env.DB);
+    }
+    if (selected.length === 0) {
+      return c.json({ error: 'Eşleştirme kuralı yok. Paraşüt › Ürünler sayfasından alan kurallarını tanımlayın.' }, 400);
     }
 
     const productRow = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.unit_id, p.currency_id, p.supplier_code, p.gtip_code, p.image,
+      `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.unit_id, p.currency_id, p.category_id, p.supplier_code, p.gtip_code, p.image,
        u.code as unit_code, cur.code as currency_code
        FROM products p
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`
-    ).bind(productId).first() as {
-      id: number; name: string; sku: string | null; barcode: string | null; price: number; quantity: number;
-      tax_rate: number | null; unit_id: number | null; currency_id: number | null; supplier_code: string | null; gtip_code: string | null; image: string | null;
-      unit_code: string | null; currency_code: string | null;
-    } | null;
+    ).bind(productId).first() as ProductRowForParasutPush | null;
+    if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
+
+    const sku = (productRow.sku ?? '').trim();
+    if (!sku) {
+      return c.json({ error: 'Paraşüt ürününü bulmak için ana ürün SKU dolu olmalıdır' }, 400);
+    }
+
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
+
+    const attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected);
+
+    const base = 'https://api.parasut.com';
+    const params = new URLSearchParams();
+    params.set('filter[code]', sku);
+    params.set('page[number]', '1');
+    params.set('page[size]', '5');
+    params.set('sort', '-id');
+    const listRes = await fetch(`${base}/v4/${auth.companyId}/products?${params.toString()}`, {
+      headers: { 'Authorization': `Bearer ${auth.token}`, 'Accept': 'application/json' },
+    });
+    const listJson = await listRes.json().catch(() => ({}));
+    if (!listRes.ok) {
+      const errMsg = (listJson as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${listRes.status}`;
+      return c.json({ error: `Paraşüt ürün araması: ${errMsg}` }, 400);
+    }
+    const rawData = (listJson as { data?: unknown }).data;
+    const dataArr: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : rawData != null && typeof rawData === 'object'
+        ? [rawData]
+        : [];
+    const first = dataArr[0] as { id?: string | number; attributes?: Record<string, unknown> } | undefined;
+    const rawId = first?.id;
+    const parasutId =
+      rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : null;
+    const pa = (first?.attributes ?? {}) as Record<string, unknown>;
+    const parasutProduct = first
+      ? {
+        id: parasutId ?? undefined,
+        code: pa.code != null ? String(pa.code) : '',
+        name: pa.name != null ? String(pa.name) : '',
+      }
+      : null;
+
+    const attributesDisplay: Record<string, unknown> = { ...attrs };
+    const hasPhoto = typeof attributesDisplay.photo === 'string' && attributesDisplay.photo.length > 0;
+    if (hasPhoto) delete attributesDisplay.photo;
+
+    return c.json({
+      parasut_id: parasutId,
+      parasut_product: parasutProduct,
+      sku_used: sku,
+      attributes_display: attributesDisplay,
+      has_photo: hasPhoto,
+      selected_fields: selected,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Önizleme hatası' }, 500);
+  }
+});
+
+/** Master → Paraşüt gönder (PUT güncelleme veya create_new ile POST yeni ürün) */
+app.post('/api/parasut/products/push', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      parasut_id?: string;
+      product_id: number;
+      create_new?: boolean;
+      selected_fields?: ParasutPushSelected[];
+      attribute_overrides?: Record<string, unknown>;
+    }>();
+    const parasutIdRaw = body?.parasut_id != null ? String(body.parasut_id).trim() : '';
+    const productId = body?.product_id;
+    let selected = body?.selected_fields ?? [];
+    if (selected.length === 0) {
+      selected = await loadParasutProductMappingRules(c.env.DB);
+    }
+    if (!productId || selected.length === 0) {
+      return c.json({ error: 'product_id ve eşleştirme kuralları gerekli' }, 400);
+    }
+
+    const wantsCreate = !!body?.create_new && !parasutIdRaw;
+    if (!wantsCreate && !parasutIdRaw) {
+      return c.json({ error: 'parasut_id gerekli veya create_new: true ile yeni ürün oluşturun' }, 400);
+    }
+
+    const productRow = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.unit_id, p.currency_id, p.category_id, p.supplier_code, p.gtip_code, p.image,
+       u.code as unit_code, cur.code as currency_code
+       FROM products p
+       LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
+       LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0`
+    ).bind(productId).first() as ProductRowForParasutPush | null;
     if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
 
     const auth = await getParasutAuth(c);
     if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
 
-    const isEmpty = (v: unknown): boolean => v == null || (typeof v === 'string' && !v.trim());
-    const parseImageToFirstPath = (img: unknown): string | null => {
-      if (!img || typeof img !== 'string') return null;
-      const t = img.trim();
-      if (!t || t === '[]') return null;
-      try {
-        const parsed = JSON.parse(t);
-        if (Array.isArray(parsed)) {
-          const first = parsed.find((x: unknown): x is string => typeof x === 'string' && !!x.trim());
-          return first?.trim() ?? null;
-        }
-        return t;
-      } catch {
-        return t;
-      }
-    };
-    const attrs: Record<string, unknown> = { name: productRow.name };
-    if (!isEmpty(productRow.sku)) attrs.code = productRow.sku!.trim();
-    const imagePath = parseImageToFirstPath(productRow.image);
-    if (imagePath) {
-      const photoUrl = await storagePathToDataUrl(c.env.STORAGE, imagePath);
-      if (photoUrl) attrs.photo = photoUrl;
-    }
+    let attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected);
+    attrs = mergeParasutAttributeOverrides(attrs, body.attribute_overrides);
 
-    for (const { parasut, master } of selected) {
-      if (master === 'name') attrs.name = productRow.name;
-      else if (master === 'sku' && !isEmpty(productRow.sku)) attrs.code = productRow.sku!.trim();
-      else if (master === 'barcode' && !isEmpty(productRow.barcode)) attrs.barcode = productRow.barcode!.trim();
-      else if (master === 'price') attrs.list_price = productRow.price;
-      else if (master === 'quantity') attrs.initial_stock_count = productRow.quantity;
-      else if (master === 'tax_rate') attrs.vat_rate = productRow.tax_rate ?? 0;
-      else if (master === 'supplier_code' && !isEmpty(productRow.supplier_code)) attrs.supplier_code = productRow.supplier_code!.trim();
-      else if (master === 'gtip_code' && !isEmpty(productRow.gtip_code)) attrs.gtip = productRow.gtip_code!.trim();
-      else if (master === 'unit_id' && !isEmpty(productRow.unit_code)) attrs.unit = productRow.unit_code!.trim();
-      else if (master === 'currency_id') attrs.currency = (productRow.currency_code || 'TRY').toUpperCase();
-      else if (master === 'image') {
-        const path = parseImageToFirstPath(productRow.image);
-        if (path) {
-          const photoUrl = await storagePathToDataUrl(c.env.STORAGE, path);
-          if (photoUrl) attrs[parasut] = photoUrl;
-        }
-      }
+    const nm = attrs.name != null ? String(attrs.name).trim() : '';
+    if (!nm) attrs.name = productRow.name?.trim() || 'Ürün';
+    if (attrs.code != null && String(attrs.code).trim() === '' && productRow.sku?.trim()) {
+      attrs.code = productRow.sku.trim();
     }
 
     const base = 'https://api.parasut.com';
+
+    if (wantsCreate) {
+      if (!productRow.sku?.trim()) {
+        return c.json({ error: 'Yeni Paraşüt ürünü için ana ürün SKU (kod) zorunludur' }, 400);
+      }
+      let createAttrs = prepareAttrsForParasutProductCreate(attrs);
+      applyParasutCreateDefaults(createAttrs);
+      createAttrs = pickWritableParasutProductAttributes(createAttrs);
+      if (!createAttrs.name || !String(createAttrs.name).trim()) {
+        createAttrs.name = productRow.name?.trim() || 'Ürün';
+      }
+      if (!createAttrs.code || !String(createAttrs.code).trim()) {
+        createAttrs.code = productRow.sku!.trim();
+      }
+      if (createAttrs.initial_stock_count === 0 || createAttrs.initial_stock_count === '0') {
+        delete createAttrs.initial_stock_count;
+      }
+      if (typeof createAttrs.photo === 'string' && createAttrs.photo.length > 1_800_000) {
+        delete createAttrs.photo;
+      }
+      const createData: {
+        type: string;
+        attributes: Record<string, unknown>;
+        relationships?: Record<string, unknown>;
+      } = { type: 'products', attributes: createAttrs };
+      const catId = productRow.category_id != null && productRow.category_id > 0 ? productRow.category_id : null;
+      if (catId) {
+        const mapRow = await c.env.DB.prepare(
+          `SELECT value FROM app_settings WHERE category = 'parasut' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+        ).bind(PARASUT_CATEGORY_MAPPINGS_KEY).first() as { value: string | null } | null;
+        const rawMap = mapRow?.value?.trim();
+        let mappings: Record<string, string> = {};
+        if (rawMap) {
+          try {
+            mappings = JSON.parse(rawMap) as Record<string, string>;
+          } catch { /* ignore */ }
+        }
+        const parasutCategoryId = mappings[String(catId)];
+        if (parasutCategoryId?.trim()) {
+          createData.relationships = {
+            category: { data: { type: 'item_categories', id: parasutCategoryId.trim() } },
+          };
+        }
+      }
+      const createRes = await fetch(`${base}/v4/${auth.companyId}/products`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ data: createData }),
+      });
+      const createJson = await createRes.json().catch(() => ({}));
+      if (!createRes.ok) {
+        return c.json({ error: `Paraşüt: ${parasutApiErrorMessage(createJson, createRes.status)}` }, 400);
+      }
+      const newIdRaw = (createJson as { data?: { id?: string | number } }).data?.id;
+      const newId = newIdRaw != null && String(newIdRaw).trim() !== '' ? String(newIdRaw).trim() : '';
+      return c.json({
+        ok: true,
+        message: 'Paraşüt\'te yeni ürün oluşturuldu',
+        parasut_id: newId || undefined,
+      });
+    }
+
+    const parasutId = parasutIdRaw;
+    if (
+      Object.prototype.hasOwnProperty.call(attrs, 'initial_stock_count') &&
+      !Object.prototype.hasOwnProperty.call(attrs, 'stock_count')
+    ) {
+      const raw = attrs.initial_stock_count;
+      const n = typeof raw === 'number' ? raw : parseFloat(String(raw).replace(',', '.'));
+      attrs.stock_count = Number.isFinite(n) ? Math.round(n) : 0;
+      delete attrs.initial_stock_count;
+    }
+
+    const updateAttrs = pickWritableParasutProductAttributes(attrs);
+
     const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
       method: 'PUT',
       headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -8236,14 +8564,13 @@ app.post('/api/parasut/products/push', async (c) => {
         data: {
           id: parasutId,
           type: 'products',
-          attributes: attrs,
+          attributes: updateAttrs,
         },
       }),
     });
     const updateJson = await updateRes.json().catch(() => ({}));
     if (!updateRes.ok) {
-      const errMsg = (updateJson as { errors?: Array<{ detail?: string }> }).errors?.[0]?.detail || `HTTP ${updateRes.status}`;
-      return c.json({ error: `Paraşüt: ${errMsg}` }, 400);
+      return c.json({ error: `Paraşüt: ${parasutApiErrorMessage(updateJson, updateRes.status)}` }, 400);
     }
     return c.json({ ok: true, message: 'Paraşüt\'e gönderildi' });
   } catch (err: unknown) {

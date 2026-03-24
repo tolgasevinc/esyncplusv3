@@ -24,7 +24,12 @@ import { PackageContentsTab } from '@/components/PackageContentsTab'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { API_URL } from '@/lib/api'
 import { getCategoryPath, buildHierarchy, type CategoryItem } from '@/components/CategorySelect'
-import { fetchSidebarMenus } from '@/lib/sidebar-menus'
+import {
+  fetchSidebarMenus,
+  getParasutSidebarIconSrc,
+  getSidebarMenus,
+  SIDEBAR_MENUS_UPDATED_EVENT,
+} from '@/lib/sidebar-menus'
 import { ProductCodeDisplay } from '@/components/ProductCodeDisplay'
 import { ProductPricePreview } from '@/components/ProductPricePreview'
 import { buildProductCode } from '@/lib/productCode'
@@ -130,14 +135,34 @@ function normalizeSku(s: string | undefined): string {
   return (s || '').trim().toLowerCase().replace(/ı/g, 'i').replace(/İ/g, 'i')
 }
 
-/** Menülerden Paraşüt ikon path'ini bul */
-function findParasutIconPath(menus: { label: string; iconPath?: string }[]): string | undefined {
-  const lower = (x: string) => x.toLowerCase().replace(/ş/g, 's').replace(/ı/g, 'i')
-  for (const m of menus) {
-    const l = lower(m.label)
-    if ((l.includes('parasut') || l.includes('paraşüt')) && m.iconPath) return m.iconPath
+const PARASUT_ATTR_LABELS: Record<string, string> = {
+  code: 'Kod',
+  name: 'Ürün adı',
+  list_price: 'Satış fiyatı',
+  currency: 'Para birimi',
+  buying_price: 'Alış fiyatı',
+  buying_currency: 'Alış para birimi',
+  unit: 'Birim',
+  vat_rate: 'KDV oranı',
+  stock_count: 'Stok miktarı',
+  initial_stock_count: 'Stok (Paraşüt)',
+  barcode: 'Barkod',
+  gtip: 'GTIP',
+  supplier_code: 'Tedarikçi kodu',
+  photo: 'Ana görsel',
+}
+
+const PARASUT_ATTR_SORT_ORDER = [
+  'code', 'name', 'list_price', 'currency', 'buying_price', 'buying_currency', 'unit', 'vat_rate',
+  'initial_stock_count', 'stock_count', 'barcode', 'gtip', 'supplier_code', 'photo',
+]
+
+function sortParasutAttributeKeys(keys: string[]): string[] {
+  const rank = (k: string) => {
+    const i = PARASUT_ATTR_SORT_ORDER.indexOf(k)
+    return i === -1 ? 999 : i
   }
-  return undefined
+  return [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
 }
 
 /** Gruplar ve kategoriler açılır liste - varsayılan kapalı, arama destekli */
@@ -587,11 +612,26 @@ export function ProductsPage() {
   const [aiGenerateLoading, setAiGenerateLoading] = useState(false)
   const [openCartPublishOpen, setOpenCartPublishOpen] = useState(false)
   const [openCartUpdateOptions, setOpenCartUpdateOptions] = useState({ update_price: true, update_description: true, update_images: true })
+  const [parasutTransferOpen, setParasutTransferOpen] = useState(false)
+  const [parasutPreviewLoading, setParasutPreviewLoading] = useState(false)
+  const [parasutPreview, setParasutPreview] = useState<{
+    parasut_id: string | null
+    parasut_product: { id?: string; code: string; name: string } | null
+    sku_used: string
+    attributes_display: Record<string, unknown>
+    has_photo: boolean
+    selected_fields: { parasut: string; master: string }[]
+  } | null>(null)
+  const [parasutPreviewError, setParasutPreviewError] = useState<string | null>(null)
+  const [parasutFieldEdits, setParasutFieldEdits] = useState<Record<string, string>>({})
+  const [parasutTransferLoading, setParasutTransferLoading] = useState(false)
+  /** SKU ile otomatik eşleşme yoksa Paraşüt panelindeki ürün kimliği */
+  const [parasutManualId, setParasutManualId] = useState('')
   const [filterCategorySearch, setFilterCategorySearch] = useState('')
   const [filterBrandSearch, setFilterBrandSearch] = useState('')
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
   const [matchedParasutSkus, setMatchedParasutSkus] = useState<Set<string>>(new Set())
-  const [parasutIconPath, setParasutIconPath] = useState<string | undefined>()
+  const [parasutIconSrc, setParasutIconSrc] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | null>(null)
   const [bulkCategoryId, setBulkCategoryId] = useState<number | ''>('')
@@ -648,6 +688,120 @@ export function ProductsPage() {
       toastError('Hata', err instanceof Error ? err.message : 'Güncellenemedi')
     }
   }, [])
+
+  const openParasutTransferModal = useCallback(async () => {
+    if (!editingId) return
+    setParasutTransferOpen(true)
+    setParasutPreview(null)
+    setParasutPreviewError(null)
+    setParasutFieldEdits({})
+    setParasutManualId('')
+    setParasutPreviewLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/parasut/products/push-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ product_id: editingId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error((data as { error?: string }).error || 'Önizleme alınamadı')
+      const d = data as {
+        parasut_id?: string | null
+        parasut_product?: { id?: string; code: string; name: string } | null
+        sku_used?: string
+        attributes_display?: Record<string, unknown>
+        has_photo?: boolean
+        selected_fields?: { parasut: string; master: string }[]
+      }
+      const rawPid = d.parasut_id
+      const fromProduct = d.parasut_product?.id
+      const parasutIdResolved =
+        rawPid != null && String(rawPid).trim() !== ''
+          ? String(rawPid).trim()
+          : fromProduct != null && String(fromProduct).trim() !== ''
+            ? String(fromProduct).trim()
+            : null
+      setParasutPreview({
+        parasut_id: parasutIdResolved,
+        parasut_product: d.parasut_product ?? null,
+        sku_used: String(d.sku_used ?? ''),
+        attributes_display: d.attributes_display ?? {},
+        has_photo: !!d.has_photo,
+        selected_fields: Array.isArray(d.selected_fields) ? d.selected_fields : [],
+      })
+      const disp = d.attributes_display ?? {}
+      const edits: Record<string, string> = {}
+      for (const [k, v] of Object.entries(disp)) {
+        if (v == null || v === '') edits[k] = ''
+        else if (typeof v === 'number') edits[k] = String(v)
+        else edits[k] = String(v)
+      }
+      setParasutFieldEdits(edits)
+    } catch (e) {
+      setParasutPreviewError(e instanceof Error ? e.message : 'Hata')
+    } finally {
+      setParasutPreviewLoading(false)
+    }
+  }, [editingId])
+
+  const submitParasutTransfer = useCallback(async () => {
+    if (!editingId || !parasutPreview) return
+    const targetParasutId = (parasutManualId.trim() || String(parasutPreview.parasut_id ?? '').trim()).trim()
+    const createNew = !targetParasutId
+    const nameEd = parasutFieldEdits.name?.trim()
+    if (!nameEd) {
+      toastError('Hata', 'Ürün adı boş olamaz.')
+      return
+    }
+    const numericKeys = new Set(['list_price', 'vat_rate', 'initial_stock_count', 'stock_count', 'buying_price'])
+    const overrides: Record<string, unknown> = {}
+    for (const [k, raw] of Object.entries(parasutFieldEdits)) {
+      const s = raw.trim()
+      if (s === '') {
+        overrides[k] = ''
+        continue
+      }
+      if (numericKeys.has(k)) {
+        const n = parseFloat(s.replace(',', '.'))
+        if (Number.isNaN(n)) {
+          toastError('Hata', `"${PARASUT_ATTR_LABELS[k] ?? k}" için geçerli bir sayı girin.`)
+          return
+        }
+        overrides[k] = n
+      } else {
+        overrides[k] = s
+      }
+    }
+    setParasutTransferLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/parasut/products/push`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(targetParasutId ? { parasut_id: targetParasutId } : {}),
+          create_new: createNew,
+          product_id: editingId,
+          selected_fields: parasutPreview.selected_fields,
+          attribute_overrides: overrides,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error((data as { error?: string }).error || 'Aktarım başarısız')
+      toastSuccess(
+        'Tamam',
+        (data as { message?: string }).message ||
+          (createNew ? 'Paraşüt\'te yeni ürün oluşturuldu.' : 'Ürün Paraşüt\'e aktarıldı.')
+      )
+      setParasutTransferOpen(false)
+      setParasutPreview(null)
+      setParasutFieldEdits({})
+      setParasutManualId('')
+    } catch (e) {
+      toastError('Hata', e instanceof Error ? e.message : 'Aktarım başarısız')
+    } finally {
+      setParasutTransferLoading(false)
+    }
+  }, [editingId, parasutPreview, parasutFieldEdits, parasutManualId])
 
   const categoryPath = useMemo(
     () => getCategoryPath(categories, form.category_id),
@@ -984,7 +1138,15 @@ export function ProductsPage() {
   }, [data])
 
   useEffect(() => {
-    fetchSidebarMenus().then((menus) => setParasutIconPath(findParasutIconPath(menus)))
+    const applyParasutIcon = () => setParasutIconSrc(getParasutSidebarIconSrc(getSidebarMenus()))
+    applyParasutIcon()
+    fetchSidebarMenus().then((menus) => setParasutIconSrc(getParasutSidebarIconSrc(menus)))
+    window.addEventListener(SIDEBAR_MENUS_UPDATED_EVENT, applyParasutIcon)
+    window.addEventListener('storage', applyParasutIcon)
+    return () => {
+      window.removeEventListener(SIDEBAR_MENUS_UPDATED_EVENT, applyParasutIcon)
+      window.removeEventListener('storage', applyParasutIcon)
+    }
   }, [])
 
   useEffect(() => {
@@ -2116,9 +2278,9 @@ export function ProductsPage() {
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <div className="flex items-center justify-center shrink-0">
-                                      {parasutIconPath ? (
+                                      {parasutIconSrc ? (
                                         <img
-                                          src={getImageDisplayUrl(parasutIconPath)}
+                                          src={parasutIconSrc}
                                           alt="Paraşüt"
                                           className="h-8 w-8 object-contain"
                                         />
@@ -2753,6 +2915,35 @@ export function ProductsPage() {
                   </TooltipTrigger>
                   <TooltipContent>Aktif</TooltipContent>
                 </Tooltip>
+                {editingId && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-block">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-9 w-9 shrink-0"
+                          onClick={() => void openParasutTransferModal()}
+                          aria-label="Paraşüte aktar"
+                        >
+                          {parasutIconSrc ? (
+                            <img
+                              src={parasutIconSrc}
+                              alt=""
+                              className="h-4 w-4 object-contain"
+                            />
+                          ) : (
+                            <span className="text-xs font-semibold text-muted-foreground" aria-hidden>
+                              P
+                            </span>
+                          )}
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Paraşüte aktar</TooltipContent>
+                  </Tooltip>
+                )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 {modalTab === 'e-ticaret' && (
@@ -2936,6 +3127,113 @@ export function ProductsPage() {
               onClick={() => handleBulkUpdate('product_item_group_id', bulkItemGroupId || null)}
             >
               {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={parasutTransferOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setParasutTransferOpen(false)
+            setParasutPreview(null)
+            setParasutPreviewError(null)
+            setParasutFieldEdits({})
+            setParasutManualId('')
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Paraşüte aktar</DialogTitle>
+            <DialogDescription>
+              SKU ile eşleşen Paraşüt ürünü güncellenir. Eşleşme yoksa <strong>Aktar</strong> yeni ürün oluşturur. Veriler kayıtlı ana üründen gelir; formdaki son değişiklikler için önce Kaydet.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            {parasutPreviewLoading && (
+              <p className="text-sm text-muted-foreground text-center py-6">Önizleme yükleniyor…</p>
+            )}
+            {!parasutPreviewLoading && parasutPreviewError && (
+              <p className="text-sm text-destructive">{parasutPreviewError}</p>
+            )}
+            {!parasutPreviewLoading && parasutPreview && (
+              <>
+                <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm space-y-1">
+                  <div>
+                    <span className="text-muted-foreground">Eşleşme SKU: </span>
+                    <span className="font-mono">{parasutPreview.sku_used}</span>
+                  </div>
+                  {parasutPreview.parasut_product && (
+                    <div>
+                      <span className="text-muted-foreground">Paraşüt ürünü: </span>
+                      <span>{parasutPreview.parasut_product.name || parasutPreview.parasut_product.code || '—'}</span>
+                      {parasutPreview.parasut_product.code && (
+                        <span className="text-muted-foreground font-mono ml-1">({parasutPreview.parasut_product.code})</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {!parasutPreview.parasut_id && (
+                  <div className="space-y-2 rounded-md border border-emerald-600/30 bg-emerald-500/10 px-3 py-3">
+                    <p className="text-sm text-emerald-900 dark:text-emerald-100">
+                      Bu SKU ile mevcut Paraşüt ürünü bulunamadı. <strong>Aktar</strong> ile aynı alanlarla <strong>yeni ürün</strong> oluşturulur (kod = SKU). İsterseniz aşağıya Paraşüt ürün ID yazarak mevcut kaydı güncelleyebilirsiniz.
+                    </p>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="parasut-manual-id">Mevcut ürünü güncelle — Paraşüt ürün ID (isteğe bağlı)</Label>
+                      <Input
+                        id="parasut-manual-id"
+                        value={parasutManualId}
+                        onChange={(e) => setParasutManualId(e.target.value)}
+                        placeholder="Boş bırakırsanız yeni ürün oluşturulur"
+                        className="font-mono text-sm"
+                        autoComplete="off"
+                      />
+                    </div>
+                  </div>
+                )}
+                {parasutPreview.has_photo && (
+                  <p className="text-sm text-muted-foreground">
+                    Ana görsel, kayıtlı ürün görsellerinden otomatik olarak Paraşüt&apos;e gönderilir (önizlemede gösterilmez).
+                  </p>
+                )}
+                <div className="space-y-3 max-h-[42vh] overflow-y-auto pr-1">
+                  {sortParasutAttributeKeys(Object.keys(parasutFieldEdits)).map((key) => (
+                    <div key={key} className="space-y-1.5">
+                      <Label htmlFor={`parasut-attr-${key}`}>{PARASUT_ATTR_LABELS[key] ?? key}</Label>
+                      <Input
+                        id={`parasut-attr-${key}`}
+                        value={parasutFieldEdits[key] ?? ''}
+                        onChange={(e) => setParasutFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                        className="font-mono text-sm"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setParasutTransferOpen(false)
+                setParasutPreview(null)
+                setParasutPreviewError(null)
+                setParasutFieldEdits({})
+                setParasutManualId('')
+              }}
+            >
+              İptal
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void submitParasutTransfer()}
+              disabled={parasutPreviewLoading || parasutTransferLoading || !parasutPreview}
+            >
+              {parasutTransferLoading ? 'Aktarılıyor…' : 'Aktar'}
             </Button>
           </DialogFooter>
         </DialogContent>

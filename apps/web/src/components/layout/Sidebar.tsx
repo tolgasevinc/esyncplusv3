@@ -3,7 +3,14 @@ import { Link, useLocation } from 'react-router-dom'
 import { API_URL } from '@/lib/api'
 
 import { getImageDisplayUrl } from '@/components/ImageInput'
-import { getSidebarMenus, getSidebarHeader, fetchSidebarMenus, fetchSidebarHeader, SEPARATOR_COLORS } from '@/lib/sidebar-menus'
+import {
+  getSidebarMenus,
+  getSidebarHeader,
+  fetchSidebarMenus,
+  fetchSidebarHeader,
+  SEPARATOR_COLORS,
+  SIDEBAR_MENUS_UPDATED_EVENT,
+} from '@/lib/sidebar-menus'
 import { getModuleById } from '@/lib/app-modules'
 import {
   Package,
@@ -56,10 +63,10 @@ export function Sidebar() {
       setHeader(headerData)
     }
     loadFromApi()
-    window.addEventListener('esync-sidebar-menus-updated', loadFromStorage)
+    window.addEventListener(SIDEBAR_MENUS_UPDATED_EVENT, loadFromStorage)
     window.addEventListener('storage', loadFromStorage)
     return () => {
-      window.removeEventListener('esync-sidebar-menus-updated', loadFromStorage)
+      window.removeEventListener(SIDEBAR_MENUS_UPDATED_EVENT, loadFromStorage)
       window.removeEventListener('storage', loadFromStorage)
     }
   }, [])
