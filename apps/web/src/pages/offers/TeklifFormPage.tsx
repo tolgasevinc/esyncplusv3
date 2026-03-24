@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Search, Plus, Trash2, SquarePen, Save, ArrowDownToLine, ChevronDown, ChevronUp, Copy, FileDown, Check, X, Share2, Mail, MessageCircle } from 'lucide-react'
+import { Search, Plus, Trash2, SquarePen, Save, ArrowDownToLine, ChevronDown, ChevronUp, Copy, FileDown, Check, X, Share2, Mail, MessageCircle, RefreshCw } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -52,6 +52,8 @@ import {
   convertBetweenCurrencies,
   groupProductsByItemGroup,
   filterCustomersByWords,
+  offerFieldsFromCustomerRecord,
+  customerSearchRowToOfferRecord,
 } from './teklif-common'
 
 type RowDetailPanels = { discount: boolean; description: boolean; tax: boolean }
@@ -234,15 +236,22 @@ export function TeklifFormPage() {
       if (!res.ok) throw new Error(json.error || 'Müşteri oluşturulamadı')
       const newId = json.id
       if (newId) {
+        const snap = offerFieldsFromCustomerRecord(
+          {
+            title: newCustomerForm.title.trim(),
+            email: newCustomerForm.email?.trim() || null,
+            phone: newCustomerForm.phone?.trim() || null,
+            phone_mobile: newCustomerForm.phone?.trim() || null,
+            tax_office: newCustomerForm.tax_office?.trim() || null,
+            tax_no: newCustomerForm.tax_no?.trim() || null,
+          },
+          null
+        )
         setForm((f) => ({
           ...f,
           customer_id: newId,
           contact_id: '',
-          company_name: newCustomerForm.title.trim() || f.company_name,
-          tax_office: newCustomerForm.tax_office?.trim() || f.tax_office,
-          tax_no: newCustomerForm.tax_no?.trim() || f.tax_no,
-          company_email: newCustomerForm.email?.trim() || f.company_email,
-          company_phone: newCustomerForm.phone?.trim() || f.company_phone,
+          ...snap,
         }))
         setCustomerInput(json.title || newCustomerForm.title.trim())
         setNewCustomerModalOpen(false)
@@ -291,6 +300,59 @@ export function TeklifFormPage() {
       setContacts([])
     }
   }, [])
+
+  const [customerSnapshotSyncing, setCustomerSnapshotSyncing] = useState(false)
+
+  /** Müşteri kartından teklif çıktı alanlarını doldurur; müşteri kaydı değişmez. */
+  const syncOfferFieldsFromCustomerCard = useCallback(
+    async (contactIdMode: 'keep' | number | '', opts?: { silent?: boolean }) => {
+      const customerId = form.customer_id
+      if (!customerId || typeof customerId !== 'number') {
+        toastError('Önce müşteri seçin')
+        return
+      }
+      const cid =
+        contactIdMode === 'keep'
+          ? form.contact_id === ''
+            ? ''
+            : form.contact_id
+          : contactIdMode
+      setCustomerSnapshotSyncing(true)
+      try {
+        const res = await fetch(`${API_URL}/api/customers/${customerId}`)
+        const cust = await parseJsonResponse<Record<string, unknown>>(res)
+        if (!res.ok) throw new Error((cust as { error?: string }).error || 'Müşteri alınamadı')
+        const contact =
+          cid === '' || cid === undefined ? null : contacts.find((x) => x.id === cid) ?? null
+        const snap = offerFieldsFromCustomerRecord(
+          {
+            title: cust.title as string,
+            email: cust.email as string,
+            phone: cust.phone as string,
+            phone_mobile: cust.phone_mobile as string,
+            tax_office: cust.tax_office as string,
+            tax_no: cust.tax_no as string,
+          },
+          contact
+        )
+        setForm((f) => ({
+          ...f,
+          ...(contactIdMode !== 'keep' ? { contact_id: cid } : {}),
+          ...snap,
+        }))
+        if (contact) setContactInput(`${contact.full_name}${contact.role ? ` (${contact.role})` : ''}`)
+        else setContactInput('')
+        if (!opts?.silent && contactIdMode === 'keep') {
+          toastSuccess('Güncellendi', 'Çıktı alanları müşteri kartından yenilendi. Kayıtlı müşteri değişmedi.')
+        }
+      } catch (e) {
+        toastError('Hata', e instanceof Error ? e.message : 'Yüklenemedi')
+      } finally {
+        setCustomerSnapshotSyncing(false)
+      }
+    },
+    [form.customer_id, form.contact_id, contacts]
+  )
 
   useEffect(() => {
     const t = setTimeout(() => setAddRowProductDebounced(addRowProductInput), 300)
@@ -583,10 +645,9 @@ export function TeklifFormPage() {
   useEffect(() => {
     if (form.contact_id && contacts.length > 0) {
       const c = contacts.find((x) => x.id === form.contact_id)
-      if (c) {
-        setContactInput(`${c.full_name}${c.role ? ` (${c.role})` : ''}`)
-        setForm((f) => (f.authorized_name ? f : { ...f, authorized_name: c.full_name || '' }))
-      }
+      if (c) setContactInput(`${c.full_name}${c.role ? ` (${c.role})` : ''}`)
+    } else if (!form.contact_id) {
+      setContactInput('')
     }
   }, [form.contact_id, contacts])
 
@@ -1317,11 +1378,7 @@ export function TeklifFormPage() {
                                       ...f,
                                       customer_id: c.id,
                                       contact_id: '',
-                                      company_name: c.title || f.company_name,
-                                      tax_office: c.tax_office || f.tax_office,
-                                      tax_no: c.tax_no || f.tax_no,
-                                      company_email: c.email || c.phone_mobile || f.company_email,
-                                      company_phone: c.phone || c.phone_mobile || f.company_phone,
+                                      ...offerFieldsFromCustomerRecord(customerSearchRowToOfferRecord(c), null),
                                     }))
                                     setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
                                     setCustomerSearchResults([])
@@ -1347,11 +1404,7 @@ export function TeklifFormPage() {
                                   ...f,
                                   customer_id: c.id,
                                   contact_id: '',
-                                  company_name: c.title || f.company_name,
-                                  tax_office: c.tax_office || f.tax_office,
-                                  tax_no: c.tax_no || f.tax_no,
-                                  company_email: c.email || c.phone_mobile || f.company_email,
-                                  company_phone: c.phone || c.phone_mobile || f.company_phone,
+                                  ...offerFieldsFromCustomerRecord(customerSearchRowToOfferRecord(c), null),
                                 }))
                                 setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
                                 setCustomerSearchResults([])
@@ -1384,46 +1437,84 @@ export function TeklifFormPage() {
                 </div>
                 </div>
                 <div className="flex-1 min-w-0 space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Yetkili Adı</Label>
+                  <Label className="text-xs text-muted-foreground">Yetkili (teklif çıktısı)</Label>
                   <Input
                     value={form.authorized_name || ''}
                     onChange={(e) => setForm((f) => ({ ...f, authorized_name: e.target.value }))}
-                    placeholder="Yetkili adı"
+                    placeholder="Kayıtlı yetkili seçebilir veya metin girebilirsiniz"
                     className="h-9 w-full"
                   />
+                  {form.customer_id && contacts.length > 0 ? (
+                    <div className="space-y-1 pt-0.5">
+                      <Label className="text-[10px] text-muted-foreground">Kayıtlı yetkili (müşteri kartı)</Label>
+                      <select
+                        className="flex h-9 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
+                        value={form.contact_id === '' ? '' : String(form.contact_id)}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          void syncOfferFieldsFromCustomerCard(v === '' ? '' : parseInt(v, 10), { silent: true })
+                        }}
+                      >
+                        <option value="">— Seçili değil —</option>
+                        {contacts.map((ct) => (
+                          <option key={ct.id} value={ct.id}>
+                            {ct.full_name}
+                            {ct.role ? ` (${ct.role})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
 
-            {/* Firma Bilgileri, Teklif Notları, Hazırlayan, Ön Sayfa, Ekler */}
+            {/* Müşteri çıktı bilgileri, Teklif Notları, Hazırlayan, Ön Sayfa, Ekler */}
             <Collapsible open={firmaSectionOpen} onOpenChange={setFirmaSectionOpen}>
               <CollapsibleTrigger asChild>
                 <Button type="button" variant="outline" size="sm" className="w-full justify-between">
-                  Firma Bilgileri, Teklif Notları, Hazırlayan
+                  Müşteri (çıktı), Teklif Notları, Hazırlayan
                   {firmaSectionOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </Button>
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="border rounded-lg p-4 mt-2 space-y-4 bg-muted/10">
+                  <div className="rounded-md border border-dashed bg-background/60 p-3 space-y-2">
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Aşağıdaki alanlar kayıtlı müşteriden gelir; yalnızca <strong>bu teklifin PDF çıktısı</strong> için
+                      değiştirebilirsiniz. Müşteri kartındaki kayıt güncellenmez.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="gap-2"
+                      disabled={!form.customer_id || customerSnapshotSyncing}
+                      onClick={() => void syncOfferFieldsFromCustomerCard('keep')}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${customerSnapshotSyncing ? 'animate-spin' : ''}`} />
+                      Müşteri kartından yenile
+                    </Button>
+                  </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label className="text-xs">Firma Adı</Label>
-                      <Input value={form.company_name || ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} placeholder="Firma adı" className="h-9" />
+                      <Label className="text-xs">Müşteri / firma adı (çıktı)</Label>
+                      <Input value={form.company_name || ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} placeholder="Müşteri adı" className="h-9" />
                     </div>
                     <div className="space-y-2">
-                      <Label className="text-xs">Telefon</Label>
+                      <Label className="text-xs">Telefon (çıktı)</Label>
                       <Input value={form.company_phone || ''} onChange={(e) => setForm((f) => ({ ...f, company_phone: e.target.value }))} placeholder="Telefon" className="h-9" />
                     </div>
                     <div className="space-y-2">
-                      <Label className="text-xs">E-posta</Label>
+                      <Label className="text-xs">E-posta (çıktı)</Label>
                       <Input type="email" value={form.company_email || ''} onChange={(e) => setForm((f) => ({ ...f, company_email: e.target.value }))} placeholder="E-posta" className="h-9" />
                     </div>
                     <div className="space-y-2">
-                      <Label className="text-xs">Vergi Dairesi</Label>
+                      <Label className="text-xs">Vergi dairesi (çıktı)</Label>
                       <Input value={form.tax_office || ''} onChange={(e) => setForm((f) => ({ ...f, tax_office: e.target.value }))} placeholder="Vergi dairesi" className="h-9" />
                     </div>
                     <div className="space-y-2">
-                      <Label className="text-xs">Vergi No</Label>
+                      <Label className="text-xs">Vergi no (çıktı)</Label>
                       <Input value={form.tax_no || ''} onChange={(e) => setForm((f) => ({ ...f, tax_no: e.target.value }))} placeholder="Vergi no" className="h-9" />
                     </div>
                     <div className="space-y-2 md:col-span-2">
@@ -2696,11 +2787,7 @@ export function TeklifFormPage() {
                       ...f,
                       customer_id: c.id,
                       contact_id: '',
-                      company_name: c.title || f.company_name,
-                      tax_office: c.tax_office || f.tax_office,
-                      tax_no: c.tax_no || f.tax_no,
-                      company_email: c.email || c.phone_mobile || f.company_email,
-                      company_phone: c.phone || c.phone_mobile || f.company_phone,
+                      ...offerFieldsFromCustomerRecord(customerSearchRowToOfferRecord(c), null),
                     }))
                     setCustomerInput(`${c.title}${c.code ? ` (${c.code})` : ''}`)
                     setSimilarCustomersModalOpen(false)

@@ -3696,6 +3696,7 @@ type PdfBlockApi = {
   company_address?: string;
   company_phone?: string;
   company_tax_office?: string;
+  company_tax_no?: string;
   footer_text?: string;
   image_key?: string;
   text_content?: string;
@@ -3754,7 +3755,14 @@ async function buildGoogleFontsCss(blocks: PdfBlockApi[], alwaysIncludeDefault =
   }
 }
 
-function blockCss(b: PdfBlockApi, isImage = false, showBlockBorders = false): string {
+type BlockCssFlowOpts = { isFirstFlowBlock: boolean };
+
+function blockCss(
+  b: PdfBlockApi,
+  isImage = false,
+  showBlockBorders = false,
+  flowOpts?: BlockCssFlowOpts
+): string {
   if (!b || b.visible === false) return '';
   const x = b.x ?? 20;
   const y = b.y ?? 20;
@@ -3782,9 +3790,77 @@ function blockCss(b: PdfBlockApi, isImage = false, showBlockBorders = false): st
   const fst = b.fontStyle === 'italic' ? 'italic' : 'normal';
   const td = b.textDecoration === 'underline' ? 'underline' : 'none';
   const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+  /** Teklif PDF: yükseklik alanı = bir üst bloktan sonraki dikey boşluk (margin-top), kutunun min-yüksekliği değil */
+  if (flowOpts) {
+    const marginTopMm = flowOpts.isFirstFlowBlock ? Math.max(0, y) : h;
+    const ml = x >= 0 ? `margin-left:${x}mm` : 'margin-left:auto';
+    const mr = x < 0 ? `margin-right:${Math.abs(x)}mm` : '';
+    const previewH = showBlockBorders ? `min-height:24px;overflow:auto;` : '';
+    return `position:relative;${ml};${mr};width:${w}mm;margin-top:${marginTopMm}mm;${previewH}font-size:${fs}px;font-family:${ff};font-weight:${fw};font-style:${fst};text-decoration:${td};text-align:${ta};color:${fc};box-sizing:border-box;padding:4px;${borderStyle}`;
+  }
   const sizeStyle = showBlockBorders ? `height:${h}mm;overflow:auto;` : `min-height:${h}mm;`;
   return `position:absolute;${hPos};${vPos};width:${w}mm;${sizeStyle}font-size:${fs}px;font-family:${ff};font-weight:${fw};font-style:${fst};text-decoration:${td};text-align:${ta};color:${fc};box-sizing:border-box;padding:4px;${borderStyle}`;
 }
+
+/** Satır/hücre (flex) düzeninde blok — yükseklik içeriğe göre otomatik */
+function blockCssRowCell(b: PdfBlockApi, showBlockBorders = false): string {
+  if (!b || b.visible === false) return '';
+  const borderStyle = showBlockBorders ? 'outline:1px dashed #9ca3af;' : '';
+  if (b.type === 'line') {
+    const isVert = b.lineOrientation === 'vertical';
+    const lc = b.lineColor || '#000000';
+    if (isVert) {
+      const lh = Math.max(1, b.lineLength ?? 40);
+      return `width:100%;min-height:${lh}mm;display:flex;justify-content:center;align-items:stretch;box-sizing:border-box;${borderStyle}`;
+    }
+    const lh = b.lineThickness ?? 0.5;
+    return `width:100%;height:${lh}mm;background-color:${lc};box-sizing:border-box;${borderStyle}`;
+  }
+  if (b.type === 'image' || b.type === 'qr_code') {
+    let s = 'width:100%;box-sizing:border-box;overflow:hidden;text-align:center;';
+    if (b.width != null && b.width > 0) s += `max-width:${b.width}mm;`;
+    if (b.height != null && b.height > 0) s += `max-height:${b.height}mm;`;
+    s += borderStyle;
+    return s;
+  }
+  const fs = b.fontSize ?? 11;
+  const ff = fontFamilyCss(b.fontFamily);
+  const fc = b.fontColor || '#000000';
+  const fw = b.fontWeight === 'bold' ? 'bold' : 'normal';
+  const fst = b.fontStyle === 'italic' ? 'italic' : 'normal';
+  const td = b.textDecoration === 'underline' ? 'underline' : 'none';
+  const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+  return `width:100%;box-sizing:border-box;padding:4px;font-size:${fs}px;font-family:${ff};font-weight:${fw};font-style:${fst};text-decoration:${td};text-align:${ta};color:${fc};${borderStyle}`;
+}
+
+/** Tablo / toplam HTML'inde satır bloğu ile aynı tipografi (tablolar font'u her zaman miras almayabilir) */
+function pdfBlockTypographyCss(b: PdfBlockApi): string {
+  const fs = b.fontSize ?? 11;
+  const ff = fontFamilyCss(b.fontFamily);
+  const fc = b.fontColor || '#000000';
+  const fw = b.fontWeight === 'bold' ? 'bold' : 'normal';
+  const fst = b.fontStyle === 'italic' ? 'italic' : 'normal';
+  const td = b.textDecoration === 'underline' ? 'underline' : 'none';
+  return `font-size:${fs}px;font-family:${ff};font-weight:${fw};font-style:${fst};text-decoration:${td};color:${fc};`;
+}
+
+const DEFAULT_OFFER_ITEMS_PDF_BLOCK: PdfBlockApi = {
+  id: 'default-offer-items',
+  type: 'offer_items',
+  sortOrder: 0,
+  x: 20,
+  y: 20,
+  width: 170,
+  height: 40,
+  fontSize: 11,
+  fontFamily: 'Roboto',
+  fontColor: '#000000',
+  fontWeight: 'normal',
+  fontStyle: 'normal',
+  textDecoration: 'none',
+  textAlign: 'left',
+  visible: true,
+};
 
 function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
   const blocks: PdfBlockApi[] = [];
@@ -3817,6 +3893,7 @@ function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
       company_address: v.company_address as string | undefined,
       company_phone: v.company_phone as string | undefined,
       company_tax_office: v.company_tax_office as string | undefined,
+      company_tax_no: v.company_tax_no as string | undefined,
       footer_text: v.footer_text as string | undefined,
     });
   }
@@ -3856,6 +3933,7 @@ function normalizeBlock(b: Record<string, unknown>): PdfBlockApi {
     company_address: b.company_address as string | undefined,
     company_phone: b.company_phone as string | undefined,
     company_tax_office: b.company_tax_office as string | undefined,
+    company_tax_no: b.company_tax_no as string | undefined,
     footer_text: b.footer_text as string | undefined,
     image_key: b.image_key as string | undefined,
     text_content: b.text_content as string | undefined,
@@ -3867,28 +3945,143 @@ function normalizeBlock(b: Record<string, unknown>): PdfBlockApi {
   };
 }
 
+/** Teklif veren firma bloğu — müşteri verisiyle karıştırılmaz; yalnızca layout’taki company alanları */
+function pdfIssuerCompanyBlockHtml(b: PdfBlockApi, escapeHtml: (s: string) => string): string {
+  const logoHtml = b.logo_url
+    ? `<img src="${escapeHtml(b.logo_url)}" alt="Logo" style="max-width:${b.logo_width ?? 60}px;max-height:${b.logo_height ?? 40}px;object-fit:contain;display:block;margin-bottom:4px;" />`
+    : '';
+  const lines: string[] = [];
+  const name = (b.company_name || '').trim();
+  if (name) lines.push(`<strong>${escapeHtml(name)}</strong>`);
+  const addr = (b.company_address || '').trim();
+  if (addr) lines.push(escapeHtml(addr));
+  const phone = (b.company_phone || '').trim();
+  if (phone) lines.push(escapeHtml(phone));
+  const vd = (b.company_tax_office || '').trim();
+  if (vd) lines.push(`Vergi Dairesi: ${escapeHtml(vd)}`);
+  const vn = (b.company_tax_no || '').trim();
+  if (vn) lines.push(`Vergi No: ${escapeHtml(vn)}`);
+  const inner = lines.join('<br/>');
+  return `${logoHtml}${inner ? `<div>${inner}</div>` : ''}`;
+}
+
+type PdfLayoutCellApi = {
+  id: string;
+  sortOrder: number;
+  widthPercent: number;
+  block: PdfBlockApi;
+};
+
+type PdfLayoutRowApi = {
+  id: string;
+  sortOrder: number;
+  marginTopMm: number;
+  cells: PdfLayoutCellApi[];
+};
+
 type LayoutConfig = {
-  blocks: PdfBlockApi[];
+  rows: PdfLayoutRowApi[];
   pageWidth: number;
   pageHeight: number;
 };
 
+function normalizeRowCellWidthsApi(cells: PdfLayoutCellApi[]): PdfLayoutCellApi[] {
+  if (cells.length === 0) return cells;
+  const sorted = [...cells].sort((a, b) => a.sortOrder - b.sortOrder);
+  const sum = sorted.reduce((s, c) => s + Math.max(0, c.widthPercent || 0), 0);
+  if (sum <= 0) {
+    const eq = 100 / sorted.length;
+    return sorted.map((c) => ({ ...c, widthPercent: eq }));
+  }
+  if (Math.abs(sum - 100) > 0.001) {
+    return sorted.map((c) => ({ ...c, widthPercent: (Math.max(0, c.widthPercent || 0) / sum) * 100 }));
+  }
+  return sorted;
+}
+
+function numOr(c: Record<string, unknown>, key: string, d: number): number {
+  const v = Number(c[key]);
+  return Number.isFinite(v) ? v : d;
+}
+
+function normalizeLayoutCellApi(c: Record<string, unknown>): PdfLayoutCellApi {
+  const br = (c.block as Record<string, unknown>) || { type: 'text' };
+  return {
+    id: String(c.id || `cell-${Date.now()}`),
+    sortOrder: numOr(c, 'sortOrder', 0),
+    widthPercent: Math.max(0, Number(c.widthPercent) || 0),
+    block: normalizeBlock(br),
+  };
+}
+
+function normalizeLayoutRowApi(r: Record<string, unknown>): PdfLayoutRowApi {
+  const cellsRaw = (r.cells as unknown[]) || [];
+  const cells = cellsRaw.filter(Boolean).map((x) => normalizeLayoutCellApi(x as Record<string, unknown>));
+  return {
+    id: String(r.id || `row-${Date.now()}`),
+    sortOrder: numOr(r, 'sortOrder', 0),
+    marginTopMm: Math.max(0, numOr(r, 'marginTopMm', 0)),
+    cells: normalizeRowCellWidthsApi(cells),
+  };
+}
+
+function migrateFlatBlocksToRowsApi(blocks: PdfBlockApi[]): PdfLayoutRowApi[] {
+  const sorted = [...blocks].sort((a, b) => a.sortOrder - b.sortOrder);
+  return sorted.map((b, i) => ({
+    id: `row-${b.id}`,
+    sortOrder: i,
+    marginTopMm: i === 0 ? Math.max(0, b.y ?? 0) : Math.max(0, b.height ?? 8),
+    cells: [
+      {
+        id: `cell-${b.id}`,
+        sortOrder: 0,
+        widthPercent: 100,
+        block: b,
+      },
+    ],
+  }));
+}
+
 function parseLayoutConfig(raw: string | undefined): LayoutConfig {
   const defaultW = 2100;
   const defaultH = 2970;
-  if (!raw?.trim()) return { blocks: [], pageWidth: defaultW, pageHeight: defaultH };
+  if (!raw?.trim()) return { rows: [], pageWidth: defaultW, pageHeight: defaultH };
   try {
-    const parsed = JSON.parse(raw) as { blocks?: unknown[]; pageWidth?: unknown; pageHeight?: unknown } | Record<string, unknown>;
-    const pageWidth = Number((parsed as { pageWidth?: unknown }).pageWidth) || defaultW;
-    const pageHeight = Number((parsed as { pageHeight?: unknown }).pageHeight) || defaultH;
-    if (parsed && Array.isArray((parsed as { blocks?: unknown[] }).blocks)) {
-      const blocks = ((parsed as { blocks: unknown[] }).blocks || []).filter(Boolean) as Record<string, unknown>[];
-      return { blocks: blocks.map(normalizeBlock).sort((a, b) => a.sortOrder - b.sortOrder), pageWidth, pageHeight };
+    const parsed = JSON.parse(raw) as { rows?: unknown[]; blocks?: unknown[]; pageWidth?: unknown; pageHeight?: unknown } | Record<string, unknown>;
+    const pageWidth = Number(parsed.pageWidth) || defaultW;
+    const pageHeight = Number(parsed.pageHeight) || defaultH;
+    if (parsed && Array.isArray(parsed.rows)) {
+      const rows = (parsed.rows as unknown[])
+        .filter(Boolean)
+        .map((r) => normalizeLayoutRowApi(r as Record<string, unknown>))
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((row, ri) => ({
+          ...row,
+          sortOrder: ri,
+          cells: normalizeRowCellWidthsApi(row.cells.map((c, ci) => ({ ...c, sortOrder: ci }))),
+        }));
+      return { rows, pageWidth, pageHeight };
     }
-    return { blocks: migrateLegacyBlocks((parsed || {}) as Record<string, unknown>), pageWidth, pageHeight };
+    if (parsed && Array.isArray(parsed.blocks)) {
+      const blocks = ((parsed.blocks as unknown[]) || []).filter(Boolean).map((b) => normalizeBlock(b as Record<string, unknown>));
+      return { rows: migrateFlatBlocksToRowsApi(blocks.sort((a, b) => a.sortOrder - b.sortOrder)), pageWidth, pageHeight };
+    }
+    return { rows: migrateFlatBlocksToRowsApi(migrateLegacyBlocks((parsed || {}) as Record<string, unknown>)), pageWidth, pageHeight };
   } catch {
-    return { blocks: [], pageWidth: defaultW, pageHeight: defaultH };
+    return { rows: [], pageWidth: defaultW, pageHeight: defaultH };
   }
+}
+
+function flattenBlocksFromRowsApi(rows: PdfLayoutRowApi[]): PdfBlockApi[] {
+  return rows
+    .slice()
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .flatMap((r) =>
+      r.cells
+        .slice()
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((c) => c.block)
+    );
 }
 
 /** Örnek teklif PDF - layout ayarlarını test etmek için (gerçek teklif verisi yok) */
@@ -3899,92 +4092,115 @@ app.get('/api/offers/sample/pdf', async (c) => {
       `SELECT value FROM app_settings WHERE category = 'teklif_cikti_ayarlari' AND "key" = 'layout_config' AND is_deleted = 0 LIMIT 1`
     ).all();
     const raw = (layoutRes as { value?: string }[])?.[0]?.value;
-    const { blocks, pageWidth, pageHeight } = parseLayoutConfig(raw);
+    const { rows, pageWidth, pageHeight } = parseLayoutConfig(raw);
     const pageWidthMm = pageWidth / 10;
     const pageHeightMm = pageHeight / 10;
     function escapeHtml(s: string): string {
       return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
-    const sampleTable = `<table><thead><tr><th>Ürün / Açıklama</th><th class="text-center">Miktar</th><th class="text-right">Birim Fiyat</th><th class="text-right">Tutar</th></tr></thead><tbody>
-<tr><td>Örnek Ürün 1</td><td class="text-center">2</td><td class="text-right">1.500,00 ₺</td><td class="text-right">3.000,00 ₺</td></tr>
-<tr><td>Örnek Ürün 2</td><td class="text-center">1</td><td class="text-right">2.000,00 ₺</td><td class="text-right">2.000,00 ₺</td></tr>
+    const sampleTable = `<table class="pdf-items-sample"><thead><tr><th>Ürün / Açıklama</th><th>Miktar</th><th>Birim Fiyat</th><th>Tutar</th></tr></thead><tbody>
+<tr><td>Örnek Ürün 1</td><td class="text-center">2 Adet</td><td class="text-right">1.500,00 ₺</td><td class="text-right">3.000,00 ₺</td></tr>
+<tr><td>Örnek Ürün 2</td><td class="text-center">1 Adet</td><td class="text-right">2.000,00 ₺</td><td class="text-right">2.000,00 ₺</td></tr>
 </tbody></table><p class="text-right" style="margin-top:1rem"><strong>Genel Toplam:</strong> 5.000,00 ₺</p>`;
-    let blocksHtml = '';
-    for (const b of blocks) {
-      if (b.visible === false) continue;
-      const isImageBlock = b.type === 'image';
-      const isQrBlock = b.type === 'qr_code';
-      const isLineBlock = b.type === 'line';
-      const style = blockCss(b, isImageBlock || isQrBlock, true);
-      let content = '';
+    async function sampleCellContent(b: PdfBlockApi): Promise<string> {
       switch (b.type) {
-        case 'line':
-          content = '';
-          break;
+        case 'line': {
+          if (b.lineOrientation === 'vertical') {
+            const lw = b.lineThickness ?? 0.5;
+            const lh = Math.max(1, b.lineLength ?? 40);
+            const lc = b.lineColor || '#000000';
+            return `<div style="width:${lw}mm;min-height:${lh}mm;background-color:${lc};"></div>`;
+          }
+          return '';
+        }
         case 'text':
-          content = b.text_content ? escapeHtml(b.text_content).replace(/\n/g, '<br/>') : '';
-          break;
+          return b.text_content ? escapeHtml(b.text_content).replace(/\n/g, '<br/>') : '';
         case 'qr_code': {
           const qrData = b.qr_content || '';
           const qrUrl = qrData
             ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`
             : '';
-          if (qrUrl) {
-            content = `<img src="${escapeHtml(qrUrl)}" alt="QR" style="width:100%;height:100%;object-fit:contain;" />`;
-          }
-          break;
+          return qrUrl ? `<img src="${escapeHtml(qrUrl)}" alt="QR" style="max-width:100%;height:auto;object-fit:contain;" />` : '';
         }
         case 'image': {
           const imgKey = b.image_key || '';
           const imgSrc = imgKey ? await storagePathToDataUrl(c.env.STORAGE, imgKey) : null;
-          if (imgSrc) {
-            content = `<img src="${imgSrc}" alt="" style="width:100%;height:100%;object-fit:contain;" />`;
-          }
-          break;
+          return imgSrc ? `<img src="${imgSrc}" alt="" style="max-width:100%;height:auto;object-fit:contain;" />` : '';
         }
         case 'company': {
-          const logoHtml = b.logo_url
-            ? `<img src="${escapeHtml(b.logo_url)}" alt="Logo" style="max-width:${b.logo_width ?? 60}px;max-height:${b.logo_height ?? 40}px;object-fit:contain;display:block;margin-bottom:4px;" />`
-            : '';
-          content = `${logoHtml}<div><strong>${escapeHtml(b.company_name || 'Örnek Firma A.Ş.')}</strong><br/>${escapeHtml(b.company_address || 'Adres')}<br/>${escapeHtml(b.company_phone || 'Tel')}</div>`;
-          break;
+          const sampleB: PdfBlockApi = {
+            ...b,
+            company_name: (b.company_name || '').trim() || 'Örnek Firma A.Ş.',
+            company_address: (b.company_address || '').trim() || 'Örnek adres',
+            company_phone: (b.company_phone || '').trim() || '0212 000 00 00',
+            company_tax_office: (b.company_tax_office || '').trim() || 'Örnek Vergi Dairesi',
+            company_tax_no: (b.company_tax_no || '').trim() || '1234567890',
+          };
+          return pdfIssuerCompanyBlockHtml(sampleB, escapeHtml);
         }
         case 'customer':
-          content = '<strong>Müşteri:</strong> Örnek Müşteri Ltd.<br/><strong>Yetkili:</strong> Ahmet Yılmaz<br/>Vergi No: 1234567890';
-          break;
+          return '<strong>Müşteri:</strong> Örnek Müşteri Ltd.<br/><strong>Yetkili:</strong> Ahmet Yılmaz<br/>Vergi No: 1234567890';
         case 'offer_header': {
           const d = new Date();
           const dd = String(d.getDate()).padStart(2, '0');
           const mm = String(d.getMonth() + 1).padStart(2, '0');
           const yyyy = d.getFullYear();
-          content = `Teklif No: xxxxxx<br/>Tarih: ${dd}/${mm}/${yyyy}`;
-          break;
+          const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+          return `<div style="text-align:${ta}">Teklif No: xxxxxx<br/>Tarih: ${dd}/${mm}/${yyyy}</div>`;
         }
         case 'offer_items':
-          content = sampleTable;
-          break;
+          return sampleTable;
         case 'offer_notes':
-          content = '<p><strong>Not:</strong> Örnek teklif notu</p>';
-          break;
+          return '<p><strong>Not:</strong> Örnek teklif notu</p>';
         case 'footer':
-          content = b.footer_text ? b.footer_text.replace(/\n/g, '<br/>') : '<strong>Örnek Firma A.Ş.</strong><br/>Resmi Ünvan, Adres, Telefon';
-          break;
+          return b.footer_text
+            ? b.footer_text.replace(/\n/g, '<br/>')
+            : '<strong>Örnek Firma A.Ş.</strong><br/>Resmi Ünvan, Adres, Telefon';
         default:
-          content = '';
+          return '';
       }
-      if (content || isImageBlock || isQrBlock || isLineBlock) blocksHtml += `<div class="block block-preview" style="${style}">${content}</div>`;
     }
-    if (blocks.length === 0) {
+    let blocksHtml = '';
+    const sortedRows = [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
+    for (const row of sortedRows) {
+      const cells = [...row.cells].sort((a, b) => a.sortOrder - b.sortOrder);
+      const wp = cells.map((c) => c.widthPercent);
+      const sum = wp.reduce((s, x) => s + x, 0) || 1;
+      let rowParts = '';
+      let rowAny = false;
+      for (const cell of cells) {
+        const b = cell.block;
+        if (b.visible === false) continue;
+        const pct = (cell.widthPercent / sum) * 100;
+        const isImageBlock = b.type === 'image';
+        const isQrBlock = b.type === 'qr_code';
+        const isLineBlock = b.type === 'line';
+        const content = await sampleCellContent(b);
+        if (!content && !isImageBlock && !isQrBlock && !isLineBlock) continue;
+        rowAny = true;
+        const style = blockCssRowCell(b, true);
+        rowParts += `<div style="flex:0 0 ${pct}%;max-width:${pct}%;min-width:0;box-sizing:border-box;"><div class="block block-preview" style="${style}">${content}</div></div>`;
+      }
+      if (rowAny) {
+        blocksHtml += `<div class="pdf-layout-row" style="display:flex;width:100%;box-sizing:border-box;margin-top:${row.marginTopMm}mm;gap:2mm;align-items:flex-start;">${rowParts}</div>`;
+      }
+    }
+    if (rows.length === 0 || !blocksHtml.trim()) {
       blocksHtml = `<div style="margin:20mm;font-family:inherit">${sampleTable}</div>`;
     }
-    const googleFontsStyle = await buildGoogleFontsCss(blocks, true);
+    const googleFontsStyle = await buildGoogleFontsCss(flattenBlocksFromRowsApi(rows), true);
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Örnek Teklif</title>
 ${googleFontsStyle}
 <style>body{font-family:"Roboto","Helvetica Neue",Arial,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:${pageWidthMm}mm;min-height:${pageHeightMm}mm;box-sizing:border-box}
 .block{box-sizing:border-box}.block,.block *{font-family:inherit}
 .block-preview{outline:1px dashed #9ca3af;outline-offset:0}
 table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}
-.text-right{text-align:right}.text-center{text-align:center}</style></head><body>
+.text-right{text-align:right}.text-center{text-align:center}
+.pdf-items-sample thead th{text-align:center}
+.pdf-items-sample tbody td:nth-child(1){text-align:left}
+.pdf-items-sample tbody td:nth-child(2){text-align:center}
+.pdf-items-sample tbody td:nth-child(3),.pdf-items-sample tbody td:nth-child(4){text-align:right}
+.pdf-items-sample + p{font:inherit}</style></head><body>
 ${blocksHtml}
 </body></html>`;
     return new Response(html, {
@@ -4096,22 +4312,23 @@ app.get('/api/offers/:id/pdf', async (c) => {
     const grandTotal = araToplam + totalVat;
 
     const grossR = round2(grossTotalOffer);
-    const lineDiscR = round2(lineDiscountTotalOffer);
     const subtotalR = round2(subtotal);
     const araToplamR = round2(araToplam);
     const totalVatR = round2(totalVat);
     const grandTotalR = round2(grandTotal);
-    const offerDiscountAmountR = round2(offerDiscountAmount);
-    const lineDiscPctOfGross =
-      grossTotalOffer > 1e-9 ? (100 * lineDiscountTotalOffer) / grossTotalOffer : 0;
+    const totalDiscountAmountR = round2(lineDiscountTotalOffer + offerDiscountAmount);
+    const discountEquivPctGross =
+      grossTotalOffer > 1e-9 ? (100 * (lineDiscountTotalOffer + offerDiscountAmount)) / grossTotalOffer : 0;
 
     const sym = (offer.currency_symbol as string) || (offer.currency_code as string) || '₺';
+    const offerCodeUpper = String(offer.currency_code || 'TRY').toUpperCase();
+    const isTryOffer = !offerCurrencyId || offerCodeUpper === 'TRY' || offerCodeUpper === 'TL' || offerCodeUpper === '';
+    const offerExRate =
+      offer.exchange_rate != null && Number(offer.exchange_rate) > 0 ? Number(offer.exchange_rate) : 1;
     const fmt = (n: number) => (n ?? 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const fmtPct = (n: number) =>
       round2(n).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
-    const hasLineDiscount = lineDiscountTotalOffer > 1e-9;
-    const hasOfferDiscount = discountPct > 0;
-    const hasAnyDiscount = hasLineDiscount || hasOfferDiscount;
+    const hasAnyDiscount = lineDiscountTotalOffer > 1e-9 || discountPct > 0;
 
     let coverHtml = '';
     if (offer.include_cover_page) {
@@ -4213,39 +4430,54 @@ app.get('/api/offers/:id/pdf', async (c) => {
       `SELECT value FROM app_settings WHERE category = 'teklif_cikti_ayarlari' AND "key" = 'layout_config' AND is_deleted = 0 LIMIT 1`
     ).all();
     const raw = (layoutRes as { value?: string }[])?.[0]?.value;
-    const { blocks, pageWidth, pageHeight } = parseLayoutConfig(raw);
+    const { rows, pageWidth, pageHeight } = parseLayoutConfig(raw);
     const pageWidthMm = pageWidth / 10;
     const pageHeightMm = pageHeight / 10;
-    const pdfTdL = 'style="padding:4px 8px;border:1px solid #333;text-align:left"';
-    const pdfTdR = 'style="padding:4px 8px;border:1px solid #333;text-align:right;white-space:nowrap"';
+    const pdfTotBaseL = 'padding:4px 8px;border:1px solid #333;text-align:left';
+    const pdfTotBaseR = 'padding:4px 8px;border:1px solid #333;text-align:right;white-space:nowrap';
+    const pdfTotBold = 'font-weight:bold';
+    const pdfTotDiscount = 'color:#15803d';
+    const pdfTotVat = 'color:#ea580c';
     const pdfTotalsRows: string[] = [];
     if (!hasAnyDiscount) {
-      pdfTotalsRows.push(`<tr><td ${pdfTdL}>Ara toplam</td><td ${pdfTdR}>${fmt(subtotalR)} ${sym}</td></tr>`);
-      pdfTotalsRows.push(`<tr><td ${pdfTdL}>KDV</td><td ${pdfTdR}>${fmt(totalVatR)} ${sym}</td></tr>`);
       pdfTotalsRows.push(
-        `<tr><td ${pdfTdL}><strong>Genel toplam</strong></td><td ${pdfTdR}><strong>${fmt(grandTotalR)} ${sym}</strong></td></tr>`
+        `<tr><td style="${pdfTotBaseL};${pdfTotBold}">Ara Toplam</td><td style="${pdfTotBaseR};${pdfTotBold}">${fmt(subtotalR)} ${sym}</td></tr>`
+      );
+      pdfTotalsRows.push(
+        `<tr><td style="${pdfTotBaseL};${pdfTotVat}">KDV</td><td style="${pdfTotBaseR};${pdfTotVat}">${fmt(totalVatR)} ${sym}</td></tr>`
+      );
+      pdfTotalsRows.push(
+        `<tr><td style="${pdfTotBaseL};${pdfTotBold}">Genel Toplam</td><td style="${pdfTotBaseR};${pdfTotBold}">${fmt(grandTotalR)} ${sym}</td></tr>`
       );
     } else {
-      pdfTotalsRows.push(`<tr><td ${pdfTdL}>Toplam (brüt)</td><td ${pdfTdR}>${fmt(grossR)} ${sym}</td></tr>`);
-      if (hasLineDiscount) {
-        pdfTotalsRows.push(
-          `<tr><td ${pdfTdL}>Satır iskontosu (${fmtPct(lineDiscPctOfGross)}%)</td><td ${pdfTdR}>−${fmt(lineDiscR)} ${sym}</td></tr>`
-        );
-      }
-      if (hasOfferDiscount) {
-        pdfTotalsRows.push(
-          `<tr><td ${pdfTdL}>Teklif iskontosu (${fmtPct(discountPct)}%)</td><td ${pdfTdR}>−${fmt(offerDiscountAmountR)} ${sym}</td></tr>`
-        );
-      }
-      pdfTotalsRows.push(`<tr><td ${pdfTdL}>Ara toplam</td><td ${pdfTdR}>${fmt(araToplamR)} ${sym}</td></tr>`);
-      pdfTotalsRows.push(`<tr><td ${pdfTdL}>KDV</td><td ${pdfTdR}>${fmt(totalVatR)} ${sym}</td></tr>`);
       pdfTotalsRows.push(
-        `<tr><td ${pdfTdL}><strong>Genel toplam</strong></td><td ${pdfTdR}><strong>${fmt(grandTotalR)} ${sym}</strong></td></tr>`
+        `<tr><td style="${pdfTotBaseL};${pdfTotBold}">Toplam</td><td style="${pdfTotBaseR};${pdfTotBold}">${fmt(grossR)} ${sym}</td></tr>`
+      );
+      pdfTotalsRows.push(
+        `<tr><td style="${pdfTotBaseL};${pdfTotDiscount}">İskonto (${fmtPct(discountEquivPctGross)}%)</td><td style="${pdfTotBaseR};${pdfTotDiscount}">−${fmt(totalDiscountAmountR)} ${sym}</td></tr>`
+      );
+      pdfTotalsRows.push(
+        `<tr><td style="${pdfTotBaseL};${pdfTotBold}">Ara Toplam</td><td style="${pdfTotBaseR};${pdfTotBold}">${fmt(araToplamR)} ${sym}</td></tr>`
+      );
+      pdfTotalsRows.push(
+        `<tr><td style="${pdfTotBaseL};${pdfTotVat}">KDV</td><td style="${pdfTotBaseR};${pdfTotVat}">${fmt(totalVatR)} ${sym}</td></tr>`
+      );
+      pdfTotalsRows.push(
+        `<tr><td style="${pdfTotBaseL};${pdfTotBold}">Genel Toplam</td><td style="${pdfTotBaseR};${pdfTotBold}">${fmt(grandTotalR)} ${sym}</td></tr>`
       );
     }
-    const pdfTotalsTable = `<table style="margin-top:0.75rem;margin-left:auto;border-collapse:collapse;font-size:11px"><tbody>${pdfTotalsRows.join('')}</tbody></table>`;
-    const pdfCurrencyNote = `<p style="margin-top:0.5rem;font-size:10px;color:#555;text-align:right">Satır birim fiyat ve tutarlar satır para birimindedir. Özet tutarlar teklif para birimine (${escapeHtml(sym)}) çevrilmiştir.</p>`;
-    const itemsTableHtml = `<table><thead><tr><th>Ürün / Açıklama</th><th class="text-center">Miktar</th><th class="text-right">Birim Fiyat</th><th class="text-right">Tutar</th></tr></thead><tbody>
+    const grandTotalTlApprox = round2(isTryOffer ? grandTotal : grandTotal * offerExRate);
+    /** Üst tabloda Birim Fiyat + Tutar = %22 + %22 — toplamlar aynı genişlikte, sağa hizalı */
+    const pdfTotalsColgroup = `<colgroup><col style="width:55%" /><col style="width:45%" /></colgroup>`;
+    const pdfItemsColgroup = `<colgroup><col style="width:40%" /><col style="width:16%" /><col style="width:22%" /><col style="width:22%" /></colgroup>`;
+
+    const buildItemsTableHtml = (offerItemsBlock: PdfBlockApi) => {
+      const typo = pdfBlockTypographyCss(offerItemsBlock);
+      const pdfTotalsTable = `<div style="width:100%;display:flex;justify-content:flex-end;box-sizing:border-box"><table class="pdf-totals-table" style="width:44%;table-layout:fixed;border-collapse:collapse;margin-top:0.75rem;${typo}">${pdfTotalsColgroup}<tbody>${pdfTotalsRows.join('')}</tbody></table></div>`;
+      const pdfTlLine = `<p style="margin-top:0.5rem;${typo}color:#555;text-align:right">Yaklaşık TL karşılığı: <span style="color:#111">${isTryOffer ? `${fmt(grandTotalR)} ₺` : `≈ ${fmt(grandTotalTlApprox)} ₺`}</span></p>`;
+      const pdfCurrencyNote = `<p style="margin-top:0.35rem;${typo}color:#555;text-align:right">Satır birim fiyat ve tutarlar satır para birimindedir. Özet tutarlar teklif para birimine (${escapeHtml(sym)}) çevrilmiştir.</p>`;
+      return `<div class="pdf-offer-tables" style="width:100%;box-sizing:border-box;${typo}">
+<table class="pdf-items-table" style="table-layout:fixed;width:100%;border-collapse:collapse;${typo}">${pdfItemsColgroup}<thead><tr><th>Ürün / Açıklama</th><th>Miktar</th><th>Birim Fiyat</th><th>Tutar</th></tr></thead><tbody>
 ${offerItems.map((it) => {
   const name = it.product_name || it.product_sku || it.description || '—';
   const amt = Number(it.amount) || 0;
@@ -4253,90 +4485,109 @@ ${offerItems.map((it) => {
   const disc = Number(it.line_discount) || 0;
   const lineTotal = amt * up - disc;
   const lineSym = (it.line_currency_symbol as string) || (it.line_currency_code as string) || '₺';
-  return `<tr><td>${escapeHtml(name)}</td><td class="text-center">${amt}</td><td class="text-right">${fmt(up)} ${escapeHtml(lineSym)}</td><td class="text-right">${fmt(lineTotal)} ${escapeHtml(lineSym)}</td></tr>`;
+  const unitLabel = (it.unit_name && String(it.unit_name).trim()) || 'Adet';
+  const qtyCell = `${amt.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 4 })} ${escapeHtml(unitLabel)}`;
+  return `<tr><td>${escapeHtml(name)}</td><td class="text-center">${qtyCell}</td><td class="text-right">${fmt(up)} ${escapeHtml(lineSym)}</td><td class="text-right">${fmt(lineTotal)} ${escapeHtml(lineSym)}</td></tr>`;
 }).join('')}
 </tbody></table>
 ${pdfTotalsTable}
+${pdfTlLine}
 ${pdfCurrencyNote}
-${offer.project_name ? `<p style="margin-top:1rem"><strong>Proje:</strong> ${escapeHtml(String(offer.project_name))}</p>` : ''}`;
-    let blocksHtml = '';
-    for (const b of blocks) {
-      if (b.visible === false) continue;
-      const isImageBlock = b.type === 'image';
-      const isQrBlock = b.type === 'qr_code';
-      const isLineBlock = b.type === 'line';
-      const style = blockCss(b, isImageBlock || isQrBlock);
-      let content = '';
+${offer.project_name ? `<p style="margin-top:1rem;${typo}">Proje: ${escapeHtml(String(offer.project_name))}</p>` : ''}</div>`;
+    };
+    async function offerCellContent(b: PdfBlockApi): Promise<string> {
       switch (b.type) {
-        case 'line':
-          content = '';
-          break;
+        case 'line': {
+          if (b.lineOrientation === 'vertical') {
+            const lw = b.lineThickness ?? 0.5;
+            const lh = Math.max(1, b.lineLength ?? 40);
+            const lc = b.lineColor || '#000000';
+            return `<div style="width:${lw}mm;min-height:${lh}mm;background-color:${lc};"></div>`;
+          }
+          return '';
+        }
         case 'text':
-          content = b.text_content ? escapeHtml(b.text_content).replace(/\n/g, '<br/>') : '';
-          break;
+          return b.text_content ? escapeHtml(b.text_content).replace(/\n/g, '<br/>') : '';
         case 'qr_code': {
           const qrData = b.qr_content || '';
           const qrUrl = qrData
             ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`
             : '';
-          if (qrUrl) {
-            content = `<img src="${escapeHtml(qrUrl)}" alt="QR" style="width:100%;height:100%;object-fit:contain;" />`;
-          }
-          break;
+          return qrUrl ? `<img src="${escapeHtml(qrUrl)}" alt="QR" style="max-width:100%;height:auto;object-fit:contain;" />` : '';
         }
         case 'image': {
           const imgKey = b.image_key || '';
           const imgSrc = imgKey ? await storagePathToDataUrl(c.env.STORAGE, imgKey) : null;
-          if (imgSrc) {
-            content = `<img src="${imgSrc}" alt="" style="width:100%;height:100%;object-fit:contain;" />`;
-          }
-          break;
+          return imgSrc ? `<img src="${imgSrc}" alt="" style="max-width:100%;height:auto;object-fit:contain;" />` : '';
         }
-        case 'company': {
-          const logoHtml = b.logo_url
-            ? `<img src="${escapeHtml(b.logo_url)}" alt="Logo" style="max-width:${b.logo_width ?? 60}px;max-height:${b.logo_height ?? 40}px;object-fit:contain;display:block;margin-bottom:4px;" />`
-            : '';
-          content = `${logoHtml}<div><strong>${escapeHtml(b.company_name || 'Firma')}</strong><br/>${escapeHtml(b.company_address || '')}${b.company_address ? '<br/>' : ''}${escapeHtml(b.company_phone || '')}${b.company_phone ? '<br/>' : ''}${escapeHtml(b.company_tax_office || '')}</div>`;
-          break;
-        }
+        case 'company':
+          return pdfIssuerCompanyBlockHtml(b, escapeHtml);
         case 'customer':
-          content = `<strong>Müşteri:</strong> ${escapeHtml(String(offer.company_name || offer.customer_title || ''))}<br/>${offer.authorized_name ? `<strong>Yetkili:</strong> ${escapeHtml(String(offer.authorized_name))}<br/>` : ''}${offer.tax_office ? `Vergi D.: ${escapeHtml(String(offer.tax_office))} ` : ''}${offer.tax_no ? escapeHtml(String(offer.tax_no)) : ''}`;
-          break;
+          return `<strong>Müşteri:</strong> ${escapeHtml(String(offer.company_name || offer.customer_title || ''))}<br/>${offer.authorized_name ? `<strong>Yetkili:</strong> ${escapeHtml(String(offer.authorized_name))}<br/>` : ''}${offer.tax_office ? `Vergi D.: ${escapeHtml(String(offer.tax_office))} ` : ''}${offer.tax_no ? escapeHtml(String(offer.tax_no)) : ''}`;
         case 'offer_header': {
-          const raw = String((offer.date as string) || '').slice(0, 10);
+          const rawD = String((offer.date as string) || '').slice(0, 10);
           let dateStr = '';
-          if (raw && raw.length >= 10) {
-            const [y, m, d] = raw.split('-');
+          if (rawD && rawD.length >= 10) {
+            const [y, m, d] = rawD.split('-');
             dateStr = `${d}/${m}/${y}`;
           }
-          content = `Teklif No: ${escapeHtml(String(offer.order_no || ''))}<br/>Tarih: ${escapeHtml(dateStr || '')}`;
-          break;
+          const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+          return `<div style="text-align:${ta}">Teklif No: ${escapeHtml(String(offer.order_no || ''))}<br/>Tarih: ${escapeHtml(dateStr || '')}</div>`;
         }
         case 'offer_items':
-          content = itemsTableHtml;
-          break;
+          return buildItemsTableHtml(b);
         case 'offer_notes':
-          content = (notesHtml ? notesHtml : '') + (dahilHaricHtml ? dahilHaricHtml : '');
-          break;
+          return (notesHtml ? notesHtml : '') + (dahilHaricHtml ? dahilHaricHtml : '');
         case 'footer':
-          content = b.footer_text
+          return b.footer_text
             ? b.footer_text.replace(/\n/g, '<br/>')
-            : (offer.prepared_by_name ? `Hazırlayan: ${escapeHtml(String(offer.prepared_by_name))}${offer.prepared_by_title ? ` (${escapeHtml(String(offer.prepared_by_title))})` : ''}` : '');
-          break;
+            : (offer.prepared_by_name
+                ? `Hazırlayan: ${escapeHtml(String(offer.prepared_by_name))}${offer.prepared_by_title ? ` (${escapeHtml(String(offer.prepared_by_title))})` : ''}`
+                : '');
         default:
-          content = '';
+          return '';
       }
-      if (content || isImageBlock || isQrBlock || isLineBlock) blocksHtml += `<div class="block" style="${style}">${content}</div>`;
     }
-    if (blocks.length === 0) {
-      blocksHtml = `<div style="margin:20mm;font-family:inherit">${notesHtml ? `<div class="notes" style="margin-bottom:1rem">${notesHtml}</div>` : ''}${dahilHaricHtml}${itemsTableHtml}</div>`;
+    let blocksHtml = '';
+    const sortedOfferRows = [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
+    for (const row of sortedOfferRows) {
+      const cells = [...row.cells].sort((a, b) => a.sortOrder - b.sortOrder);
+      const wp = cells.map((c) => c.widthPercent);
+      const sum = wp.reduce((s, x) => s + x, 0) || 1;
+      let rowParts = '';
+      let rowAny = false;
+      for (const cell of cells) {
+        const b = cell.block;
+        if (b.visible === false) continue;
+        const pct = (cell.widthPercent / sum) * 100;
+        const isImageBlock = b.type === 'image';
+        const isQrBlock = b.type === 'qr_code';
+        const isLineBlock = b.type === 'line';
+        const content = await offerCellContent(b);
+        if (!content && !isImageBlock && !isQrBlock && !isLineBlock) continue;
+        rowAny = true;
+        const style = blockCssRowCell(b, false);
+        rowParts += `<div style="flex:0 0 ${pct}%;max-width:${pct}%;min-width:0;box-sizing:border-box;"><div class="block" style="${style}">${content}</div></div>`;
+      }
+      if (rowAny) {
+        blocksHtml += `<div class="pdf-layout-row" style="display:flex;width:100%;box-sizing:border-box;margin-top:${row.marginTopMm}mm;gap:2mm;align-items:flex-start;">${rowParts}</div>`;
+      }
     }
-    const googleFontsStyle = await buildGoogleFontsCss(blocks, true);
+    if (rows.length === 0 || !blocksHtml.trim()) {
+      blocksHtml = `<div style="margin:20mm;font-family:inherit">${notesHtml ? `<div class="notes" style="margin-bottom:1rem">${notesHtml}</div>` : ''}${dahilHaricHtml}${buildItemsTableHtml(DEFAULT_OFFER_ITEMS_PDF_BLOCK)}</div>`;
+    }
+    const googleFontsStyle = await buildGoogleFontsCss(flattenBlocksFromRowsApi(rows), true);
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Teklif ${escapeHtml(String(offer.order_no || ''))}</title>
 ${googleFontsStyle}
 <style>body{font-family:"Roboto","Helvetica Neue",Arial,sans-serif;margin:0;padding:0;font-size:12px;position:relative;width:${pageWidthMm}mm;min-height:${pageHeightMm}mm;box-sizing:border-box}
 .block{box-sizing:border-box}.block,.block *{font-family:inherit}
-table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}.text-right{text-align:right}.text-center{text-align:center}</style></head><body>
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px;text-align:left}th{background:#eee}.text-right{text-align:right}.text-center{text-align:center}
+.pdf-offer-tables .pdf-items-table thead th{text-align:center}
+.pdf-offer-tables .pdf-items-table tbody td:nth-child(1){text-align:left}
+.pdf-offer-tables .pdf-items-table tbody td:nth-child(2){text-align:center}
+.pdf-offer-tables .pdf-items-table tbody td:nth-child(3),.pdf-offer-tables .pdf-items-table tbody td:nth-child(4){text-align:right}
+.pdf-offer-tables .pdf-totals-table,.pdf-offer-tables .pdf-totals-table td,.pdf-offer-tables .pdf-totals-table th{font:inherit}
+.pdf-offer-tables .pdf-items-table th,.pdf-offer-tables .pdf-items-table td{overflow-wrap:break-word;word-break:break-word}</style></head><body>
 ${coverHtml}
 ${blocksHtml}
 ${attachmentsHtml}

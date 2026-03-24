@@ -15,15 +15,10 @@ export type PdfBlockType =
   | 'qr_code'
   | 'line'
 
-/** Tek bir PDF blok tanımı */
+/** Tek bir PDF içerik bloğu (konum yok; genişlik satır hücresinde %) */
 export type PdfBlock = {
   id: string
   type: PdfBlockType
-  sortOrder: number
-  x: number
-  y: number
-  width: number
-  height: number
   fontSize: number
   fontFamily?: string
   fontColor?: string
@@ -32,7 +27,12 @@ export type PdfBlock = {
   textDecoration?: 'none' | 'underline'
   textAlign?: 'left' | 'center' | 'right'
   visible: boolean
-  // company
+  /** @deprecated Eski düz blok listesi */
+  sortOrder?: number
+  x?: number
+  y?: number
+  width?: number
+  height?: number
   logo_url?: string
   logo_width?: number
   logo_height?: number
@@ -40,19 +40,34 @@ export type PdfBlock = {
   company_address?: string
   company_phone?: string
   company_tax_office?: string
-  // footer
+  /** Teklif düzenleyen firma — vergi numarası */
+  company_tax_no?: string
   footer_text?: string
-  // image (R2 assets)
   image_key?: string
-  // text (serbest metin bloğu)
   text_content?: string
-  // qr_code (QR kod - encode edilecek metin/URL)
   qr_content?: string
-  // line (çizgi)
   lineOrientation?: 'horizontal' | 'vertical'
   lineLength?: number
   lineThickness?: number
   lineColor?: string
+}
+
+/** Satır içi hücre: yüzde genişlik + blok */
+export type PdfLayoutCell = {
+  id: string
+  sortOrder: number
+  /** Satır içinde yüzde (satırdaki hücrelerin toplamı 100 olacak şekilde normalize edilir) */
+  widthPercent: number
+  block: PdfBlock
+}
+
+/** Satır: üst boşluk + yatayda yan yana hücreler */
+export type PdfLayoutRow = {
+  id: string
+  sortOrder: number
+  /** Önceki satırdan sonra boşluk (mm). İlk satır: sayfa içeriğinin üst boşluğu */
+  marginTopMm: number
+  cells: PdfLayoutCell[]
 }
 
 /** Sayfa boyutu preset'leri */
@@ -63,18 +78,18 @@ export const PAGE_PRESETS = [
   { label: 'Legal (216 × 356 mm)', width: 2160, height: 3560 },
 ] as const
 
-/** Layout config - bloklar dizisi */
+/** Layout: satırlar dizisi */
 export type TeklifCiktiLayoutConfig = {
-  blocks: PdfBlock[]
-  /** Sayfa genişliği piksel (10px = 1mm). Varsayılan: 2100 = A4 210mm */
+  rows: PdfLayoutRow[]
   pageWidth?: number
-  /** Sayfa yüksekliği piksel (10px = 1mm). Varsayılan: 2970 = A4 297mm */
   pageHeight?: number
+  /** @deprecated Yüklemede satırlara dönüştürülür */
+  blocks?: PdfBlock[]
 }
 
 /** Blok tipi etiketleri */
 export const BLOCK_TYPE_LABELS: Record<PdfBlockType, string> = {
-  company: 'Firma Bilgileri',
+  company: 'Teklif veren firma',
   customer: 'Müşteri Bilgileri',
   offer_header: 'Teklif Üst Bilgileri',
   offer_items: 'Teklif Satırları',
@@ -86,7 +101,6 @@ export const BLOCK_TYPE_LABELS: Record<PdfBlockType, string> = {
   line: 'Çizgi',
 }
 
-/** Google Fonts listesi - teklif çıktısında kullanılabilir yazı tipleri */
 export const FONT_FAMILIES = [
   'Roboto',
   'Open Sans',
@@ -190,54 +204,163 @@ export const FONT_FAMILIES = [
   'Vollkorn SC',
 ]
 
-/** Yeni blok varsayılan değerleri */
-export function createDefaultBlock(type: PdfBlockType, sortOrder: number): PdfBlock {
-  const id = `block-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-  const base = {
-    id,
-    type,
-    sortOrder,
-    x: 20,
-    y: 20 + sortOrder * 60,
-    width: 170,
-    height: 40,
-    fontSize: 11,
-    fontFamily: 'Roboto',
-    fontColor: '#000000',
-    fontWeight: 'normal' as const,
-    fontStyle: 'normal' as const,
-    textDecoration: 'none' as const,
-    textAlign: 'left' as const,
-    visible: true,
+function newId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+/** Hücre genişliklerini 100'e normalize et */
+export function normalizeRowCellWidths(cells: PdfLayoutCell[]): PdfLayoutCell[] {
+  if (cells.length === 0) return cells
+  const sorted = [...cells].sort((a, b) => a.sortOrder - b.sortOrder)
+  const sum = sorted.reduce((s, c) => s + Math.max(0, c.widthPercent || 0), 0)
+  if (sum <= 0) {
+    const eq = 100 / sorted.length
+    return sorted.map((c) => ({ ...c, widthPercent: eq }))
   }
-  switch (type) {
-    case 'company':
-      return { ...base, x: 20, y: 20, width: 85, height: 45, logo_width: 60, logo_height: 40 }
-    case 'customer':
-      return { ...base, x: 120, y: 20, width: 70, height: 55 }
-    case 'offer_header':
-      return { ...base, x: 20, y: 85, width: 170, height: 25, fontSize: 12 }
-    case 'offer_items':
-      return { ...base, x: 20, y: 120, width: 170, height: 80 }
-    case 'offer_notes':
-      return { ...base, x: 20, y: 210, width: 170, height: 40 }
-    case 'footer':
-      return { ...base, x: 20, y: 260, width: 170, height: 35, fontSize: 9 }
-    case 'image':
-      return { ...base, x: 20, y: 20, width: 60, height: 40 }
-    case 'text':
-      return { ...base, x: 20, y: 20, width: 170, height: 30, text_content: 'Serbest metin' }
-    case 'qr_code':
-      return { ...base, x: 20, y: 20, width: 40, height: 40, qr_content: 'https://example.com' }
-    case 'line':
-      return { ...base, x: 20, y: 20, width: 170, height: 0.5, lineOrientation: 'horizontal', lineLength: 170, lineThickness: 0.5, lineColor: '#000000' }
-    default:
-      return base as PdfBlock
+  if (Math.abs(sum - 100) > 0.001) {
+    return sorted.map((c) => ({ ...c, widthPercent: (Math.max(0, c.widthPercent || 0) / sum) * 100 }))
+  }
+  return sorted
+}
+
+/**
+ * Bir hücrenin yüzdesini kullanıcı değerine ayarlar; kalan %100 payı diğer hücreler
+ * önceki genişlik oranlarına göre paylaşır (düzenlenen hücrenin girdiği değer korunur).
+ */
+export function redistributeWidthsAfterCellEdit(
+  cells: PdfLayoutCell[],
+  editedCellId: string,
+  newPercentForEdited: number
+): PdfLayoutCell[] {
+  const round4 = (x: number) => Math.round(x * 10000) / 10000
+  if (cells.length === 0) return cells
+  const sorted = [...cells].sort((a, b) => a.sortOrder - b.sortOrder)
+  if (sorted.length === 1) {
+    return [{ ...sorted[0], widthPercent: 100, sortOrder: 0 }]
+  }
+
+  const p = round4(Math.max(0, Math.min(100, newPercentForEdited)))
+  const others = sorted.filter((c) => c.id !== editedCellId)
+  const rem = round4(100 - p)
+
+  if (rem <= 0) {
+    return sorted.map((c, i) => ({
+      ...c,
+      sortOrder: i,
+      widthPercent: c.id === editedCellId ? 100 : 0,
+    }))
+  }
+
+  if (others.length === 1) {
+    return sorted.map((c, i) => ({
+      ...c,
+      sortOrder: i,
+      widthPercent: c.id === editedCellId ? p : rem,
+    }))
+  }
+
+  const sumOthers = others.reduce((s, c) => s + Math.max(0, c.widthPercent || 0), 0)
+  const widths = new Map<string, number>()
+  widths.set(editedCellId, p)
+
+  let sumMid = 0
+  for (let i = 0; i < others.length - 1; i++) {
+    const c = others[i]
+    const raw =
+      sumOthers <= 1e-9
+        ? rem / others.length
+        : (rem * Math.max(0, c.widthPercent || 0)) / sumOthers
+    const nw = round4(raw)
+    widths.set(c.id, nw)
+    sumMid = round4(sumMid + nw)
+  }
+  const last = others[others.length - 1]
+  widths.set(last.id, Math.max(0, round4(100 - p - sumMid)))
+
+  return sorted.map((c, i) => ({
+    ...c,
+    sortOrder: i,
+    widthPercent: widths.get(c.id) ?? 0,
+  }))
+}
+
+function normalizeBlock(b: Record<string, unknown>): PdfBlock {
+  const type = (b.type as string) || 'text'
+  return {
+    id: (b.id as string) || newId('block'),
+    type: type as PdfBlockType,
+    fontSize: (b.fontSize as number) ?? 11,
+    fontFamily: (b.fontFamily as string) || 'Roboto',
+    fontColor: (b.fontColor as string) || '#000000',
+    fontWeight: (b.fontWeight as 'normal' | 'bold') || 'normal',
+    fontStyle: (b.fontStyle as 'normal' | 'italic') || 'normal',
+    textDecoration: (b.textDecoration as 'none' | 'underline') || 'none',
+    textAlign: (b.textAlign as 'left' | 'center' | 'right') || 'left',
+    visible: (b.visible as boolean) !== false,
+    sortOrder: b.sortOrder as number | undefined,
+    x: b.x as number | undefined,
+    y: b.y as number | undefined,
+    width: b.width as number | undefined,
+    height: b.height as number | undefined,
+    logo_url: b.logo_url as string | undefined,
+    logo_width: b.logo_width as number | undefined,
+    logo_height: b.logo_height as number | undefined,
+    company_name: b.company_name as string | undefined,
+    company_address: b.company_address as string | undefined,
+    company_phone: b.company_phone as string | undefined,
+    company_tax_office: b.company_tax_office as string | undefined,
+    company_tax_no: b.company_tax_no as string | undefined,
+    footer_text: b.footer_text as string | undefined,
+    image_key: b.image_key as string | undefined,
+    text_content: b.text_content as string | undefined,
+    qr_content: b.qr_content as string | undefined,
+    lineOrientation: (b.lineOrientation as 'horizontal' | 'vertical') || 'horizontal',
+    lineLength: (b.lineLength as number) ?? 170,
+    lineThickness: (b.lineThickness as number) ?? 0.5,
+    lineColor: (b.lineColor as string) || '#000000',
   }
 }
 
-/** Eski formatı blocks dizisine çevir */
-function migrateLegacyToBlocks(legacy: Record<string, unknown>): PdfBlock[] {
+function normalizeCell(c: Record<string, unknown>): PdfLayoutCell {
+  const blockRaw = c.block as Record<string, unknown> | undefined
+  return {
+    id: (c.id as string) || newId('cell'),
+    sortOrder: (c.sortOrder as number) ?? 0,
+    widthPercent: Math.max(0, Number(c.widthPercent) || 0),
+    block: blockRaw ? normalizeBlock(blockRaw) : normalizeBlock({ type: 'text', id: newId('block') }),
+  }
+}
+
+function normalizeRow(r: Record<string, unknown>): PdfLayoutRow {
+  const cellsRaw = (r.cells as unknown[]) || []
+  const cells = cellsRaw.filter(Boolean).map((x) => normalizeCell(x as Record<string, unknown>))
+  return {
+    id: (r.id as string) || newId('row'),
+    sortOrder: (r.sortOrder as number) ?? 0,
+    marginTopMm: Math.max(0, Number(r.marginTopMm) ?? 0),
+    cells: normalizeRowCellWidths(cells),
+  }
+}
+
+/** Eski düz blok listesini satırlara çevir (her blok = tek satır %100) */
+export function migrateBlocksToRows(blocks: PdfBlock[]): PdfLayoutRow[] {
+  const sorted = [...blocks].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+  return sorted.map((b, i) => ({
+    id: newId(`row-${b.id}`),
+    sortOrder: i,
+    marginTopMm: i === 0 ? Math.max(0, b.y ?? 0) : Math.max(0, b.height ?? 8),
+    cells: [
+      {
+        id: newId(`cell-${b.id}`),
+        sortOrder: 0,
+        widthPercent: 100,
+        block: { ...b },
+      },
+    ],
+  }))
+}
+
+function migrateLegacyObjectToBlocks(legacy: Record<string, unknown>): PdfBlock[] {
   const blocks: PdfBlock[] = []
   const map: Record<string, PdfBlockType> = {
     company_block: 'company',
@@ -250,54 +373,126 @@ function migrateLegacyToBlocks(legacy: Record<string, unknown>): PdfBlock[] {
     const type = map[key]
     if (!type || !val || typeof val !== 'object') continue
     const v = val as Record<string, unknown>
-    blocks.push({
-      id: `migrated-${key}-${Date.now()}`,
-      type,
-      sortOrder: so++,
-      x: (v.x as number) ?? 20,
-      y: (v.y as number) ?? 20,
-      width: (v.width as number) ?? 80,
-      height: (v.height as number) ?? 40,
-      fontSize: (v.fontSize as number) ?? 11,
-      fontFamily: (v.fontFamily as string) || 'Arial',
-      fontColor: (v.fontColor as string) || '#000000',
-      fontWeight: (v.fontWeight as 'normal' | 'bold') || 'normal',
-      fontStyle: (v.fontStyle as 'normal' | 'italic') || 'normal',
-      textDecoration: (v.textDecoration as 'none' | 'underline') || 'none',
-      textAlign: (v.textAlign as 'left' | 'center' | 'right') || 'left',
-      visible: (v.visible as boolean) !== false,
-      logo_url: v.logo_url as string | undefined,
-      logo_width: v.logo_width as number | undefined,
-      logo_height: v.logo_height as number | undefined,
-      company_name: v.company_name as string | undefined,
-      company_address: v.company_address as string | undefined,
-      company_phone: v.company_phone as string | undefined,
-      company_tax_office: v.company_tax_office as string | undefined,
-      footer_text: v.footer_text as string | undefined,
-    })
+    blocks.push(
+      normalizeBlock({
+        ...v,
+        id: `migrated-${key}`,
+        type,
+        sortOrder: so++,
+      })
+    )
   }
-  return blocks.sort((a, b) => a.sortOrder - b.sortOrder)
+  return blocks.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
 }
 
-/** Varsayılan layout - boş (kullanıcı blok ekleyecek) */
+export function createDefaultBlock(type: PdfBlockType): PdfBlock {
+  const id = newId('block')
+  const base: PdfBlock = {
+    id,
+    type,
+    fontSize: 11,
+    fontFamily: 'Roboto',
+    fontColor: '#000000',
+    fontWeight: 'normal',
+    fontStyle: 'normal',
+    textDecoration: 'none',
+    textAlign: 'left',
+    visible: true,
+  }
+  switch (type) {
+    case 'company':
+      return { ...base, logo_width: 60, logo_height: 40, fontSize: 11 }
+    case 'customer':
+      return { ...base, fontSize: 11 }
+    case 'offer_header':
+      return { ...base, fontSize: 12 }
+    case 'offer_items':
+      return { ...base, fontSize: 11 }
+    case 'offer_notes':
+      return { ...base, fontSize: 11 }
+    case 'footer':
+      return { ...base, fontSize: 9 }
+    case 'image':
+      return { ...base }
+    case 'text':
+      return { ...base, text_content: 'Serbest metin' }
+    case 'qr_code':
+      return { ...base, qr_content: 'https://example.com' }
+    case 'line':
+      return {
+        ...base,
+        lineOrientation: 'horizontal',
+        lineLength: 170,
+        lineThickness: 0.5,
+        lineColor: '#000000',
+      }
+    default:
+      return base
+  }
+}
+
+export function createDefaultCell(block: PdfBlock, widthPercent = 100, sortOrder = 0): PdfLayoutCell {
+  return {
+    id: newId('cell'),
+    sortOrder,
+    widthPercent,
+    block,
+  }
+}
+
+export function createDefaultRow(block: PdfBlock, sortOrder = 0, marginTopMm = 8): PdfLayoutRow {
+  return {
+    id: newId('row'),
+    sortOrder,
+    marginTopMm,
+    cells: [createDefaultCell(block, 100, 0)],
+  }
+}
+
 export function getDefaultLayoutConfig(): TeklifCiktiLayoutConfig {
-  return { blocks: [], pageWidth: 2100, pageHeight: 2970 }
+  return { rows: [], pageWidth: 2100, pageHeight: 2970 }
 }
 
 export function parseLayoutConfig(json: string | undefined): TeklifCiktiLayoutConfig {
   if (!json?.trim()) return getDefaultLayoutConfig()
   try {
-    const parsed = JSON.parse(json) as TeklifCiktiLayoutConfig | Record<string, unknown>
-    if (parsed && Array.isArray((parsed as TeklifCiktiLayoutConfig).blocks)) {
-      return parsed as TeklifCiktiLayoutConfig
+    const parsed = JSON.parse(json) as Record<string, unknown> & {
+      rows?: unknown[]
+      blocks?: unknown[]
+      pageWidth?: unknown
+      pageHeight?: unknown
     }
-    return { blocks: migrateLegacyToBlocks(parsed as Record<string, unknown>) }
+    const pageWidth = Number(parsed.pageWidth) || 2100
+    const pageHeight = Number(parsed.pageHeight) || 2970
+    if (parsed && Array.isArray(parsed.rows)) {
+      const rows = (parsed.rows as unknown[]).filter(Boolean).map((r) => normalizeRow(r as Record<string, unknown>))
+      const sorted = rows.sort((a, b) => a.sortOrder - b.sortOrder).map((row) => ({
+        ...row,
+        cells: normalizeRowCellWidths(row.cells.map((c, j) => ({ ...c, sortOrder: j }))),
+      }))
+      return { rows: sorted, pageWidth, pageHeight }
+    }
+    if (parsed && Array.isArray(parsed.blocks)) {
+      const blocks = (parsed.blocks as unknown[]).filter(Boolean).map((b) => normalizeBlock(b as Record<string, unknown>))
+      return { rows: migrateBlocksToRows(blocks), pageWidth, pageHeight }
+    }
+    const legacyBlocks = migrateLegacyObjectToBlocks(parsed)
+    if (legacyBlocks.length > 0) {
+      const withItems = [...legacyBlocks]
+      if (!withItems.some((b) => b.type === 'offer_items')) {
+        withItems.push(createDefaultBlock('offer_items'))
+      }
+      if (!withItems.some((b) => b.type === 'offer_notes')) {
+        withItems.push(createDefaultBlock('offer_notes'))
+      }
+      return { rows: migrateBlocksToRows(withItems), pageWidth, pageHeight }
+    }
+    return { rows: [], pageWidth, pageHeight }
   } catch {
     return getDefaultLayoutConfig()
   }
 }
 
-/** app_settings'ten Teklif Çıktı Ayarları'nı çeker */
 export async function fetchTeklifCiktiAyarlari(): Promise<TeklifCiktiLayoutConfig> {
   const res = await fetch(
     `${API_URL}/api/app-settings?category=${encodeURIComponent(TEKLIF_CIKTI_AYARLARI_CATEGORY)}`
@@ -309,7 +504,6 @@ export async function fetchTeklifCiktiAyarlari(): Promise<TeklifCiktiLayoutConfi
   return parseLayoutConfig(data.layout_config)
 }
 
-/** Teklif Çıktı Ayarları'nı app_settings'e kaydeder */
 export async function saveTeklifCiktiAyarlari(config: TeklifCiktiLayoutConfig): Promise<void> {
   const res = await fetch(`${API_URL}/api/app-settings`, {
     method: 'PUT',
@@ -323,4 +517,17 @@ export async function saveTeklifCiktiAyarlari(config: TeklifCiktiLayoutConfig): 
   if (!res.ok) {
     throw new Error((data as { error?: string }).error || 'Kaydedilemedi')
   }
+}
+
+/** Tüm satırlardaki blokları düz liste (tekil tip kontrolü vb.) */
+export function flattenBlocksFromRows(rows: PdfLayoutRow[]): PdfBlock[] {
+  return rows
+    .slice()
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .flatMap((r) =>
+      r.cells
+        .slice()
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((c) => c.block)
+    )
 }

@@ -94,6 +94,62 @@ export interface CustomerContact {
   email?: string | null
 }
 
+/** Teklif kaydında tutulan müşteri çıktı alanları (PDF); müşteri kartından kopyalanır, kartı değiştirmez */
+export type OfferCustomerSnapshotFields = {
+  company_name: string
+  company_phone: string
+  company_email: string
+  authorized_name: string
+  tax_office: string
+  tax_no: string
+}
+
+type CustomerLikeForOffer = {
+  title?: string | null
+  email?: string | null
+  phone?: string | null
+  phone_mobile?: string | null
+  tax_office?: string | null
+  tax_no?: string | null
+}
+
+/**
+ * Kayıtlı müşteri (+ isteğe bağlı iletişim kişisi) → teklifte gösterilecek alanlar.
+ * İletişimde telefon/e-posta varsa önce onlar kullanılır; yoksa müşteri kartı.
+ */
+export function offerFieldsFromCustomerRecord(
+  customer: CustomerLikeForOffer,
+  contact: Pick<CustomerContact, 'full_name' | 'email' | 'phone' | 'phone_mobile'> | null | undefined
+): OfferCustomerSnapshotFields {
+  const p1 = (customer.phone || '').trim()
+  const p2 = (customer.phone_mobile || '').trim()
+  const custPhone = [p1, p2].filter(Boolean).join(p1 && p2 ? ' / ' : '')
+
+  const cPh = (contact?.phone || '').trim() || (contact?.phone_mobile || '').trim()
+  const cEm = (contact?.email || '').trim()
+
+  return {
+    company_name: (customer.title || '').trim(),
+    company_phone: cPh || custPhone,
+    company_email: cEm || (customer.email || '').trim(),
+    authorized_name: (contact?.full_name || '').trim(),
+    tax_office: (customer.tax_office || '').trim(),
+    tax_no: (customer.tax_no || '').trim(),
+  }
+}
+
+/** Arama sonucu Customer → offerFieldsFromCustomerRecord girdisi */
+export function customerSearchRowToOfferRecord(c: Customer): CustomerLikeForOffer {
+  return {
+    title: c.title,
+    email: c.email,
+    phone: c.phone,
+    phone_mobile: c.phone_mobile,
+    tax_office: c.tax_office,
+    tax_no: c.tax_no,
+  }
+}
+
 export interface Product {
   id: number
   name: string

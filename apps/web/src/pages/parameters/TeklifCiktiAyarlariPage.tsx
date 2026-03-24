@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   FileText,
   Plus,
@@ -12,6 +12,8 @@ import {
   AlignVerticalSpaceAround,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   Image,
   Minus,
   Type,
@@ -54,12 +56,18 @@ import {
   saveTeklifCiktiAyarlari,
   getDefaultLayoutConfig,
   createDefaultBlock,
+  createDefaultRow,
+  createDefaultCell,
+  flattenBlocksFromRows,
+  normalizeRowCellWidths,
+  redistributeWidthsAfterCellEdit,
   BLOCK_TYPE_LABELS,
   FONT_FAMILIES,
   PAGE_PRESETS,
   type TeklifCiktiLayoutConfig,
   type PdfBlock,
   type PdfBlockType,
+  type PdfLayoutRow,
 } from '@/lib/teklif-cikti-ayarlari-settings'
 
 /** Sayısal giriş — sağda tek spinner (yukarı/aşağı oklar) */
@@ -387,54 +395,37 @@ function BlockEditDialog({
               </div>
             </div>
           )}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div>
-              <Label className="text-xs">
-                {edited.x < 0 ? 'X — Sağdan (mm)' : 'X — Soldan (mm)'}
-              </Label>
-              <NumericInput
-                value={edited.x}
-                onChange={(v) => setEdited((b) => (b ? { ...b, x: v } : b))}
-              />
-              {edited.x < 0 && (
-                <p className="text-xs text-muted-foreground mt-0.5">Sağ kenardan {Math.abs(edited.x)} mm</p>
-              )}
-            </div>
-            <div>
-              <Label className="text-xs">
-                {edited.y < 0 ? 'Y — Alttan (mm)' : 'Y — Üstten (mm)'}
-              </Label>
-              <NumericInput
-                value={edited.y}
-                onChange={(v) => setEdited((b) => (b ? { ...b, y: v } : b))}
-              />
-              {edited.y < 0 && (
-                <p className="text-xs text-muted-foreground mt-0.5">Alt kenardan {Math.abs(edited.y)} mm</p>
-              )}
-            </div>
-            {!isLine && (
-              <div>
-                <Label className="text-xs">Genişlik (mm)</Label>
-                <NumericInput
-                  value={edited.width}
-                  min={1}
-                  max={210}
-                  onChange={(v) => setEdited((b) => (b ? { ...b, width: v } : b))}
-                />
+          {(isImage || isQrCode) && (
+            <div className="rounded-lg border p-4 bg-muted/30 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Konum ve satır düzeni listeden yönetilir. İsteğe bağlı maksimum boyut (0 = sınır yok).
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs">Maks. genişlik (mm)</Label>
+                  <NumericInput
+                    value={edited.width ?? 0}
+                    min={0}
+                    max={210}
+                    onChange={(v) =>
+                      setEdited((b) => (b ? { ...b, width: v <= 0 ? undefined : v } : b))
+                    }
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">Maks. yükseklik (mm)</Label>
+                  <NumericInput
+                    value={edited.height ?? 0}
+                    min={0}
+                    max={297}
+                    onChange={(v) =>
+                      setEdited((b) => (b ? { ...b, height: v <= 0 ? undefined : v } : b))
+                    }
+                  />
+                </div>
               </div>
-            )}
-            {!isLine && (
-              <div>
-                <Label className="text-xs">Yükseklik (mm)</Label>
-                <NumericInput
-                  value={edited.height}
-                  min={1}
-                  max={297}
-                  onChange={(v) => setEdited((b) => (b ? { ...b, height: v } : b))}
-                />
-              </div>
-            )}
-          </div>
+            </div>
+          )}
           {!isImage && !isQrCode && !isLine && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
@@ -517,6 +508,9 @@ function BlockEditDialog({
           </div>
           {isCompany && (
             <>
+              <p className="text-xs text-muted-foreground">
+                Bu alanlar teklifi düzenleyen (çıkaran) firmanıza aittir; müşteri bilgileri ayrı bloktadır.
+              </p>
               <div>
                 <Label className="text-xs">Logo URL</Label>
                 <Input
@@ -562,21 +556,29 @@ function BlockEditDialog({
                   onChange={(e) => setEdited((b) => (b ? { ...b, company_address: e.target.value || undefined } : b))}
                 />
               </div>
+              <div>
+                <Label className="text-xs">Telefon</Label>
+                <Input
+                  placeholder="0212..."
+                  value={edited.company_phone ?? ''}
+                  onChange={(e) => setEdited((b) => (b ? { ...b, company_phone: e.target.value || undefined } : b))}
+                />
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs">Telefon</Label>
+                  <Label className="text-xs">Vergi Dairesi</Label>
                   <Input
-                    placeholder="0212..."
-                    value={edited.company_phone ?? ''}
-                    onChange={(e) => setEdited((b) => (b ? { ...b, company_phone: e.target.value || undefined } : b))}
+                    placeholder="Vergi dairesi"
+                    value={edited.company_tax_office ?? ''}
+                    onChange={(e) => setEdited((b) => (b ? { ...b, company_tax_office: e.target.value || undefined } : b))}
                   />
                 </div>
                 <div>
-                  <Label className="text-xs">Vergi Dairesi / No</Label>
+                  <Label className="text-xs">Vergi No</Label>
                   <Input
-                    placeholder="Vergi dairesi, no"
-                    value={edited.company_tax_office ?? ''}
-                    onChange={(e) => setEdited((b) => (b ? { ...b, company_tax_office: e.target.value || undefined } : b))}
+                    placeholder="Vergi numarası"
+                    value={edited.company_tax_no ?? ''}
+                    onChange={(e) => setEdited((b) => (b ? { ...b, company_tax_no: e.target.value || undefined } : b))}
                   />
                 </div>
               </div>
@@ -609,9 +611,21 @@ function BlockEditDialog({
 export function TeklifCiktiAyarlariPage() {
   const [config, setConfig] = useState<TeklifCiktiLayoutConfig>(getDefaultLayoutConfig())
   const [loading, setLoading] = useState(true)
-  const [editBlock, setEditBlock] = useState<PdfBlock | null>(null)
+  const [editTarget, setEditTarget] = useState<{ rowId: string; cellId: string } | null>(null)
   const [editOpen, setEditOpen] = useState(false)
-  const [deleteBlock, setDeleteBlock] = useState<PdfBlock | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{
+    rowId: string
+    cellId: string
+    blockType: PdfBlockType
+  } | null>(null)
+  const [deleteRowId, setDeleteRowId] = useState<string | null>(null)
+
+  const editBlock = useMemo(() => {
+    if (!editTarget) return null
+    const row = config.rows.find((r) => r.id === editTarget.rowId)
+    const cell = row?.cells.find((c) => c.id === editTarget.cellId)
+    return cell?.block ?? null
+  }, [editTarget, config.rows])
 
   const loadSettings = useCallback(async () => {
     setLoading(true)
@@ -630,7 +644,6 @@ export function TeklifCiktiAyarlariPage() {
     loadSettings()
   }, [loadSettings])
 
-  // Google Fonts yükle - yazı tipi seçicide önizleme için
   useEffect(() => {
     const families = FONT_FAMILIES.slice(0, 50).map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@400;700`)
     const url = `https://fonts.googleapis.com/css2?${families.join('&')}&display=swap`
@@ -654,100 +667,232 @@ export function TeklifCiktiAyarlariPage() {
     []
   )
 
-  const addBlock = (type: PdfBlockType) => {
+  const reindexRows = (rows: PdfLayoutRow[]): PdfLayoutRow[] =>
+    rows.map((r, i) => ({ ...r, sortOrder: i }))
+
+  const usedTypes = useMemo(() => new Set(flattenBlocksFromRows(config.rows).map((b) => b.type)), [config.rows])
+
+  /** Tek hücreli yeni satır (üst menü) */
+  const addRowWithBlock = (type: PdfBlockType) => {
     setConfig((prev) => {
-      const maxOrder = prev.blocks.length > 0 ? Math.max(...prev.blocks.map((b) => b.sortOrder)) : -1
-      const newBlock = createDefaultBlock(type, maxOrder + 1)
+      const block = createDefaultBlock(type)
+      const row = createDefaultRow(block, prev.rows.length, prev.rows.length === 0 ? 12 : 8)
+      const next = { ...prev, rows: reindexRows([...prev.rows, row]) }
+      saveConfig(next)
+      return next
+    })
+  }
+
+  const addEmptyRow = () => {
+    setConfig((prev) => {
+      const block = createDefaultBlock('text')
+      const row = createDefaultRow(block, prev.rows.length, prev.rows.length === 0 ? 12 : 8)
+      const next = { ...prev, rows: reindexRows([...prev.rows, row]) }
+      saveConfig(next)
+      return next
+    })
+  }
+
+  const addBlockToRow = (rowId: string, type: PdfBlockType) => {
+    setConfig((prev) => {
       const next = {
         ...prev,
-        blocks: [...prev.blocks, newBlock].sort((a, b) => a.sortOrder - b.sortOrder),
+        rows: prev.rows.map((r) => {
+          if (r.id !== rowId) return r
+          const n = r.cells.length + 1
+          const eq = 100 / n
+          const newCells = [
+            ...r.cells.map((c) => ({ ...c, widthPercent: eq })),
+            createDefaultCell(createDefaultBlock(type), eq, r.cells.length),
+          ]
+          return {
+            ...r,
+            cells: normalizeRowCellWidths(newCells.map((c, i) => ({ ...c, sortOrder: i }))),
+          }
+        }),
       }
       saveConfig(next)
       return next
     })
   }
 
-  const updateBlock = (updated: PdfBlock) => {
+  const updateBlockInCell = (updated: PdfBlock) => {
+    if (!editTarget) return
+    const { rowId, cellId } = editTarget
     setConfig((prev) => {
       const next = {
         ...prev,
-        blocks: prev.blocks.map((b) => (b.id === updated.id ? updated : b)).sort((a, b) => a.sortOrder - b.sortOrder),
+        rows: prev.rows.map((r) => {
+          if (r.id !== rowId) return r
+          return {
+            ...r,
+            cells: r.cells.map((c) => (c.id === cellId ? { ...c, block: updated } : c)),
+          }
+        }),
+      }
+      saveConfig(next)
+      return next
+    })
+    setEditTarget(null)
+  }
+
+  const removeCell = (rowId: string, cellId: string) => {
+    setConfig((prev) => {
+      const nextRows = reindexRows(
+        prev.rows
+          .map((r) => {
+            if (r.id !== rowId) return r
+            const cells = r.cells
+              .filter((c) => c.id !== cellId)
+              .map((c, i) => ({ ...c, sortOrder: i }))
+            return { ...r, cells: normalizeRowCellWidths(cells) }
+          })
+          .filter((r) => r.cells.length > 0)
+      )
+      const next = { ...prev, rows: nextRows }
+      saveConfig(next)
+      return next
+    })
+    setDeleteTarget(null)
+  }
+
+  const removeRow = (rowId: string) => {
+    setConfig((prev) => {
+      const next = { ...prev, rows: reindexRows(prev.rows.filter((r) => r.id !== rowId)) }
+      saveConfig(next)
+      return next
+    })
+    setDeleteRowId(null)
+  }
+
+  const updateRowMargin = (rowId: string, marginTopMm: number) => {
+    setConfig((prev) => {
+      const next = {
+        ...prev,
+        rows: prev.rows.map((r) => (r.id === rowId ? { ...r, marginTopMm: Math.max(0, marginTopMm) } : r)),
       }
       saveConfig(next)
       return next
     })
   }
 
-  const removeBlock = (block: PdfBlock) => {
+  const updateCellWidthPercent = (rowId: string, cellId: string, widthPercent: number) => {
     setConfig((prev) => {
       const next = {
         ...prev,
-        blocks: prev.blocks.filter((b) => b.id !== block.id).sort((a, b) => a.sortOrder - b.sortOrder),
+        rows: prev.rows.map((r) => {
+          if (r.id !== rowId) return r
+          const cells = redistributeWidthsAfterCellEdit(r.cells, cellId, widthPercent)
+          return { ...r, cells: cells.map((c, i) => ({ ...c, sortOrder: i })) }
+        }),
       }
       saveConfig(next)
       return next
     })
-    setDeleteBlock(null)
   }
 
-  const moveBlockUp = (block: PdfBlock) => {
+  const moveRowUp = (rowId: string) => {
     setConfig((prev) => {
-      const blocks = [...prev.blocks]
-      const i = blocks.findIndex((b) => b.id === block.id)
+      const rows = [...prev.rows].sort((a, b) => a.sortOrder - b.sortOrder)
+      const i = rows.findIndex((r) => r.id === rowId)
       if (i <= 0) return prev
-      const temp = blocks[i].sortOrder
-      blocks[i] = { ...blocks[i], sortOrder: blocks[i - 1].sortOrder }
-      blocks[i - 1] = { ...blocks[i - 1], sortOrder: temp }
-      const next = { ...prev, blocks: blocks.sort((a, b) => a.sortOrder - b.sortOrder) }
+      ;[rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]
+      const next = { ...prev, rows: reindexRows(rows) }
       saveConfig(next)
       return next
     })
   }
 
-  const moveBlockDown = (block: PdfBlock) => {
+  const moveRowDown = (rowId: string) => {
     setConfig((prev) => {
-      const blocks = [...prev.blocks]
-      const i = blocks.findIndex((b) => b.id === block.id)
-      if (i < 0 || i >= blocks.length - 1) return prev
-      const temp = blocks[i].sortOrder
-      blocks[i] = { ...blocks[i], sortOrder: blocks[i + 1].sortOrder }
-      blocks[i + 1] = { ...blocks[i + 1], sortOrder: temp }
-      const next = { ...prev, blocks: blocks.sort((a, b) => a.sortOrder - b.sortOrder) }
+      const rows = [...prev.rows].sort((a, b) => a.sortOrder - b.sortOrder)
+      const i = rows.findIndex((r) => r.id === rowId)
+      if (i < 0 || i >= rows.length - 1) return prev
+      ;[rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]
+      const next = { ...prev, rows: reindexRows(rows) }
       saveConfig(next)
       return next
     })
   }
 
-  const updateBlockField = (
-    block: PdfBlock,
-    field: 'x' | 'y' | 'width' | 'height' | 'lineLength' | 'lineThickness',
-    value: number
-  ) => {
+  const moveCellLeft = (rowId: string, cellId: string) => {
     setConfig((prev) => {
-      const blocks = prev.blocks.map((b) => {
-        if (b.id !== block.id) return b
-        return { ...b, [field]: value }
-      })
-      const next = { ...prev, blocks }
+      const next = {
+        ...prev,
+        rows: prev.rows.map((r) => {
+          if (r.id !== rowId) return r
+          const cells = [...r.cells].sort((a, b) => a.sortOrder - b.sortOrder)
+          const idx = cells.findIndex((c) => c.id === cellId)
+          if (idx <= 0) return r
+          const copy = [...cells]
+          ;[copy[idx - 1], copy[idx]] = [copy[idx], copy[idx - 1]]
+          return {
+            ...r,
+            cells: normalizeRowCellWidths(copy.map((c, i) => ({ ...c, sortOrder: i }))),
+          }
+        }),
+      }
       saveConfig(next)
       return next
     })
   }
 
-  const openEdit = (block: PdfBlock) => {
-    setEditBlock(block)
+  const moveCellRight = (rowId: string, cellId: string) => {
+    setConfig((prev) => {
+      const next = {
+        ...prev,
+        rows: prev.rows.map((r) => {
+          if (r.id !== rowId) return r
+          const cells = [...r.cells].sort((a, b) => a.sortOrder - b.sortOrder)
+          const idx = cells.findIndex((c) => c.id === cellId)
+          if (idx < 0 || idx >= cells.length - 1) return r
+          const copy = [...cells]
+          ;[copy[idx + 1], copy[idx]] = [copy[idx], copy[idx + 1]]
+          return {
+            ...r,
+            cells: normalizeRowCellWidths(copy.map((c, i) => ({ ...c, sortOrder: i }))),
+          }
+        }),
+      }
+      saveConfig(next)
+      return next
+    })
+  }
+
+  const openEdit = (rowId: string, cellId: string) => {
+    setEditTarget({ rowId, cellId })
     setEditOpen(true)
   }
 
-  const usedTypes = new Set(config.blocks.map((b) => b.type))
+  const sortedRows = useMemo(
+    () => [...config.rows].sort((a, b) => a.sortOrder - b.sortOrder),
+    [config.rows]
+  )
+
+  const blockTypeMenuItems = (onPick: (type: PdfBlockType) => void) =>
+    (Object.keys(BLOCK_TYPE_LABELS) as PdfBlockType[]).map((type) => {
+      const canAddMultiple = MULTIPLE_BLOCK_TYPES.includes(type)
+      const isDisabled = !canAddMultiple && usedTypes.has(type)
+      return (
+        <DropdownMenuItem
+          key={type}
+          onClick={() => !isDisabled && onPick(type)}
+          disabled={isDisabled}
+          className={isDisabled ? 'opacity-60' : ''}
+        >
+          {BLOCK_TYPE_LABELS[type]}
+          {isDisabled && <span className="ml-2 text-xs text-muted-foreground">(eklendi)</span>}
+        </DropdownMenuItem>
+      )
+    })
 
   return (
     <PageLayout
       title="Teklif Çıktı Ayarları"
-      description="PDF teklif çıktısında blokları ekleyin, konum ve stil ayarlarını yapın"
+      description="Satır ekleyin; her satırda yan yana bloklar ve yüzde genişlik kullanın. Satır yüksekliği PDF’de içeriğe göre belirlenir."
       backTo="/parametreler"
       headerActions={
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline">
@@ -819,31 +964,19 @@ export function TeklifCiktiAyarlariPage() {
               </div>
             </PopoverContent>
           </Popover>
+          <Button type="button" variant="outline" onClick={addEmptyRow}>
+            <Plus className="h-4 w-4 mr-2" />
+            Satır ekle
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button>
                 <Plus className="h-4 w-4 mr-2" />
-                Blok Ekle
+                Yeni satır (blok seç)
                 <ChevronDown className="h-4 w-4 ml-2" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {(Object.keys(BLOCK_TYPE_LABELS) as PdfBlockType[]).map((type) => {
-                const canAddMultiple = MULTIPLE_BLOCK_TYPES.includes(type)
-                const isDisabled = !canAddMultiple && usedTypes.has(type)
-                return (
-                  <DropdownMenuItem
-                    key={type}
-                    onClick={() => !isDisabled && addBlock(type)}
-                    disabled={isDisabled}
-                    className={isDisabled ? 'opacity-60' : ''}
-                  >
-                    {BLOCK_TYPE_LABELS[type]}
-                    {isDisabled && <span className="ml-2 text-xs text-muted-foreground">(eklendi)</span>}
-                  </DropdownMenuItem>
-                )
-              })}
-            </DropdownMenuContent>
+            <DropdownMenuContent align="end">{blockTypeMenuItems((type) => addRowWithBlock(type))}</DropdownMenuContent>
           </DropdownMenu>
         </div>
       }
@@ -857,109 +990,176 @@ export function TeklifCiktiAyarlariPage() {
       <div className="space-y-6">
         {loading ? (
           <p className="text-muted-foreground">Yükleniyor...</p>
-        ) : config.blocks.length === 0 ? (
+        ) : config.rows.length === 0 ? (
           <Card>
-            <CardContent className="py-12 text-center text-muted-foreground">
-              Henüz blok eklenmedi. &quot;Blok Ekle&quot; butonundan blok seçin.
+            <CardContent className="py-12 text-center text-muted-foreground space-y-2">
+              <p>Henüz satır yok.</p>
+              <p className="text-sm">&quot;Satır ekle&quot; veya &quot;Yeni satır (blok seç)&quot; ile başlayın.</p>
             </CardContent>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {config.blocks.map((block, index) => {
-              const Icon = BLOCK_ICONS[block.type]
-              const canMoveUp = index > 0
-              const canMoveDown = index < config.blocks.length - 1
+          <div className="space-y-4">
+            {sortedRows.map((row, rowIndex) => {
+              const cells = [...row.cells].sort((a, b) => a.sortOrder - b.sortOrder)
               return (
-                <Card key={block.id} className={!block.visible ? 'opacity-60' : ''}>
-                  <CardContent className="py-3 px-4">
-                    {/* Başlık + sıra butonları + eylem butonları */}
-                    <div className="flex items-center justify-between gap-2 mb-3">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                          <Icon className="h-4 w-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-medium text-sm leading-tight truncate">{BLOCK_TYPE_LABELS[block.type]}</p>
-                          {!block.visible && (
-                            <span className="text-xs text-muted-foreground">Gizli</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-0.5 shrink-0">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => moveBlockUp(block)} disabled={!canMoveUp} title="Yukarı taşı">
-                          <ChevronUp className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => moveBlockDown(block)} disabled={!canMoveDown} title="Aşağı taşı">
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(block)} title="Düzenle">
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setDeleteBlock(block)} title="Sil">
-                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                        </Button>
-                      </div>
-                    </div>
-                    {/* Konum/boyut — textbox + spinner */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      {(block.type === 'line'
-                        ? [
-                            { field: 'x' as const, label: 'X', val: block.x ?? 20, step: 5, min: -210, max: 210 },
-                            { field: 'y' as const, label: 'Y', val: block.y ?? 20, step: 5, min: -297, max: 297 },
-                            {
-                              field: 'lineLength' as const,
-                              label: 'Uzunluk',
-                              val: block.lineLength ?? 170,
-                              step: 5,
-                              min: 1,
-                              max: 500,
-                            },
-                            {
-                              field: 'lineThickness' as const,
-                              label: 'Kalınlık',
-                              val: block.lineThickness ?? 0.5,
-                              step: 0.1,
-                              min: 0.1,
-                              max: 20,
-                            },
-                          ]
-                        : (['x', 'y', 'width', 'height'] as const).map((field) => ({
-                            field,
-                            label: field.toUpperCase(),
-                            val: block[field] ?? (field === 'x' || field === 'y' ? 20 : 80),
-                            step: 5,
-                            min: field === 'x' ? -210 : field === 'y' ? -297 : 1,
-                            max: field === 'x' ? 210 : field === 'y' ? 297 : 210,
-                          }))
-                      ).map(({ field, label, val, step, min, max }) => (
-                        <div key={field}>
-                          <Label className="text-xs text-muted-foreground">{label}</Label>
+                <Card key={row.id}>
+                  <CardContent className="py-4 px-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium">Satır {rowIndex + 1}</span>
+                        <div className="flex items-center gap-1">
+                          <Label className="text-xs text-muted-foreground whitespace-nowrap">Üst boşluk (mm)</Label>
                           <NumericInput
-                            value={val}
-                            onChange={(v) => updateBlockField(block, field, v)}
-                            step={step}
-                            min={min}
-                            max={max}
-                            className="mt-0.5 h-8"
+                            value={row.marginTopMm}
+                            min={0}
+                            max={80}
+                            step={1}
+                            onChange={(v) => updateRowMargin(row.id, v)}
+                            className="h-8 w-[7rem]"
                           />
                         </div>
-                      ))}
+                      </div>
+                      <div className="flex items-center gap-0.5">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => moveRowUp(row.id)}
+                          disabled={rowIndex === 0}
+                          title="Satırı yukarı"
+                        >
+                          <ChevronUp className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => moveRowDown(row.id)}
+                          disabled={rowIndex >= sortedRows.length - 1}
+                          title="Satırı aşağı"
+                        >
+                          <ChevronDown className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => setDeleteRowId(row.id)}
+                          title="Satırı sil"
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="sm" className="h-8 ml-1">
+                              <Plus className="h-3.5 w-3.5 mr-1" />
+                              Bloğu ekle
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            {blockTypeMenuItems((type) => addBlockToRow(row.id, type))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </div>
-                    {/* Alt bilgi */}
-                    {(block.type === 'text' && block.text_content) || (block.type === 'footer' && block.footer_text) ? (
-                      <p
-                        className="mt-2 text-xs text-muted-foreground line-clamp-2 border-t pt-2"
-                        style={block.type === 'text' ? { fontFamily: block.fontFamily || 'Roboto' } : undefined}
-                      >
-                        {block.type === 'text' ? block.text_content : block.footer_text}
-                      </p>
-                    ) : block.type === 'line' ? (
-                      <p className="mt-2 text-xs text-muted-foreground border-t pt-2">
-                        {block.lineOrientation === 'vertical' ? 'Dikey' : 'Yatay'} · {block.lineLength ?? 170}mm · {block.lineThickness ?? 0.5}mm kalınlık
-                      </p>
-                    ) : block.type === 'image' && block.image_key ? (
-                      <p className="mt-2 text-xs text-muted-foreground truncate border-t pt-2">{block.image_key.split('/').pop()}</p>
-                    ) : null}
+                    <div
+                      className="flex flex-wrap gap-2 items-stretch rounded-lg border border-dashed border-muted-foreground/25 p-2 bg-muted/20"
+                      style={{ minHeight: '4.5rem' }}
+                    >
+                      {cells.map((cell, ci) => {
+                        const b = cell.block
+                        const Icon = BLOCK_ICONS[b.type]
+                        return (
+                          <div
+                            key={cell.id}
+                            className="flex flex-col min-w-0 flex-1 basis-0 rounded-md border bg-background p-2"
+                          >
+                            <div className="flex items-start justify-between gap-1 mb-2">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <Icon className="h-4 w-4 shrink-0 text-primary" />
+                                <span className="text-xs font-medium truncate">{BLOCK_TYPE_LABELS[b.type]}</span>
+                                {!b.visible && (
+                                  <span className="text-[10px] text-muted-foreground shrink-0">Gizli</span>
+                                )}
+                              </div>
+                              <div className="flex shrink-0 gap-0.5">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  disabled={ci === 0}
+                                  onClick={() => moveCellLeft(row.id, cell.id)}
+                                  title="Sola"
+                                >
+                                  <ChevronLeft className="h-3 w-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  disabled={ci >= cells.length - 1}
+                                  onClick={() => moveCellRight(row.id, cell.id)}
+                                  title="Sağa"
+                                >
+                                  <ChevronRight className="h-3 w-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() => openEdit(row.id, cell.id)}
+                                  title="Düzenle"
+                                >
+                                  <Pencil className="h-3 w-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() =>
+                                    setDeleteTarget({ rowId: row.id, cellId: cell.id, blockType: b.type })
+                                  }
+                                  title="Bloğu sil"
+                                >
+                                  <Trash2 className="h-3 w-3 text-destructive" />
+                                </Button>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 mt-auto">
+                              <Label className="text-[10px] text-muted-foreground whitespace-nowrap">Genişlik %</Label>
+                              <NumericInput
+                                value={Math.round(cell.widthPercent * 10000) / 10000}
+                                min={0}
+                                max={100}
+                                step={1}
+                                onChange={(v) => updateCellWidthPercent(row.id, cell.id, v)}
+                                className="h-8 flex-1"
+                              />
+                            </div>
+                            {b.type === 'text' && b.text_content ? (
+                              <p
+                                className="mt-1 text-[10px] text-muted-foreground line-clamp-2 border-t pt-1"
+                                style={{ fontFamily: b.fontFamily || 'Roboto' }}
+                              >
+                                {b.text_content}
+                              </p>
+                            ) : b.type === 'line' ? (
+                              <p className="mt-1 text-[10px] text-muted-foreground border-t pt-1">
+                                {b.lineOrientation === 'vertical' ? 'Dikey çizgi' : 'Yatay çizgi'}
+                              </p>
+                            ) : null}
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-1.5 px-0.5">
+                      Satır yüzdeleri toplamı:{' '}
+                      {(() => {
+                        const t = cells.reduce((s, c) => s + c.widthPercent, 0)
+                        const show = Math.abs(t - 100) < 0.02 ? 100 : t
+                        return `${show.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 4 })}%`
+                      })()}
+                    </p>
                   </CardContent>
                 </Card>
               )
@@ -971,20 +1171,35 @@ export function TeklifCiktiAyarlariPage() {
       <BlockEditDialog
         block={editBlock}
         open={editOpen}
-        onOpenChange={setEditOpen}
-        onSave={updateBlock}
+        onOpenChange={(o) => {
+          setEditOpen(o)
+          if (!o) setEditTarget(null)
+        }}
+        onSave={updateBlockInCell}
       />
 
       <ConfirmDeleteDialog
-        open={!!deleteBlock}
-        onOpenChange={(o) => !o && setDeleteBlock(null)}
-        title="Blok Sil"
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        title="Bloğu sil"
         description={
-          deleteBlock
-            ? `"${BLOCK_TYPE_LABELS[deleteBlock.type]}" bloğunu silmek istediğinize emin misiniz?`
+          deleteTarget
+            ? `"${BLOCK_TYPE_LABELS[deleteTarget.blockType]}" hücresini bu satırdan kaldırmak istediğinize emin misiniz?`
             : ''
         }
-        onConfirm={() => { if (deleteBlock) removeBlock(deleteBlock) }}
+        onConfirm={() => {
+          if (deleteTarget) removeCell(deleteTarget.rowId, deleteTarget.cellId)
+        }}
+      />
+
+      <ConfirmDeleteDialog
+        open={!!deleteRowId}
+        onOpenChange={(o) => !o && setDeleteRowId(null)}
+        title="Satırı sil"
+        description="Bu satırdaki tüm bloklar kaldırılacak. Emin misiniz?"
+        onConfirm={() => {
+          if (deleteRowId) removeRow(deleteRowId)
+        }}
       />
     </PageLayout>
   )
