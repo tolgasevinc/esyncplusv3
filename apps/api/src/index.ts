@@ -74,7 +74,7 @@ app.use('/*', cors({
     return '*';
   },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+  allowHeaders: ['Content-Type', 'Authorization', 'Accept'],
   exposeHeaders: ['Content-Length'],
   maxAge: 86400,
 }));
@@ -8192,13 +8192,17 @@ async function buildParasutPushAttributes(
   storage: R2Bucket | undefined,
   productRow: ProductRowForParasutPush,
   selected: ParasutPushSelected[],
+  opts?: { skipPhoto?: boolean },
 ): Promise<Record<string, unknown>> {
+  const skipPhoto = !!opts?.skipPhoto;
   const attrs: Record<string, unknown> = { name: productRow.name };
   if (!isEmptyParasutVal(productRow.sku)) attrs.code = productRow.sku!.trim();
-  const imagePath = parseProductImageToFirstPath(productRow.image);
-  if (imagePath) {
-    const photoUrl = await storagePathToDataUrl(storage, imagePath);
-    if (photoUrl) attrs.photo = photoUrl;
+  if (!skipPhoto) {
+    const imagePath = parseProductImageToFirstPath(productRow.image);
+    if (imagePath) {
+      const photoUrl = await storagePathToDataUrl(storage, imagePath);
+      if (photoUrl) attrs.photo = photoUrl;
+    }
   }
 
   for (const { parasut, master } of selected) {
@@ -8216,7 +8220,7 @@ async function buildParasutPushAttributes(
     else if (master === 'gtip_code' && !isEmptyParasutVal(productRow.gtip_code)) attrs.gtip = productRow.gtip_code!.trim();
     else if (master === 'unit_id' && !isEmptyParasutVal(productRow.unit_code)) attrs.unit = productRow.unit_code!.trim();
     else if (master === 'currency_id') attrs.currency = (productRow.currency_code || 'TRY').toUpperCase();
-    else if (master === 'image') {
+    else if (master === 'image' && !skipPhoto) {
       const path = parseProductImageToFirstPath(productRow.image);
       if (path) {
         const photoUrl = await storagePathToDataUrl(storage, path);
@@ -8225,6 +8229,12 @@ async function buildParasutPushAttributes(
     }
   }
   return attrs;
+}
+
+/** Paraşüt alt isteğinde gövde limiti / zaman aşımı riski — aşırı büyük data URL kaldırılır */
+function stripOversizedParasutPhoto(attrs: Record<string, unknown>, maxChars = 450_000): void {
+  const p = attrs.photo;
+  if (typeof p === 'string' && p.length > maxChars) delete attrs.photo;
 }
 
 /** POST create: stok alanı stock_count ise initial_stock_count olmalı (Paraşüt şeması) */
@@ -8472,7 +8482,7 @@ app.post('/api/parasut/products/push', async (c) => {
     const auth = await getParasutAuth(c);
     if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
 
-    let attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected);
+    let attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected, wantsCreate ? { skipPhoto: true } : undefined);
     attrs = mergeParasutAttributeOverrides(attrs, body.attribute_overrides);
 
     const nm = attrs.name != null ? String(attrs.name).trim() : '';
@@ -8498,9 +8508,6 @@ app.post('/api/parasut/products/push', async (c) => {
       }
       if (createAttrs.initial_stock_count === 0 || createAttrs.initial_stock_count === '0') {
         delete createAttrs.initial_stock_count;
-      }
-      if (typeof createAttrs.photo === 'string' && createAttrs.photo.length > 1_800_000) {
-        delete createAttrs.photo;
       }
       const createData: {
         type: string;
@@ -8556,6 +8563,7 @@ app.post('/api/parasut/products/push', async (c) => {
     }
 
     const updateAttrs = pickWritableParasutProductAttributes(attrs);
+    stripOversizedParasutPhoto(updateAttrs);
 
     const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
       method: 'PUT',

@@ -22,7 +22,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ProductImagesGrid } from '@/components/ProductImagesGrid'
 import { PackageContentsTab } from '@/components/PackageContentsTab'
 import { getImageDisplayUrl } from '@/components/ImageInput'
-import { API_URL } from '@/lib/api'
+import { API_URL, parseJsonResponse } from '@/lib/api'
 import { getCategoryPath, buildHierarchy, type CategoryItem } from '@/components/CategorySelect'
 import {
   fetchSidebarMenus,
@@ -163,6 +163,14 @@ function sortParasutAttributeKeys(keys: string[]): string[] {
     return i === -1 ? 999 : i
   }
   return [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+}
+
+function parasutFetchErrorMessage(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (/failed to fetch|networkerror|load failed|network request failed|aborted/i.test(msg)) {
+    return 'Sunucuya ulaşılamadı veya istek yarım kaldı (zaman aşımı / ağ / güvenlik duvarı). API veya Paraşüt yanıtı uzun sürdüyse tekrar deneyin. Yeni ürün oluşturmada görsel şimdilik atlanır; gerekirse Paraşüt › Ürünler’den güncelleyin.'
+  }
+  return msg
 }
 
 /** Gruplar ve kategoriler açılır liste - varsayılan kapalı, arama destekli */
@@ -703,16 +711,17 @@ export function ProductsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ product_id: editingId }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error((data as { error?: string }).error || 'Önizleme alınamadı')
-      const d = data as {
+      const data = await parseJsonResponse<{
+        error?: string
         parasut_id?: string | null
         parasut_product?: { id?: string; code: string; name: string } | null
         sku_used?: string
         attributes_display?: Record<string, unknown>
         has_photo?: boolean
         selected_fields?: { parasut: string; master: string }[]
-      }
+      }>(res)
+      if (!res.ok) throw new Error(data.error || 'Önizleme alınamadı')
+      const d = data
       const rawPid = d.parasut_id
       const fromProduct = d.parasut_product?.id
       const parasutIdResolved =
@@ -738,7 +747,7 @@ export function ProductsPage() {
       }
       setParasutFieldEdits(edits)
     } catch (e) {
-      setParasutPreviewError(e instanceof Error ? e.message : 'Hata')
+      setParasutPreviewError(parasutFetchErrorMessage(e))
     } finally {
       setParasutPreviewLoading(false)
     }
@@ -785,8 +794,8 @@ export function ProductsPage() {
           attribute_overrides: overrides,
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error((data as { error?: string }).error || 'Aktarım başarısız')
+      const data = await parseJsonResponse<{ error?: string; message?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Aktarım başarısız')
       toastSuccess(
         'Tamam',
         (data as { message?: string }).message ||
@@ -797,7 +806,7 @@ export function ProductsPage() {
       setParasutFieldEdits({})
       setParasutManualId('')
     } catch (e) {
-      toastError('Hata', e instanceof Error ? e.message : 'Aktarım başarısız')
+      toastError('Hata', parasutFetchErrorMessage(e))
     } finally {
       setParasutTransferLoading(false)
     }
