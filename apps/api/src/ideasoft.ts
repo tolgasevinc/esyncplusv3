@@ -20,8 +20,17 @@ export async function loadIdeasoftSettings(db: D1Database): Promise<IdeasoftSett
   return out;
 }
 
+/** Yalnızca kök köken (https://magaza.myideasoft.com) — path varsa kaldırılır; aksi halde /admin + /admin/user/auth = 404 olur */
 export function normalizeStoreBase(url: string): string {
-  return (url || '').trim().replace(/\/+$/, '');
+  const raw = (url || '').trim();
+  if (!raw) return '';
+  try {
+    const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const p = new URL(withProto);
+    return `${p.protocol}//${p.host}`;
+  } catch {
+    return raw.replace(/\/+$/, '');
+  }
 }
 
 function getOAuthPaths(base: string): { authorize: string; token: string } {
@@ -29,6 +38,29 @@ function getOAuthPaths(base: string): { authorize: string; token: string } {
     authorize: `${base}/oauth/v2/auth`,
     token: `${base}/oauth/v2/token`,
   };
+}
+
+/** Alternatif (Symfony / eski kurulum) */
+function getOAuthTokenUrlFallback(base: string): string {
+  return `${normalizeStoreBase(base)}/oauth/token`;
+}
+
+/** Ideasoft / Symfony hata gövdeleri: errorMessage, error, detail vb. */
+function parseIdeasoftHttpError(status: number, data: unknown, rawText: string): string {
+  if (data && typeof data === 'object') {
+    const o = data as Record<string, unknown>;
+    const msg =
+      (typeof o.errorMessage === 'string' && o.errorMessage.trim()) ||
+      (typeof o.message === 'string' && o.message.trim()) ||
+      (typeof o.error_description === 'string' && o.error_description.trim()) ||
+      (typeof o.error === 'string' && o.error.trim()) ||
+      (typeof o.detail === 'string' && o.detail.trim()) ||
+      (typeof o.title === 'string' && o.title.trim());
+    if (msg) return status >= 400 ? `${msg} (HTTP ${status})` : msg;
+  }
+  const t = rawText?.trim?.() ?? '';
+  if (t && t.length < 500) return `${t} (HTTP ${status})`;
+  return `Ideasoft yanıt veremedi (HTTP ${status})`;
 }
 
 export function getIdeasoftRedirectUriFromRequest(requestUrl: string): string {
@@ -80,26 +112,47 @@ export async function getIdeasoftAccessToken(env: IdeasoftEnv): Promise<string |
   const refreshToken = settings.IDEASOFT_REFRESH_TOKEN?.trim();
   const { token: tokenUrl } = getOAuthPaths(base);
   if (refreshToken) {
-    const refreshRes = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: refreshToken,
-      }).toString(),
+    const refreshBody = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
     });
-    const refreshData = await refreshRes.json().catch(() => ({}));
-    const newToken = (refreshData as { access_token?: string }).access_token;
+    let { res, data: refreshData, rawText } = await postIdeasoftToken(tokenUrl, refreshBody);
+    if (!res.ok && res.status === 404) {
+      const second = await postIdeasoftToken(getOAuthTokenUrlFallback(base), refreshBody);
+      res = second.res;
+      refreshData = second.data;
+      rawText = second.rawText;
+    }
+    const newToken = (refreshData as { access_token?: string }).access_token?.trim();
     const newRefresh = (refreshData as { refresh_token?: string }).refresh_token;
     const expiresIn = (refreshData as { expires_in?: number }).expires_in ?? 3600;
     if (newToken) {
-      await saveIdeasoftTokens(env.DB, newToken, newRefresh || refreshToken, expiresIn);
+      await saveIdeasoftTokens(env.DB, newToken, (newRefresh ?? '').trim() || refreshToken, expiresIn);
       return newToken;
     }
   }
   return null;
+}
+
+async function postIdeasoftToken(
+  tokenUrl: string,
+  body: URLSearchParams
+): Promise<{ res: Response; data: unknown; rawText: string }> {
+  const res = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: body.toString(),
+  });
+  const rawText = await res.text();
+  let data: unknown = {};
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = {};
+  }
+  return { res, data, rawText };
 }
 
 export async function exchangeIdeasoftAuthorizationCode(
@@ -110,29 +163,46 @@ export async function exchangeIdeasoftAuthorizationCode(
   code: string,
   redirectUri: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const { token: tokenUrl } = getOAuthPaths(normalizeStoreBase(baseUrl));
-  const res = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      code,
-    }).toString(),
+  const base = normalizeStoreBase(baseUrl);
+  const params = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    code,
   });
-  const data = await res.json().catch(() => ({}));
-  const accessToken = (data as { access_token?: string }).access_token;
-  const refreshToken = (data as { refresh_token?: string }).refresh_token;
-  const expiresIn = (data as { expires_in?: number }).expires_in ?? 3600;
-  if (!accessToken || !refreshToken) {
-    const err =
-      (data as { error_description?: string }).error_description
-      || (data as { error?: string }).error
-      || `Token alınamadı (HTTP ${res.status})`;
+
+  const primary = getOAuthPaths(base).token;
+  let { res, data, rawText } = await postIdeasoftToken(primary, params);
+
+  if (!res.ok && res.status === 404) {
+    const fb = getOAuthTokenUrlFallback(base);
+    const second = await postIdeasoftToken(fb, params);
+    res = second.res;
+    data = second.data;
+    rawText = second.rawText;
+  }
+
+  const d = data as { access_token?: string; refresh_token?: string; expires_in?: number };
+  const accessToken = d.access_token?.trim();
+  const refreshToken = (d.refresh_token ?? '').trim();
+  const expiresIn = typeof d.expires_in === 'number' ? d.expires_in : 3600;
+
+  if (!accessToken) {
+    if (res.ok) {
+      const snippet = rawText.replace(/\s+/g, ' ').trim().slice(0, 280);
+      return {
+        ok: false,
+        error: `Ideasoft access_token dönmedi. Yanıt: ${snippet || '(boş)'}`,
+      };
+    }
+    let err = parseIdeasoftHttpError(res.status, data, rawText);
+    if (res.status >= 500 || /internal server error/i.test(err)) {
+      err += ` Yönlendirme adresi şu olmalı: ${redirectUri} (Ideasoft panelindeki Redirect URI ile karakter karakter aynı; genelde sondaki / olmadan).`;
+    }
     return { ok: false, error: err };
   }
+
   await saveIdeasoftTokens(db, accessToken, refreshToken, expiresIn);
   return { ok: true };
 }
@@ -165,23 +235,29 @@ export function parseReturnToQuery(raw: string | undefined, requestUrl: string):
   }
 }
 
-/** OAuth start: Ideasoft yetkilendirme URL'si */
+/** OAuth start: Ideasoft yetkilendirme URL'si.
+ * Resmi Admin API dokümantasyonu: authorizationUrl …/panel/auth (Ideashop OAuth2).
+ * Bazı kurulumlar /admin/oauth/authorize veya /admin/user/auth kullanır; 404 alırsanız ayarlardan değiştirin.
+ * @see https://apidoc.ideasoft.dev/docs/admin-api/3x74avtrv8u23-authentication */
 export function buildIdeasoftAuthorizeUrl(
   storeBase: string,
   clientId: string,
   redirectUri: string,
   state: string,
-  scope?: string
+  scope?: string,
+  authorizePath: string = '/panel/auth'
 ): string {
   const base = normalizeStoreBase(storeBase);
-  const { authorize } = getOAuthPaths(base);
+  const ap = (authorizePath || '/panel/auth').trim() || '/panel/auth';
+  const path = ap.startsWith('/') ? ap : `/${ap}`;
+  const authorize = `${base}${path}`;
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: clientId,
     redirect_uri: redirectUri,
     state,
   });
-  const sc = (scope || 'public').trim();
+  const sc = (scope ?? '').trim();
   if (sc) params.set('scope', sc);
   return `${authorize}?${params.toString()}`;
 }
@@ -324,6 +400,188 @@ export async function ideasoftFindProductIdBySku(
     }
   }
   return null;
+}
+
+/** Admin API — düz kategori listesi (hiyerarşi parent üzerinden kurulur) */
+export type IdeasoftCategory = {
+  id: string;
+  name: string;
+  /** Üst kategori yoksa null */
+  parentId: string | null;
+};
+
+function extractIdFromIri(iri: string): string | null {
+  const t = iri.trim().replace(/\?.*$/, '');
+  const m = t.match(/\/(\d+)(?:\/)?$/);
+  if (m) return m[1];
+  const mUuid = t.match(/\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:\/)?$/i);
+  if (mUuid) return mUuid[1];
+  const parts = t.split('/').filter(Boolean);
+  const last = parts[parts.length - 1];
+  if (!last) return null;
+  if (/^\d+$/.test(last) || /^[a-f0-9-]{36}$/i.test(last)) return last;
+  return last;
+}
+
+function parseIdeasoftCategoryParent(o: Record<string, unknown>): string | null {
+  const keys = ['parent', 'parentCategory', 'parentId', 'parent_id', 'categoryParent'];
+  for (const k of keys) {
+    const p = o[k];
+    if (p == null || p === '') continue;
+    if (typeof p === 'string') {
+      const id = extractIdFromIri(p) || p.trim();
+      if (id) return id;
+    }
+    if (typeof p === 'object' && p !== null) {
+      const po = p as Record<string, unknown>;
+      if (po.id != null && String(po.id).trim()) return String(po.id).trim();
+      if (typeof po['@id'] === 'string') {
+        const id = extractIdFromIri(po['@id']);
+        if (id) return id;
+      }
+    }
+  }
+  return null;
+}
+
+function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
+  if (typeof item === 'string') {
+    const id = extractIdFromIri(item);
+    if (!id) return null;
+    return { id, name: id, parentId: null };
+  }
+  if (!item || typeof item !== 'object') return null;
+  const o = item as Record<string, unknown>;
+  let idStr: string | null = null;
+  if (o.id != null && String(o.id).trim()) idStr = String(o.id).trim();
+  else if (typeof o['@id'] === 'string') idStr = extractIdFromIri(o['@id']);
+  if (!idStr) return null;
+
+  const nameRaw =
+    typeof o.name === 'string'
+      ? o.name
+      : typeof o.title === 'string'
+        ? o.title
+        : typeof (o as { translations?: { name?: string } }).translations?.name === 'string'
+          ? (o as { translations: { name: string } }).translations.name
+          : '';
+  const name = nameRaw.trim() || idStr;
+
+  const parentId = parseIdeasoftCategoryParent(o);
+
+  return { id: idStr, name, parentId };
+}
+
+function extractHydraMembers(raw: Record<string, unknown>): unknown[] {
+  const m = raw['hydra:member'];
+  if (Array.isArray(m)) return m;
+  const graph = raw['@graph'];
+  if (Array.isArray(graph)) return graph;
+  const legacy = raw['member'];
+  if (Array.isArray(legacy)) return legacy;
+  const data = raw['data'];
+  if (Array.isArray(data)) return data;
+  const cats = raw['categories'];
+  if (Array.isArray(cats)) return cats;
+  return [];
+}
+
+function hydraNextPath(raw: Record<string, unknown>): string | null {
+  const view = raw['hydra:view'] as Record<string, string> | undefined;
+  const nextHref = view?.['hydra:next'];
+  if (typeof nextHref !== 'string' || !nextHref.trim()) return null;
+  if (nextHref.startsWith('http')) return nextHref;
+  return nextHref.startsWith('/') ? nextHref : `/${nextHref}`;
+}
+
+/** Admin API’de koleksiyon yolu mağazaya göre değişebilir; sırayla dene. */
+const IDEASOFT_CATEGORY_COLLECTION_PATHS = [
+  '/categories?itemsPerPage=100',
+  '/product_categories?itemsPerPage=100',
+  '/product-categories?itemsPerPage=100',
+];
+
+const categoryFetchInit: RequestInit = {
+  method: 'GET',
+  headers: { Accept: 'application/ld+json, application/json' },
+};
+
+/**
+ * Tüm kategorileri çeker (hydra sayfalama).
+ * @see GET /admin-api/categories (veya product_categories)
+ */
+export async function ideasoftFetchCategories(
+  storeBase: string,
+  accessToken: string
+): Promise<{ ok: true; categories: IdeasoftCategory[] } | { ok: false; error: string }> {
+  const all: IdeasoftCategory[] = [];
+  let firstPath: string | null = null;
+  let rawFirst: Record<string, unknown> | null = null;
+  let gotAnyOkResponse = false;
+
+  for (const path of IDEASOFT_CATEGORY_COLLECTION_PATHS) {
+    const res = await ideasoftApiFetch(storeBase, accessToken, path, categoryFetchInit);
+    const rawText = await res.text();
+    let raw: Record<string, unknown> = {};
+    try {
+      raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+    } catch {
+      return { ok: false, error: 'Ideasoft kategori yanıtı JSON değil' };
+    }
+    if (!res.ok) {
+      if (res.status === 404) continue;
+      const err = parseIdeasoftHttpError(res.status, raw, rawText);
+      return { ok: false, error: err };
+    }
+    gotAnyOkResponse = true;
+    const arr = extractHydraMembers(raw);
+    if (arr.length > 0) {
+      firstPath = path;
+      rawFirst = raw;
+      break;
+    }
+  }
+
+  if (!firstPath || !rawFirst) {
+    if (!gotAnyOkResponse) {
+      return {
+        ok: false,
+        error:
+          'Ideasoft kategori API yolu bulunamadı (404). OAuth uygulamasında kategori okuma izni olduğundan emin olun; Ideasoft dokümantasyonundaki Category koleksiyon yolunu kontrol edin.',
+      };
+    }
+    return { ok: true, categories: [] };
+  }
+
+  const collectPage = (raw: Record<string, unknown>) => {
+    for (const m of extractHydraMembers(raw)) {
+      const c = parseIdeasoftCategoryItem(m);
+      if (c) all.push(c);
+    }
+  };
+
+  collectPage(rawFirst);
+
+  let nextPath = hydraNextPath(rawFirst);
+  while (nextPath) {
+    const res = await ideasoftApiFetch(storeBase, accessToken, nextPath, categoryFetchInit);
+    const rawText = await res.text();
+    let raw: Record<string, unknown> = {};
+    try {
+      raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+    } catch {
+      break;
+    }
+    if (!res.ok) break;
+    collectPage(raw);
+    nextPath = hydraNextPath(raw);
+  }
+
+  const seen = new Map<string, IdeasoftCategory>();
+  for (const c of all) {
+    if (!seen.has(c.id)) seen.set(c.id, c);
+  }
+  return { ok: true, categories: [...seen.values()] };
 }
 
 const OAUTH_PENDING_KEY = 'ideasoft_oauth_pending';

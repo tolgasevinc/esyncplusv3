@@ -51,6 +51,10 @@ const SalesDashboardPage = lazy(() => import('@/pages/SalesDashboardPage').then(
 const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPage').then((m) => ({ default: m.ParasutProductsPage })))
 const ParasutCategoriesPage = lazy(() => import('@/pages/parasut/ParasutCategoriesPage').then((m) => ({ default: m.ParasutCategoriesPage })))
 const ParasutBrandsPage = lazy(() => import('@/pages/parasut/ParasutBrandsPage').then((m) => ({ default: m.ParasutBrandsPage })))
+const IdeasoftPage = lazy(() => import('@/pages/ideasoft/IdeasoftPage').then((m) => ({ default: m.IdeasoftPage })))
+const IdeasoftCategoriesPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftCategoriesPage').then((m) => ({ default: m.IdeasoftCategoriesPage }))
+)
 const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
 function App() {
   return (
@@ -66,6 +70,8 @@ function App() {
         <Route path="/parasut/products" element={<ParasutProductsPage />} />
         <Route path="/parasut/categories" element={<ParasutCategoriesPage />} />
         <Route path="/parasut/brands" element={<ParasutBrandsPage />} />
+        <Route path="/ideasoft" element={<IdeasoftPage />} />
+        <Route path="/ideasoft/categories" element={<IdeasoftCategoriesPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />

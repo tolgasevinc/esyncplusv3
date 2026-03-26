@@ -7,6 +7,7 @@ import {
   getIdeasoftAccessToken,
   getIdeasoftRedirectUriFromRequest,
   ideasoftFindProductIdBySku,
+  ideasoftFetchCategories,
   ideasoftUpsertProduct,
   loadIdeasoftSettings,
   normalizeStoreBase,
@@ -1889,8 +1890,14 @@ app.get('/api/ideasoft/oauth/start', async (c) => {
     const nonce = crypto.randomUUID();
     const exp = Math.floor(Date.now() / 1000) + 600;
     await saveIdeasoftOAuthPending(c.env.DB, { nonce, exp, returnTo });
-    const scope = (settings.oauth_scope || 'public').trim();
-    const url = buildIdeasoftAuthorizeUrl(base, clientId, redirectUri, nonce, scope || undefined);
+    let scope = (settings.oauth_scope ?? '').trim();
+    if (scope === 'public') scope = '';
+    let authorizePath = (settings.oauth_authorize_path || '/panel/auth').trim() || '/panel/auth';
+    /** Eski varsayılanlar — bu mağazada /admin/oauth/authorize sık 404 veriyor; resmi yol /panel/auth */
+    if (authorizePath === '/admin/user/auth' || authorizePath === '/admin/oauth/authorize') {
+      authorizePath = '/panel/auth';
+    }
+    const url = buildIdeasoftAuthorizeUrl(base, clientId, redirectUri, nonce, scope || undefined, authorizePath);
     return c.redirect(url, 302);
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'OAuth başlatılamadı' }, 500);
@@ -1906,14 +1913,30 @@ app.get('/oauth/ideasoft/callback', async (c) => {
     const code = (c.req.query('code') || '').trim();
     const pending = state ? await verifyIdeasoftOAuthPending(c.env.DB, state) : null;
     const returnTo = pending?.returnTo || parseReturnToQuery(undefined, c.req.url);
+    const safeReturnUrl = (): URL => {
+      try {
+        return new URL(returnTo);
+      } catch {
+        return new URL('https://app.e-syncplus.com/ayarlar/entegrasyonlar/ideasoft');
+      }
+    };
     const failRedirect = async (msg: string) => {
       await clearIdeasoftOAuthPending(c.env.DB);
-      const u = new URL(returnTo);
+      const u = safeReturnUrl();
       u.searchParams.set('ideasoft_error', msg);
       return c.redirect(u.toString(), 302);
     };
     if (errQ) {
-      return failRedirect(errQ);
+      const errDesc = (c.req.query('error_description') || '').trim();
+      let msg = errQ;
+      if (errDesc) {
+        try {
+          msg = `${errQ}: ${decodeURIComponent(errDesc.replace(/\+/g, ' '))}`;
+        } catch {
+          msg = `${errQ}: ${errDesc}`;
+        }
+      }
+      return failRedirect(msg);
     }
     if (!code || !pending) {
       return failRedirect('Geçersiz veya süresi dolmuş OAuth isteği');
@@ -1931,11 +1954,18 @@ app.get('/oauth/ideasoft/callback', async (c) => {
       return failRedirect(ex.error);
     }
     await clearIdeasoftOAuthPending(c.env.DB);
-    const okUrl = new URL(returnTo);
+    const okUrl = safeReturnUrl();
     okUrl.searchParams.set('ideasoft_connected', '1');
     return c.redirect(okUrl.toString(), 302);
   } catch (err: unknown) {
-    return c.text(err instanceof Error ? err.message : 'Callback hatası', 500);
+    const msg = err instanceof Error ? err.message : 'Callback hatası';
+    try {
+      const u = new URL(parseReturnToQuery(undefined, c.req.url));
+      u.searchParams.set('ideasoft_error', msg);
+      return c.redirect(u.toString(), 302);
+    } catch {
+      return c.text(msg, 500);
+    }
   }
 });
 
@@ -2075,6 +2105,78 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
     });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Yayınlama başarısız' }, 500);
+  }
+});
+
+/** Ideasoft mağaza kategorileri (Admin API, hydra sayfalı) */
+app.get('/api/ideasoft/categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    if (!storeBase) {
+      return c.json({ error: 'Ideasoft mağaza adresi ayarlı değil (Ayarlar > IdeaSoft).' }, 400);
+    }
+    const token = await getIdeasoftAccessToken(c.env);
+    if (!token) {
+      return c.json(
+        {
+          error:
+            'Ideasoft OAuth bağlantısı yok veya süresi doldu. Ayarlar > IdeaSoft üzerinden "Ideasoft ile bağlan" ile yetkilendirin.',
+        },
+        401
+      );
+    }
+    const result = await ideasoftFetchCategories(storeBase, token);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ data: result.categories });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kategoriler alınamadı' }, 500);
+  }
+});
+
+/** Master kategori id → Ideasoft kategori id */
+const IDEASOFT_CATEGORY_MAPPINGS_KEY = 'ideasoft_category_mappings';
+
+app.get('/api/ideasoft/category-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_CATEGORY_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/category-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings?: Record<string, string> }>().catch(() => ({}));
+    const mappings = body.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_CATEGORY_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_CATEGORY_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(`INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`)
+        .bind(IDEASOFT_CATEGORY_MAPPINGS_KEY, JSON.stringify(toSave))
+        .run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
   }
 });
 
@@ -7669,6 +7771,7 @@ app.get('/api/app-settings', async (c) => {
         'IDEASOFT_REFRESH_TOKEN',
         'IDEASOFT_TOKEN_EXPIRES_AT',
         'ideasoft_oauth_pending',
+        'ideasoft_category_mappings',
       ]),
     };
     const hidden = hiddenKeysByCategory[category] ?? new Set<string>();

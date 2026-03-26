@@ -6,8 +6,10 @@ export type IdeasoftSettings = {
   store_base_url?: string
   client_id?: string
   client_secret?: string
-  /** OAuth scope (varsayılan: public) */
+  /** Boş = scope gönderilmez (çoğu mağaza için önerilir; public bazı sunucularda 500 verir) */
   oauth_scope?: string
+  /** Yetkilendirme yolu, örn. /oauth/v2/auth veya /oauth/authorize */
+  oauth_authorize_path?: string
 }
 
 /** Tarayıcıyı Ideasoft yetkilendirme akışına yönlendirir (API Worker adresi) */
@@ -32,6 +34,7 @@ export async function fetchIdeasoftSettings(): Promise<IdeasoftSettings> {
     client_id: data.client_id,
     client_secret: data.client_secret,
     oauth_scope: data.oauth_scope,
+    oauth_authorize_path: data.oauth_authorize_path,
   }
 }
 
@@ -44,10 +47,14 @@ export async function saveIdeasoftSettings(settings: IdeasoftSettings): Promise<
     toSave.client_id = String(settings.client_id).trim()
   }
   if (settings.client_secret !== undefined && settings.client_secret !== null) {
-    toSave.client_secret = String(settings.client_secret).trim()
+    const sec = String(settings.client_secret).trim()
+    if (sec) toSave.client_secret = sec
   }
   if (settings.oauth_scope !== undefined && settings.oauth_scope !== null) {
     toSave.oauth_scope = String(settings.oauth_scope).trim()
+  }
+  if (settings.oauth_authorize_path !== undefined && settings.oauth_authorize_path !== null) {
+    toSave.oauth_authorize_path = String(settings.oauth_authorize_path).trim()
   }
   const res = await fetch(`${API_URL}/api/app-settings`, {
     method: 'PUT',
@@ -63,5 +70,6 @@ export async function saveIdeasoftSettings(settings: IdeasoftSettings): Promise<
     client_id: data.client_id,
     client_secret: data.client_secret,
     oauth_scope: data.oauth_scope,
+    oauth_authorize_path: data.oauth_authorize_path,
   }
 }

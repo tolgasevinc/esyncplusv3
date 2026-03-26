@@ -21,6 +21,7 @@ import {
   Banknote,
   LayoutDashboard,
   Download,
+  FolderTree,
 } from 'lucide-react'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -342,6 +343,12 @@ export function HomePage() {
               description="E-Ticaret Platformu"
               icon={<ShoppingCart className="h-5 w-5" />}
               to="/opencart"
+            />
+            <IntegrationCard
+              name="Ideasoft"
+              description="Mağaza & kategori eşleştirme"
+              icon={<FolderTree className="h-5 w-5" />}
+              to="/ideasoft"
             />
             <IntegrationCard
               name="Shopify"

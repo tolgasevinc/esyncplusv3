@@ -20,6 +20,7 @@ export function SettingsIdeasoftPage() {
   const [settings, setSettings] = useState<IdeasoftSettings>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [oauthNavigating, setOauthNavigating] = useState(false)
   const redirectUri = getIdeasoftRedirectUri()
 
   const loadSettings = useCallback(async () => {
@@ -77,13 +78,39 @@ export function SettingsIdeasoftPage() {
     }
   }
 
+  async function handleIdeasoftConnect() {
+    const store = (settings.store_base_url ?? '').trim()
+    const cid = (settings.client_id ?? '').trim()
+    const sec = (settings.client_secret ?? '').trim()
+    if (!store || !cid) {
+      toastError('Eksik bilgi', 'Mağaza adresi ve Client ID zorunludur.')
+      return
+    }
+    if (!sec) {
+      toastError(
+        'Client Secret gerekli',
+        'Ideasoft panelinden Client Secret\'ı kopyalayıp alana yapıştırın; ardından tekrar bağlanın. (Boş kayıt, sunucudaki gizli anahtarı silmez; OAuth için formda değer görünmeli.)'
+      )
+      return
+    }
+    setOauthNavigating(true)
+    try {
+      const saved = await saveIdeasoftSettings(settings)
+      setSettings(saved)
+      window.location.href = getIdeasoftOAuthStartUrl()
+    } catch (err) {
+      toastError('Kaydedilemedi', err instanceof Error ? err.message : 'Ayarlar kaydedilemedi; OAuth başlatılamadı.')
+      setOauthNavigating(false)
+    }
+  }
+
   return (
     <PageLayout
       title="IdeaSoft"
       description="IdeaSoft mağaza API ve OAuth kimlik bilgileri"
       backTo="/ayarlar"
       footerActions={
-        <Button variant="save" onClick={handleSave} disabled={saving || loading}>
+        <Button variant="save" onClick={handleSave} disabled={saving || loading || oauthNavigating}>
           <Save className="h-4 w-4 mr-1" />
           {saving ? 'Kaydediliyor...' : 'Kaydet'}
         </Button>
@@ -127,7 +154,8 @@ export function SettingsIdeasoftPage() {
                   onChange={(e) => setSettings((s) => ({ ...s, store_base_url: e.target.value }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Ideasoft mağazanızın kök adresi; API istekleri bu tabana göre yapılır.
+                  Sadece kök alan adı (örn. <code className="text-xs">https://otomatikkapimarketim.myideasoft.com</code>).
+                  Sonuna <code className="text-xs">/admin</code> veya başka yol eklemeyin; OAuth adresi bozulup 404 verebilir.
                 </p>
               </div>
               <div className="grid gap-2">
@@ -155,31 +183,46 @@ export function SettingsIdeasoftPage() {
                 </p>
               </div>
               <div className="grid gap-2">
+                <Label htmlFor="ideasoft-auth-path">OAuth yetkilendirme yolu (gelişmiş)</Label>
+                <Input
+                  id="ideasoft-auth-path"
+                  autoComplete="off"
+                  placeholder="/panel/auth"
+                  value={settings.oauth_authorize_path ?? ''}
+                  onChange={(e) => setSettings((s) => ({ ...s, oauth_authorize_path: e.target.value }))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Boş bırakılırsa <code className="text-xs">/panel/auth</code> (Ideasoft dokümantasyonu).{' '}
+                  <code className="text-xs">/admin/oauth/authorize</code> bazı mağazalarda 404 verir; o zaman bu alana{' '}
+                  <code className="text-xs">/panel/auth</code> yazıp kaydedin veya alanı temizleyin.
+                </p>
+              </div>
+              <div className="grid gap-2">
                 <Label htmlFor="ideasoft-scope">OAuth scope (opsiyonel)</Label>
                 <Input
                   id="ideasoft-scope"
                   autoComplete="off"
-                  placeholder="public"
+                  placeholder="Boş bırakın (önerilir)"
                   value={settings.oauth_scope ?? ''}
                   onChange={(e) => setSettings((s) => ({ ...s, oauth_scope: e.target.value }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Boş bırakılırsa &quot;public&quot; kullanılır. Ideasoft dokümantasyonundaki scope ile uyumlu olmalıdır.
+                  Çoğu mağazada <strong>boş</strong> bırakın; <code className="text-xs">scope=public</code> Ideasoft tarafında 500 hatasına yol açabiliyor.
+                  Dokümanda açıkça scope isteniyorsa o değeri girin.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2 pt-2">
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => {
-                    window.location.href = getIdeasoftOAuthStartUrl()
-                  }}
+                  onClick={() => void handleIdeasoftConnect()}
+                  disabled={loading || saving || oauthNavigating}
                 >
                   <Link2 className="h-4 w-4 mr-1" />
-                  Ideasoft ile bağlan
+                  {oauthNavigating ? 'Kaydediliyor…' : 'Ideasoft ile bağlan'}
                 </Button>
                 <p className="text-xs text-muted-foreground w-full">
-                  Kaydettikten sonra tıklayın; Ideasoft girişinden sonra bu uygulamaya dönersiniz.
+                  Tıkladığınızda ayarlar önce sunucuya kaydedilir, ardından Ideasoft giriş sayfasına yönlendirilirsiniz.
                 </p>
               </div>
             </>
