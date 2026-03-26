@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Plus, Trash2, PanelLeft, GripVertical, Pencil, Minus, Palette } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -42,7 +43,18 @@ function genId() {
   return `m-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
+const GENERAL_TABS = ['genel', 'sidebar', 'tema'] as const
+type GeneralTab = (typeof GENERAL_TABS)[number]
+
+function parseGeneralTab(raw: string | null): GeneralTab {
+  if (raw === 'sidebar' || raw === 'tema' || raw === 'genel') return raw
+  return 'genel'
+}
+
 export function SettingsGeneralPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabFromUrl = useMemo(() => parseGeneralTab(searchParams.get('tab')), [searchParams])
+
   const [menus, setMenus] = useState<SidebarMenuItem[]>([])
   const [newLabel, setNewLabel] = useState('')
   const [newLink, setNewLink] = useState('')
@@ -65,7 +77,17 @@ export function SettingsGeneralPage() {
 
   const [theme, setTheme] = useState<ThemeSettings>({})
   const [themeSaving, setThemeSaving] = useState(false)
-  const [activeTab, setActiveTab] = useState('genel')
+  const [activeTab, setActiveTab] = useState<GeneralTab>(tabFromUrl)
+
+  useEffect(() => {
+    setActiveTab(tabFromUrl)
+  }, [tabFromUrl])
+
+  const handleTabChange = (v: string) => {
+    const next = parseGeneralTab(v)
+    setActiveTab(next)
+    setSearchParams({ tab: next }, { replace: true })
+  }
 
   const loadTheme = useCallback(async () => {
     const t = await fetchTheme()
@@ -230,7 +252,7 @@ export function SettingsGeneralPage() {
         ) : undefined
       }
     >
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
         <TabsList>
           <TabsTrigger value="genel">Genel</TabsTrigger>
           <TabsTrigger value="sidebar" className="gap-1.5">

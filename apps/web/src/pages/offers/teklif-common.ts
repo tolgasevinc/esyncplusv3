@@ -218,6 +218,16 @@ export const emptyItem = (): OfferItem => ({
   tax_rate: 0,
 })
 
+/** Müşteri seçimi kalkınca sıfırlanır; aksi halde eski unvan PDF’de kalabilir */
+export const emptyOfferCustomerPdfSnapshot = {
+  company_name: '',
+  authorized_name: '',
+  company_phone: '',
+  company_email: '',
+  tax_office: '',
+  tax_no: '',
+} as const
+
 export const emptyForm = {
   date: new Date().toISOString().slice(0, 10),
   order_no: '',

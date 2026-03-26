@@ -24,6 +24,7 @@ import {
   AlignLeft,
   AlignCenter,
   AlignRight,
+  AlignJustify,
   Layout,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -59,8 +60,6 @@ import {
   createDefaultRow,
   createDefaultCell,
   flattenBlocksFromRows,
-  normalizeRowCellWidths,
-  redistributeWidthsAfterCellEdit,
   BLOCK_TYPE_LABELS,
   FONT_FAMILIES,
   PAGE_PRESETS,
@@ -136,7 +135,7 @@ const BLOCK_ICONS: Record<PdfBlockType, typeof Building2> = {
 }
 
 /** Birden fazla eklenebilen blok tipleri */
-const MULTIPLE_BLOCK_TYPES: PdfBlockType[] = ['text', 'qr_code', 'line']
+const MULTIPLE_BLOCK_TYPES: PdfBlockType[] = ['text', 'qr_code', 'line', 'customer']
 
 /** Yazı tipi seçici - her seçenek kendi fontuyla gösterilir */
 function FontSelect({
@@ -206,6 +205,7 @@ function BlockEditDialog({
   const isQrCode = edited.type === 'qr_code'
   const isLine = edited.type === 'line'
   const isOfferHeader = edited.type === 'offer_header'
+  const isCustomer = edited.type === 'customer'
 
   const handleSave = () => {
     onSave(edited)
@@ -274,6 +274,16 @@ function BlockEditDialog({
                   >
                     <AlignRight className="h-4 w-4" />
                   </Button>
+                  <Button
+                    type="button"
+                    variant={edited.textAlign === 'justify' ? 'default' : 'outline'}
+                    size="icon"
+                    className={`h-10 w-10 shrink-0 ${edited.textAlign === 'justify' ? 'ring-2 ring-primary ring-offset-2' : ''}`}
+                    onClick={() => setEdited((b) => (b ? { ...b, textAlign: 'justify' as const } : b))}
+                    title="İki yana yasla"
+                  >
+                    <AlignJustify className="h-4 w-4" />
+                  </Button>
                 </div>
               </div>
             </>
@@ -312,6 +322,16 @@ function BlockEditDialog({
                   title="Sağa yaslı"
                 >
                   <AlignRight className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={edited.textAlign === 'justify' ? 'default' : 'outline'}
+                  size="icon"
+                  className={`h-10 w-10 shrink-0 ${edited.textAlign === 'justify' ? 'ring-2 ring-primary ring-offset-2' : ''}`}
+                  onClick={() => setEdited((b) => (b ? { ...b, textAlign: 'justify' as const } : b))}
+                  title="İki yana yasla"
+                >
+                  <AlignJustify className="h-4 w-4" />
                 </Button>
               </div>
             </div>
@@ -499,6 +519,42 @@ function BlockEditDialog({
             </div>
           </div>
           )}
+          {isCustomer && (
+            <div className="rounded-lg border p-4 space-y-3 bg-muted/20">
+              <div>
+                <Label className="text-sm font-medium">PDF&apos;te gösterilecek bilgiler</Label>
+                <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                  Metinler teklif formundaki müşteri çıktı alanlarından gelir. Yazı tipi, boyut ve hizalama yukarıdaki
+                  ayarlarla belirlenir; burada yalnızca hangi satırların çıkacağını seçin.
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(
+                  [
+                    ['customer_show_title', 'Müşteri / firma unvanı'] as const,
+                    ['customer_show_authorized', 'Yetkili'] as const,
+                    ['customer_show_phone', 'Telefon'] as const,
+                    ['customer_show_email', 'E-posta'] as const,
+                    ['customer_show_tax_office', 'Vergi dairesi'] as const,
+                    ['customer_show_tax_no', 'Vergi no'] as const,
+                  ] as const
+                ).map(([key, label]) => (
+                  <div key={key} className="flex items-center justify-between gap-3 rounded-md border bg-background/80 px-3 py-2">
+                    <Label htmlFor={`cust-${key}`} className="text-xs font-normal cursor-pointer">
+                      {label}
+                    </Label>
+                    <Switch
+                      id={`cust-${key}`}
+                      checked={edited[key] !== false}
+                      onCheckedChange={(v) =>
+                        setEdited((b) => (b ? { ...b, [key]: v } : b))
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex items-center justify-between rounded-lg border p-4">
             <Label>Görünür</Label>
             <Switch
@@ -563,24 +619,6 @@ function BlockEditDialog({
                   value={edited.company_phone ?? ''}
                   onChange={(e) => setEdited((b) => (b ? { ...b, company_phone: e.target.value || undefined } : b))}
                 />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label className="text-xs">Vergi Dairesi</Label>
-                  <Input
-                    placeholder="Vergi dairesi"
-                    value={edited.company_tax_office ?? ''}
-                    onChange={(e) => setEdited((b) => (b ? { ...b, company_tax_office: e.target.value || undefined } : b))}
-                  />
-                </div>
-                <div>
-                  <Label className="text-xs">Vergi No</Label>
-                  <Input
-                    placeholder="Vergi numarası"
-                    value={edited.company_tax_no ?? ''}
-                    onChange={(e) => setEdited((b) => (b ? { ...b, company_tax_no: e.target.value || undefined } : b))}
-                  />
-                </div>
               </div>
             </>
           )}
@@ -695,20 +733,27 @@ export function TeklifCiktiAyarlariPage() {
 
   const addBlockToRow = (rowId: string, type: PdfBlockType) => {
     setConfig((prev) => {
+      const row = prev.rows.find((r) => r.id === rowId)
+      if (!row) return prev
+      const sumOthers = row.cells.reduce((s, c) => s + c.widthPercent, 0)
+      const room = 100 - sumOthers
+      if (room < 1) {
+        toastError(
+          'Satır dolu',
+          'Satır yüzde toplamı 100. Yeni blok için önce bir hücrenin genişliğini azaltın.'
+        )
+        return prev
+      }
+      const nw = Math.min(50, Math.max(1, room))
       const next = {
         ...prev,
         rows: prev.rows.map((r) => {
           if (r.id !== rowId) return r
-          const n = r.cells.length + 1
-          const eq = 100 / n
-          const newCells = [
-            ...r.cells.map((c) => ({ ...c, widthPercent: eq })),
-            createDefaultCell(createDefaultBlock(type), eq, r.cells.length),
+          const merged = [
+            ...r.cells.map((c, i) => ({ ...c, sortOrder: i })),
+            createDefaultCell(createDefaultBlock(type), nw, r.cells.length),
           ]
-          return {
-            ...r,
-            cells: normalizeRowCellWidths(newCells.map((c, i) => ({ ...c, sortOrder: i }))),
-          }
+          return { ...r, cells: merged }
         }),
       }
       saveConfig(next)
@@ -745,7 +790,7 @@ export function TeklifCiktiAyarlariPage() {
             const cells = r.cells
               .filter((c) => c.id !== cellId)
               .map((c, i) => ({ ...c, sortOrder: i }))
-            return { ...r, cells: normalizeRowCellWidths(cells) }
+            return { ...r, cells }
           })
           .filter((r) => r.cells.length > 0)
       )
@@ -776,14 +821,26 @@ export function TeklifCiktiAyarlariPage() {
     })
   }
 
-  const updateCellWidthPercent = (rowId: string, cellId: string, widthPercent: number) => {
+  const updateCellWidthPercent = (rowId: string, cellId: string, raw: number) => {
     setConfig((prev) => {
+      let v = Math.round(Number(raw))
+      if (!Number.isFinite(v)) v = 50
+      v = Math.max(1, Math.min(100, v))
       const next = {
         ...prev,
         rows: prev.rows.map((r) => {
           if (r.id !== rowId) return r
-          const cells = redistributeWidthsAfterCellEdit(r.cells, cellId, widthPercent)
-          return { ...r, cells: cells.map((c, i) => ({ ...c, sortOrder: i })) }
+          const othersSum = r.cells.filter((c) => c.id !== cellId).reduce((s, c) => s + c.widthPercent, 0)
+          const cap = 100 - othersSum
+          if (cap < 1) {
+            toastError('Yüzde kalmadı', 'Önce diğer hücrelerin genişliğini azaltın.')
+            return r
+          }
+          const clamped = Math.min(v, cap)
+          return {
+            ...r,
+            cells: r.cells.map((c) => (c.id === cellId ? { ...c, widthPercent: Math.max(1, clamped) } : c)),
+          }
         }),
       }
       saveConfig(next)
@@ -828,7 +885,7 @@ export function TeklifCiktiAyarlariPage() {
           ;[copy[idx - 1], copy[idx]] = [copy[idx], copy[idx - 1]]
           return {
             ...r,
-            cells: normalizeRowCellWidths(copy.map((c, i) => ({ ...c, sortOrder: i }))),
+            cells: copy.map((c, i) => ({ ...c, sortOrder: i })),
           }
         }),
       }
@@ -850,7 +907,7 @@ export function TeklifCiktiAyarlariPage() {
           ;[copy[idx + 1], copy[idx]] = [copy[idx], copy[idx + 1]]
           return {
             ...r,
-            cells: normalizeRowCellWidths(copy.map((c, i) => ({ ...c, sortOrder: i }))),
+            cells: copy.map((c, i) => ({ ...c, sortOrder: i })),
           }
         }),
       }
@@ -889,7 +946,7 @@ export function TeklifCiktiAyarlariPage() {
   return (
     <PageLayout
       title="Teklif Çıktı Ayarları"
-      description="Satır ekleyin; her satırda yan yana bloklar ve yüzde genişlik kullanın. Satır yüksekliği PDF’de içeriğe göre belirlenir."
+      description="Satır ekleyin; her satırda yan yana bloklar 12 kolon üzerinden (1–12 birim) paylaşılır. Satır yüksekliği PDF’de içeriğe göre belirlenir."
       backTo="/parametreler"
       headerActions={
         <div className="flex items-center gap-2 flex-wrap">
@@ -1126,11 +1183,15 @@ export function TeklifCiktiAyarlariPage() {
                               </div>
                             </div>
                             <div className="flex items-center gap-2 mt-auto">
-                              <Label className="text-[10px] text-muted-foreground whitespace-nowrap">Genişlik %</Label>
+                              <Label className="text-[10px] text-muted-foreground whitespace-nowrap">Genişlik (%)</Label>
                               <NumericInput
-                                value={Math.round(cell.widthPercent * 10000) / 10000}
-                                min={0}
-                                max={100}
+                                value={cell.widthPercent}
+                                min={1}
+                                max={Math.max(
+                                  1,
+                                  100 -
+                                    cells.filter((x) => x.id !== cell.id).reduce((s, x) => s + x.widthPercent, 0)
+                                )}
                                 step={1}
                                 onChange={(v) => updateCellWidthPercent(row.id, cell.id, v)}
                                 className="h-8 flex-1"
@@ -1153,12 +1214,8 @@ export function TeklifCiktiAyarlariPage() {
                       })}
                     </div>
                     <p className="text-[10px] text-muted-foreground mt-1.5 px-0.5">
-                      Satır yüzdeleri toplamı:{' '}
-                      {(() => {
-                        const t = cells.reduce((s, c) => s + c.widthPercent, 0)
-                        const show = Math.abs(t - 100) < 0.02 ? 100 : t
-                        return `${show.toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 4 })}%`
-                      })()}
+                      Satır yüzde toplamı: {cells.reduce((s, c) => s + c.widthPercent, 0)}
+                      /100 — PDF’de satır genişliği bu toplama göre oransal bölünür
                     </p>
                   </CardContent>
                 </Card>

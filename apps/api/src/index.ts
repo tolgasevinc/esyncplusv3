@@ -1213,7 +1213,7 @@ app.get('/api/products/search-by-name', async (c) => {
     const whereClause = `(${nameConditions}) OR (${skuCondition})`;
     const params = [...nameParams, skuParam, limit];
     const { results } = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.barcode, b.name as brand_name
+      `SELECT p.id, p.name, p.sku, p.barcode, p.category_id, b.name as brand_name
        FROM products p
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
        WHERE p.is_deleted = 0 AND (${whereClause})
@@ -1221,7 +1221,7 @@ app.get('/api/products/search-by-name', async (c) => {
        LIMIT ?`
     )
       .bind(...params)
-      .all<{ id: number; name: string; sku: string | null; barcode: string | null; brand_name: string | null }>();
+      .all<{ id: number; name: string; sku: string | null; barcode: string | null; category_id: number | null; brand_name: string | null }>();
     return c.json({ products: results ?? [] });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
@@ -3687,7 +3687,7 @@ type PdfBlockApi = {
   fontWeight?: 'normal' | 'bold';
   fontStyle?: 'normal' | 'italic';
   textDecoration?: 'none' | 'underline';
-  textAlign?: 'left' | 'center' | 'right';
+  textAlign?: 'left' | 'center' | 'right' | 'justify';
   visible: boolean;
   logo_url?: string;
   logo_width?: number;
@@ -3705,6 +3705,12 @@ type PdfBlockApi = {
   lineLength?: number;
   lineThickness?: number;
   lineColor?: string;
+  customer_show_title?: boolean;
+  customer_show_authorized?: boolean;
+  customer_show_phone?: boolean;
+  customer_show_email?: boolean;
+  customer_show_tax_office?: boolean;
+  customer_show_tax_no?: boolean;
 };
 
 /** Google Fonts - teklif çıktısında kullanılabilir yazı tipleri */
@@ -3757,6 +3763,13 @@ async function buildGoogleFontsCss(blocks: PdfBlockApi[], alwaysIncludeDefault =
 
 type BlockCssFlowOpts = { isFirstFlowBlock: boolean };
 
+function pdfBlockTextAlignCss(align: string | undefined): 'left' | 'center' | 'right' | 'justify' {
+  if (align === 'center') return 'center';
+  if (align === 'right') return 'right';
+  if (align === 'justify') return 'justify';
+  return 'left';
+}
+
 function blockCss(
   b: PdfBlockApi,
   isImage = false,
@@ -3789,7 +3802,7 @@ function blockCss(
   const fw = b.fontWeight === 'bold' ? 'bold' : 'normal';
   const fst = b.fontStyle === 'italic' ? 'italic' : 'normal';
   const td = b.textDecoration === 'underline' ? 'underline' : 'none';
-  const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+  const ta = pdfBlockTextAlignCss(b.textAlign);
   /** Teklif PDF: yükseklik alanı = bir üst bloktan sonraki dikey boşluk (margin-top), kutunun min-yüksekliği değil */
   if (flowOpts) {
     const marginTopMm = flowOpts.isFirstFlowBlock ? Math.max(0, y) : h;
@@ -3829,7 +3842,7 @@ function blockCssRowCell(b: PdfBlockApi, showBlockBorders = false): string {
   const fw = b.fontWeight === 'bold' ? 'bold' : 'normal';
   const fst = b.fontStyle === 'italic' ? 'italic' : 'normal';
   const td = b.textDecoration === 'underline' ? 'underline' : 'none';
-  const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+  const ta = pdfBlockTextAlignCss(b.textAlign);
   return `width:100%;box-sizing:border-box;padding:4px;font-size:${fs}px;font-family:${ff};font-weight:${fw};font-style:${fst};text-decoration:${td};text-align:${ta};color:${fc};${borderStyle}`;
 }
 
@@ -3884,7 +3897,7 @@ function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
       fontWeight: (v.fontWeight as 'normal' | 'bold') || 'normal',
       fontStyle: (v.fontStyle as 'normal' | 'italic') || 'normal',
       textDecoration: (v.textDecoration as 'none' | 'underline') || 'none',
-      textAlign: (v.textAlign as 'left' | 'center' | 'right') || 'left',
+      textAlign: (v.textAlign as 'left' | 'center' | 'right' | 'justify') || 'left',
       visible: (v.visible as boolean) !== false,
       logo_url: v.logo_url as string | undefined,
       logo_width: v.logo_width as number | undefined,
@@ -3908,8 +3921,36 @@ function migrateLegacyBlocks(legacy: Record<string, unknown>): PdfBlockApi[] {
   return blocks.sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
+/** Müşteri PDF satırı: false/0/"false" kapalı; undefined/null → açık (eski kayıtlar) */
+function parseCustomerShowFieldApi(v: unknown): boolean {
+  if (v === false || v === 0) return false;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
+  }
+  return true;
+}
+
 function normalizeBlock(b: Record<string, unknown>): PdfBlockApi {
   const type = (b.type as string) || 'text';
+  const customerFlags =
+    type === 'customer'
+      ? {
+          customer_show_title: parseCustomerShowFieldApi(b.customer_show_title),
+          customer_show_authorized: parseCustomerShowFieldApi(b.customer_show_authorized),
+          customer_show_phone: parseCustomerShowFieldApi(b.customer_show_phone),
+          customer_show_email: parseCustomerShowFieldApi(b.customer_show_email),
+          customer_show_tax_office: parseCustomerShowFieldApi(b.customer_show_tax_office),
+          customer_show_tax_no: parseCustomerShowFieldApi(b.customer_show_tax_no),
+        }
+      : {
+          customer_show_title: b.customer_show_title as boolean | undefined,
+          customer_show_authorized: b.customer_show_authorized as boolean | undefined,
+          customer_show_phone: b.customer_show_phone as boolean | undefined,
+          customer_show_email: b.customer_show_email as boolean | undefined,
+          customer_show_tax_office: b.customer_show_tax_office as boolean | undefined,
+          customer_show_tax_no: b.customer_show_tax_no as boolean | undefined,
+        };
   return {
     id: (b.id as string) || `block-${Date.now()}`,
     type,
@@ -3924,7 +3965,7 @@ function normalizeBlock(b: Record<string, unknown>): PdfBlockApi {
     fontWeight: (b.fontWeight as 'normal' | 'bold') || 'normal',
     fontStyle: (b.fontStyle as 'normal' | 'italic') || 'normal',
     textDecoration: (b.textDecoration as 'none' | 'underline') || 'none',
-    textAlign: (b.textAlign as 'left' | 'center' | 'right') || 'left',
+    textAlign: (b.textAlign as 'left' | 'center' | 'right' | 'justify') || 'left',
     visible: (b.visible as boolean) !== false,
     logo_url: b.logo_url as string | undefined,
     logo_width: b.logo_width as number | undefined,
@@ -3942,10 +3983,11 @@ function normalizeBlock(b: Record<string, unknown>): PdfBlockApi {
     lineLength: (b.lineLength as number) || 170,
     lineThickness: (b.lineThickness as number) || 0.5,
     lineColor: (b.lineColor as string) || '#000000',
+    ...customerFlags,
   };
 }
 
-/** Teklif veren firma bloğu — müşteri verisiyle karıştırılmaz; yalnızca layout’taki company alanları */
+/** Teklif veren firma bloğu — müşteri verisiyle karıştırılmaz; vergi dairesi/no PDF’de basılmaz */
 function pdfIssuerCompanyBlockHtml(b: PdfBlockApi, escapeHtml: (s: string) => string): string {
   const logoHtml = b.logo_url
     ? `<img src="${escapeHtml(b.logo_url)}" alt="Logo" style="max-width:${b.logo_width ?? 60}px;max-height:${b.logo_height ?? 40}px;object-fit:contain;display:block;margin-bottom:4px;" />`
@@ -3957,17 +3999,51 @@ function pdfIssuerCompanyBlockHtml(b: PdfBlockApi, escapeHtml: (s: string) => st
   if (addr) lines.push(escapeHtml(addr));
   const phone = (b.company_phone || '').trim();
   if (phone) lines.push(escapeHtml(phone));
-  const vd = (b.company_tax_office || '').trim();
-  if (vd) lines.push(`Vergi Dairesi: ${escapeHtml(vd)}`);
-  const vn = (b.company_tax_no || '').trim();
-  if (vn) lines.push(`Vergi No: ${escapeHtml(vn)}`);
   const inner = lines.join('<br/>');
   return `${logoHtml}${inner ? `<div>${inner}</div>` : ''}`;
+}
+
+/** Müşteri bloğu — teklif kaydı + blokta seçilen alanlar (normalizeBlock sonrası boolean) */
+function pdfCustomerBlockHtml(offer: Record<string, unknown>, b: PdfBlockApi, escapeHtml: (s: string) => string): string {
+  const showTitle = b.customer_show_title !== false;
+  const showAuth = b.customer_show_authorized !== false;
+  const showPhone = b.customer_show_phone !== false;
+  const showEmail = b.customer_show_email !== false;
+  const showTaxOff = b.customer_show_tax_office !== false;
+  const showTaxNo = b.customer_show_tax_no !== false;
+
+  const snapTitle = String(offer.company_name ?? '').trim();
+  const cardTitle = String(offer.customer_title ?? '').trim();
+  const displayTitle = snapTitle || cardTitle;
+  const lines: string[] = [];
+  if (showTitle && displayTitle) lines.push(`<strong>Müşteri:</strong> ${escapeHtml(displayTitle)}`);
+  const auth = String(offer.authorized_name ?? '').trim();
+  if (showAuth && auth) lines.push(`<strong>Yetkili:</strong> ${escapeHtml(auth)}`);
+  const ph = String(offer.company_phone ?? '').trim();
+  if (showPhone && ph) lines.push(`<strong>Tel:</strong> ${escapeHtml(ph)}`);
+  const em = String(offer.company_email ?? '').trim();
+  if (showEmail && em) lines.push(`<strong>E-posta:</strong> ${escapeHtml(em)}`);
+  const vd = String(offer.tax_office ?? '').trim();
+  if (showTaxOff && vd) lines.push(`Vergi Dairesi: ${escapeHtml(vd)}`);
+  const vn = String(offer.tax_no ?? '').trim();
+  if (showTaxNo && vn) lines.push(`Vergi No: ${escapeHtml(vn)}`);
+  const inner = lines.join('<br/>');
+  return inner ? `<div>${inner}</div>` : '';
+}
+
+/** Teklif notları + dahil/hariç: satır aralıkları PDF’de tutarlı olsun diye tek gap düzeni */
+function pdfOfferNotesBundleHtml(notesCategoriesInner: string, dahilHaricInner: string): string {
+  const parts: string[] = [];
+  if (notesCategoriesInner) parts.push(notesCategoriesInner);
+  if (dahilHaricInner) parts.push(dahilHaricInner);
+  if (!parts.length) return '';
+  return `<div class="pdf-offer-notes-bundle">${parts.join('')}</div>`;
 }
 
 type PdfLayoutCellApi = {
   id: string;
   sortOrder: number;
+  /** 1–100; satır toplamı ≤100; PDF’de flex oranı = widthPercent / satır toplamı */
   widthPercent: number;
   block: PdfBlockApi;
 };
@@ -3985,18 +4061,10 @@ type LayoutConfig = {
   pageHeight: number;
 };
 
-function normalizeRowCellWidthsApi(cells: PdfLayoutCellApi[]): PdfLayoutCellApi[] {
+function reindexLayoutCellsApi(cells: PdfLayoutCellApi[]): PdfLayoutCellApi[] {
   if (cells.length === 0) return cells;
   const sorted = [...cells].sort((a, b) => a.sortOrder - b.sortOrder);
-  const sum = sorted.reduce((s, c) => s + Math.max(0, c.widthPercent || 0), 0);
-  if (sum <= 0) {
-    const eq = 100 / sorted.length;
-    return sorted.map((c) => ({ ...c, widthPercent: eq }));
-  }
-  if (Math.abs(sum - 100) > 0.001) {
-    return sorted.map((c) => ({ ...c, widthPercent: (Math.max(0, c.widthPercent || 0) / sum) * 100 }));
-  }
-  return sorted;
+  return sorted.map((c, i) => ({ ...c, sortOrder: i }));
 }
 
 function numOr(c: Record<string, unknown>, key: string, d: number): number {
@@ -4004,24 +4072,95 @@ function numOr(c: Record<string, unknown>, key: string, d: number): number {
   return Number.isFinite(v) ? v : d;
 }
 
-function normalizeLayoutCellApi(c: Record<string, unknown>): PdfLayoutCellApi {
-  const br = (c.block as Record<string, unknown>) || { type: 'text' };
-  return {
-    id: String(c.id || `cell-${Date.now()}`),
-    sortOrder: numOr(c, 'sortOrder', 0),
-    widthPercent: Math.max(0, Number(c.widthPercent) || 0),
-    block: normalizeBlock(br),
-  };
+function clampCellWidthPercentApi(w: number): number {
+  return Math.max(1, Math.min(100, Math.round(Number(w) || 1)));
+}
+
+function redistributePercentsToSum100Api(weights: number[]): number[] {
+  const n = weights.length;
+  if (n === 0) return [];
+  if (n === 1) return [100];
+  const wg = weights.map((x) => Math.max(1e-6, x));
+  const W = wg.reduce((a, b) => a + b, 0);
+  const ideal = wg.map((x) => (x / W) * 100);
+  const ints = ideal.map((x) => Math.max(1, Math.floor(x)));
+  let rem = 100 - ints.reduce((a, b) => a + b, 0);
+  const byFrac = ideal.map((x, i) => ({ i, r: x - Math.floor(x) })).sort((a, b) => b.r - a.r);
+  let t = 0;
+  while (rem > 0 && t < 200) {
+    ints[byFrac[t % n].i]++;
+    rem--;
+    t++;
+  }
+  return ints;
+}
+
+function rowPercentsFromColSpansApi(spans: number[]): number[] {
+  const sumS = spans.reduce((a, b) => a + b, 0) || 1;
+  const raw = spans.map((s) => Math.max(1, Math.round((100 * s) / sumS)));
+  let drift = 100 - raw.reduce((a, b) => a + b, 0);
+  const out = [...raw];
+  out[out.length - 1] = clampCellWidthPercentApi(out[out.length - 1] + drift);
+  return out;
 }
 
 function normalizeLayoutRowApi(r: Record<string, unknown>): PdfLayoutRowApi {
-  const cellsRaw = (r.cells as unknown[]) || [];
-  const cells = cellsRaw.filter(Boolean).map((x) => normalizeLayoutCellApi(x as Record<string, unknown>));
+  const cellsRaw = ((r.cells as unknown[]) || []).filter(Boolean) as Record<string, unknown>[];
+  const sortedRaw = [...cellsRaw].sort((a, b) => numOr(a, 'sortOrder', 0) - numOr(b, 'sortOrder', 0));
+
+  const useColMigrate =
+    sortedRaw.length > 0 &&
+    sortedRaw.every((c) => {
+      const wp = Number(c.widthPercent);
+      if (Number.isFinite(wp) && wp > 0) return false;
+      const cs = Number(c.colSpan);
+      return Number.isFinite(cs) && cs >= 1 && cs <= 12;
+    });
+
+  let cells: PdfLayoutCellApi[];
+  if (useColMigrate) {
+    const spans = sortedRaw.map((c) => {
+      const cs = Number(c.colSpan);
+      return Number.isFinite(cs) && cs >= 1 && cs <= 12 ? cs : 12;
+    });
+    const wps = rowPercentsFromColSpansApi(spans);
+    cells = sortedRaw.map((c, i) => {
+      const br = (c.block as Record<string, unknown>) || { type: 'text' };
+      return {
+        id: String(c.id || `cell-${Date.now()}-${i}`),
+        sortOrder: i,
+        widthPercent: clampCellWidthPercentApi(wps[i] ?? 100),
+        block: normalizeBlock(br),
+      };
+    });
+  } else {
+    const n = sortedRaw.length;
+    cells = sortedRaw.map((c, i) => {
+      const br = (c.block as Record<string, unknown>) || { type: 'text' };
+      const wp = Number(c.widthPercent);
+      const w = Number.isFinite(wp) && wp > 0 ? Math.round(wp) : n === 1 ? 100 : Math.max(1, Math.round(100 / n));
+      return {
+        id: String(c.id || `cell-${Date.now()}-${i}`),
+        sortOrder: i,
+        widthPercent: clampCellWidthPercentApi(w),
+        block: normalizeBlock(br),
+      };
+    });
+    const sumW = cells.reduce((s, c) => s + c.widthPercent, 0);
+    if (sumW > 100) {
+      const next = redistributePercentsToSum100Api(cells.map((c) => c.widthPercent));
+      cells = cells.map((c, i) => ({
+        ...c,
+        widthPercent: clampCellWidthPercentApi(next[i] ?? c.widthPercent),
+      }));
+    }
+  }
+
   return {
     id: String(r.id || `row-${Date.now()}`),
     sortOrder: numOr(r, 'sortOrder', 0),
     marginTopMm: Math.max(0, numOr(r, 'marginTopMm', 0)),
-    cells: normalizeRowCellWidthsApi(cells),
+    cells: reindexLayoutCellsApi(cells),
   };
 }
 
@@ -4047,7 +4186,15 @@ function parseLayoutConfig(raw: string | undefined): LayoutConfig {
   const defaultH = 2970;
   if (!raw?.trim()) return { rows: [], pageWidth: defaultW, pageHeight: defaultH };
   try {
-    const parsed = JSON.parse(raw) as { rows?: unknown[]; blocks?: unknown[]; pageWidth?: unknown; pageHeight?: unknown } | Record<string, unknown>;
+    let parsed: { rows?: unknown[]; blocks?: unknown[]; pageWidth?: unknown; pageHeight?: unknown } | Record<string, unknown> =
+      JSON.parse(raw) as Record<string, unknown>;
+    if (typeof parsed === 'string' && parsed.trim().startsWith('{')) {
+      try {
+        parsed = JSON.parse(parsed) as Record<string, unknown>;
+      } catch {
+        /* tek katman */
+      }
+    }
     const pageWidth = Number(parsed.pageWidth) || defaultW;
     const pageHeight = Number(parsed.pageHeight) || defaultH;
     if (parsed && Array.isArray(parsed.rows)) {
@@ -4058,7 +4205,7 @@ function parseLayoutConfig(raw: string | undefined): LayoutConfig {
         .map((row, ri) => ({
           ...row,
           sortOrder: ri,
-          cells: normalizeRowCellWidthsApi(row.cells.map((c, ci) => ({ ...c, sortOrder: ci }))),
+          cells: reindexLayoutCellsApi(row.cells),
         }));
       return { rows, pageWidth, pageHeight };
     }
@@ -4133,25 +4280,35 @@ app.get('/api/offers/sample/pdf', async (c) => {
             company_name: (b.company_name || '').trim() || 'Örnek Firma A.Ş.',
             company_address: (b.company_address || '').trim() || 'Örnek adres',
             company_phone: (b.company_phone || '').trim() || '0212 000 00 00',
-            company_tax_office: (b.company_tax_office || '').trim() || 'Örnek Vergi Dairesi',
-            company_tax_no: (b.company_tax_no || '').trim() || '1234567890',
           };
           return pdfIssuerCompanyBlockHtml(sampleB, escapeHtml);
         }
         case 'customer':
-          return '<strong>Müşteri:</strong> Örnek Müşteri Ltd.<br/><strong>Yetkili:</strong> Ahmet Yılmaz<br/>Vergi No: 1234567890';
+          return pdfCustomerBlockHtml(
+            {
+              company_name: 'Örnek Müşteri Ltd.',
+              customer_title: '',
+              authorized_name: 'Ahmet Yılmaz',
+              company_phone: '0212 111 22 33',
+              company_email: 'yetkili@ornekmusteri.com',
+              tax_office: 'Örnek Vergi Dairesi',
+              tax_no: '1234567890',
+            },
+            b,
+            escapeHtml
+          );
         case 'offer_header': {
           const d = new Date();
           const dd = String(d.getDate()).padStart(2, '0');
           const mm = String(d.getMonth() + 1).padStart(2, '0');
           const yyyy = d.getFullYear();
-          const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+          const ta = pdfBlockTextAlignCss(b.textAlign);
           return `<div style="text-align:${ta}">Teklif No: xxxxxx<br/>Tarih: ${dd}/${mm}/${yyyy}</div>`;
         }
         case 'offer_items':
           return sampleTable;
         case 'offer_notes':
-          return '<p><strong>Not:</strong> Örnek teklif notu</p>';
+          return '<div class="pdf-offer-notes-bundle"><div class="pdf-offer-notes-categories"><div class="pdf-offer-note-line"><strong>Not:</strong> Örnek teklif notu</div></div></div>';
         case 'footer':
           return b.footer_text
             ? b.footer_text.replace(/\n/g, '<br/>')
@@ -4164,14 +4321,14 @@ app.get('/api/offers/sample/pdf', async (c) => {
     const sortedRows = [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
     for (const row of sortedRows) {
       const cells = [...row.cells].sort((a, b) => a.sortOrder - b.sortOrder);
-      const wp = cells.map((c) => c.widthPercent);
-      const sum = wp.reduce((s, x) => s + x, 0) || 1;
+      const sumW = cells.reduce((s, c) => s + Math.max(0, Number(c.widthPercent) || 0), 0) || 1;
       let rowParts = '';
       let rowAny = false;
       for (const cell of cells) {
         const b = cell.block;
         if (b.visible === false) continue;
-        const pct = (cell.widthPercent / sum) * 100;
+        const w = Math.max(1, Number(cell.widthPercent) || 1);
+        const pct = (w / sumW) * 100;
         const isImageBlock = b.type === 'image';
         const isQrBlock = b.type === 'qr_code';
         const isLineBlock = b.type === 'line';
@@ -4200,7 +4357,14 @@ table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6p
 .pdf-items-sample tbody td:nth-child(1){text-align:left}
 .pdf-items-sample tbody td:nth-child(2){text-align:center}
 .pdf-items-sample tbody td:nth-child(3),.pdf-items-sample tbody td:nth-child(4){text-align:right}
-.pdf-items-sample + p{font:inherit}</style></head><body>
+.pdf-items-sample + p{font:inherit}
+.pdf-offer-notes-bundle{display:flex;flex-direction:column;gap:0.45rem;line-height:1.5}
+.pdf-offer-notes-categories{display:flex;flex-direction:column;gap:0.45rem}
+.pdf-offer-note-line{margin:0;padding:0}
+.pdf-offer-dahil-haric{display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin:0;line-height:1.5}
+.pdf-offer-dahil-haric ul{margin:0.35rem 0 0 1rem;padding:0;list-style:disc}
+.pdf-offer-dahil-haric li{margin:0 0 0.35rem 0}
+.pdf-offer-dahil-haric li:last-child{margin-bottom:0}</style></head><body>
 ${blocksHtml}
 </body></html>`;
     return new Response(html, {
@@ -4321,10 +4485,6 @@ app.get('/api/offers/:id/pdf', async (c) => {
       grossTotalOffer > 1e-9 ? (100 * (lineDiscountTotalOffer + offerDiscountAmount)) / grossTotalOffer : 0;
 
     const sym = (offer.currency_symbol as string) || (offer.currency_code as string) || '₺';
-    const offerCodeUpper = String(offer.currency_code || 'TRY').toUpperCase();
-    const isTryOffer = !offerCurrencyId || offerCodeUpper === 'TRY' || offerCodeUpper === 'TL' || offerCodeUpper === '';
-    const offerExRate =
-      offer.exchange_rate != null && Number(offer.exchange_rate) > 0 ? Number(offer.exchange_rate) : 1;
     const fmt = (n: number) => (n ?? 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const fmtPct = (n: number) =>
       round2(n).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
@@ -4370,7 +4530,10 @@ app.get('/api/offers/:id/pdf', async (c) => {
       `SELECT * FROM offer_note_categories WHERE is_deleted = 0 ORDER BY sort_order`
     ).all();
     const categories = (catRes || []) as { id: number; label: string }[];
-    let notesHtml = '';
+    function escapeHtml(s: string): string {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    const noteLines: string[] = [];
     for (const cat of categories) {
       const sel = noteSelections[cat.id] || noteSelections[String(cat.id)] || [];
       if (sel.length === 0) continue;
@@ -4378,11 +4541,13 @@ app.get('/api/offers/:id/pdf', async (c) => {
         `SELECT label FROM offer_note_options WHERE id IN (${sel.map(() => '?').join(',')}) AND is_deleted = 0`
       ).bind(...sel).all();
       const labels = (optRes || []).map((o: { label: string }) => o.label);
-      if (labels.length) notesHtml += `<p><strong>${escapeHtml(cat.label)}:</strong> ${labels.map(escapeHtml).join(', ')}</p>`;
+      if (labels.length)
+        noteLines.push(
+          `<div class="pdf-offer-note-line"><strong>${escapeHtml(cat.label)}:</strong> ${labels.map(escapeHtml).join(', ')}</div>`
+        );
     }
-    function escapeHtml(s: string): string {
-      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
+    const notesHtml =
+      noteLines.length > 0 ? `<div class="pdf-offer-notes-categories">${noteLines.join('')}</div>` : '';
     const includeTagIds = (() => {
       try {
         const v = offer.include_tag_ids as string | undefined;
@@ -4421,9 +4586,10 @@ app.get('/api/offers/:id/pdf', async (c) => {
           `<li>${escapeHtml(r.label)}${r.description ? ` – ${escapeHtml(r.description)}` : ''}</li>`
         ).join('');
       }
-      dahilHaricHtml = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin:1rem 0">` +
-        `<div><strong>Dahil olanlar:</strong><ul style="margin:0.25rem 0 0 1rem;padding:0">${dahilItems || '<li>—</li>'}</ul></div>` +
-        `<div><strong>Hariç olanlar:</strong><ul style="margin:0.25rem 0 0 1rem;padding:0">${haricItems || '<li>—</li>'}</ul></div>` +
+      dahilHaricHtml =
+        `<div class="pdf-offer-dahil-haric">` +
+        `<div><strong>Dahil olanlar:</strong><ul>${dahilItems || '<li>—</li>'}</ul></div>` +
+        `<div><strong>Hariç olanlar:</strong><ul>${haricItems || '<li>—</li>'}</ul></div>` +
         `</div>`;
     }
     const { results: layoutRes } = await c.env.DB.prepare(
@@ -4466,7 +4632,6 @@ app.get('/api/offers/:id/pdf', async (c) => {
         `<tr><td style="${pdfTotBaseL};${pdfTotBold}">Genel Toplam</td><td style="${pdfTotBaseR};${pdfTotBold}">${fmt(grandTotalR)} ${sym}</td></tr>`
       );
     }
-    const grandTotalTlApprox = round2(isTryOffer ? grandTotal : grandTotal * offerExRate);
     /** Üst tabloda Birim Fiyat + Tutar = %22 + %22 — toplamlar aynı genişlikte, sağa hizalı */
     const pdfTotalsColgroup = `<colgroup><col style="width:55%" /><col style="width:45%" /></colgroup>`;
     const pdfItemsColgroup = `<colgroup><col style="width:40%" /><col style="width:16%" /><col style="width:22%" /><col style="width:22%" /></colgroup>`;
@@ -4474,8 +4639,6 @@ app.get('/api/offers/:id/pdf', async (c) => {
     const buildItemsTableHtml = (offerItemsBlock: PdfBlockApi) => {
       const typo = pdfBlockTypographyCss(offerItemsBlock);
       const pdfTotalsTable = `<div style="width:100%;display:flex;justify-content:flex-end;box-sizing:border-box"><table class="pdf-totals-table" style="width:44%;table-layout:fixed;border-collapse:collapse;margin-top:0.75rem;${typo}">${pdfTotalsColgroup}<tbody>${pdfTotalsRows.join('')}</tbody></table></div>`;
-      const pdfTlLine = `<p style="margin-top:0.5rem;${typo}color:#555;text-align:right">Yaklaşık TL karşılığı: <span style="color:#111">${isTryOffer ? `${fmt(grandTotalR)} ₺` : `≈ ${fmt(grandTotalTlApprox)} ₺`}</span></p>`;
-      const pdfCurrencyNote = `<p style="margin-top:0.35rem;${typo}color:#555;text-align:right">Satır birim fiyat ve tutarlar satır para birimindedir. Özet tutarlar teklif para birimine (${escapeHtml(sym)}) çevrilmiştir.</p>`;
       return `<div class="pdf-offer-tables" style="width:100%;box-sizing:border-box;${typo}">
 <table class="pdf-items-table" style="table-layout:fixed;width:100%;border-collapse:collapse;${typo}">${pdfItemsColgroup}<thead><tr><th>Ürün / Açıklama</th><th>Miktar</th><th>Birim Fiyat</th><th>Tutar</th></tr></thead><tbody>
 ${offerItems.map((it) => {
@@ -4490,10 +4653,7 @@ ${offerItems.map((it) => {
   return `<tr><td>${escapeHtml(name)}</td><td class="text-center">${qtyCell}</td><td class="text-right">${fmt(up)} ${escapeHtml(lineSym)}</td><td class="text-right">${fmt(lineTotal)} ${escapeHtml(lineSym)}</td></tr>`;
 }).join('')}
 </tbody></table>
-${pdfTotalsTable}
-${pdfTlLine}
-${pdfCurrencyNote}
-${offer.project_name ? `<p style="margin-top:1rem;${typo}">Proje: ${escapeHtml(String(offer.project_name))}</p>` : ''}</div>`;
+${pdfTotalsTable}</div>`;
     };
     async function offerCellContent(b: PdfBlockApi): Promise<string> {
       switch (b.type) {
@@ -4523,7 +4683,7 @@ ${offer.project_name ? `<p style="margin-top:1rem;${typo}">Proje: ${escapeHtml(S
         case 'company':
           return pdfIssuerCompanyBlockHtml(b, escapeHtml);
         case 'customer':
-          return `<strong>Müşteri:</strong> ${escapeHtml(String(offer.company_name || offer.customer_title || ''))}<br/>${offer.authorized_name ? `<strong>Yetkili:</strong> ${escapeHtml(String(offer.authorized_name))}<br/>` : ''}${offer.tax_office ? `Vergi D.: ${escapeHtml(String(offer.tax_office))} ` : ''}${offer.tax_no ? escapeHtml(String(offer.tax_no)) : ''}`;
+          return pdfCustomerBlockHtml(offer, b, escapeHtml);
         case 'offer_header': {
           const rawD = String((offer.date as string) || '').slice(0, 10);
           let dateStr = '';
@@ -4531,13 +4691,13 @@ ${offer.project_name ? `<p style="margin-top:1rem;${typo}">Proje: ${escapeHtml(S
             const [y, m, d] = rawD.split('-');
             dateStr = `${d}/${m}/${y}`;
           }
-          const ta = b.textAlign === 'center' ? 'center' : b.textAlign === 'right' ? 'right' : 'left';
+          const ta = pdfBlockTextAlignCss(b.textAlign);
           return `<div style="text-align:${ta}">Teklif No: ${escapeHtml(String(offer.order_no || ''))}<br/>Tarih: ${escapeHtml(dateStr || '')}</div>`;
         }
         case 'offer_items':
           return buildItemsTableHtml(b);
         case 'offer_notes':
-          return (notesHtml ? notesHtml : '') + (dahilHaricHtml ? dahilHaricHtml : '');
+          return pdfOfferNotesBundleHtml(notesHtml, dahilHaricHtml);
         case 'footer':
           return b.footer_text
             ? b.footer_text.replace(/\n/g, '<br/>')
@@ -4552,14 +4712,14 @@ ${offer.project_name ? `<p style="margin-top:1rem;${typo}">Proje: ${escapeHtml(S
     const sortedOfferRows = [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
     for (const row of sortedOfferRows) {
       const cells = [...row.cells].sort((a, b) => a.sortOrder - b.sortOrder);
-      const wp = cells.map((c) => c.widthPercent);
-      const sum = wp.reduce((s, x) => s + x, 0) || 1;
+      const sumW = cells.reduce((s, c) => s + Math.max(0, Number(c.widthPercent) || 0), 0) || 1;
       let rowParts = '';
       let rowAny = false;
       for (const cell of cells) {
         const b = cell.block;
         if (b.visible === false) continue;
-        const pct = (cell.widthPercent / sum) * 100;
+        const w = Math.max(1, Number(cell.widthPercent) || 1);
+        const pct = (w / sumW) * 100;
         const isImageBlock = b.type === 'image';
         const isQrBlock = b.type === 'qr_code';
         const isLineBlock = b.type === 'line';
@@ -4574,7 +4734,8 @@ ${offer.project_name ? `<p style="margin-top:1rem;${typo}">Proje: ${escapeHtml(S
       }
     }
     if (rows.length === 0 || !blocksHtml.trim()) {
-      blocksHtml = `<div style="margin:20mm;font-family:inherit">${notesHtml ? `<div class="notes" style="margin-bottom:1rem">${notesHtml}</div>` : ''}${dahilHaricHtml}${buildItemsTableHtml(DEFAULT_OFFER_ITEMS_PDF_BLOCK)}</div>`;
+      const notesBundle = pdfOfferNotesBundleHtml(notesHtml, dahilHaricHtml);
+      blocksHtml = `<div style="margin:20mm;font-family:inherit">${notesBundle}${buildItemsTableHtml(DEFAULT_OFFER_ITEMS_PDF_BLOCK)}</div>`;
     }
     const googleFontsStyle = await buildGoogleFontsCss(flattenBlocksFromRowsApi(rows), true);
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Teklif ${escapeHtml(String(offer.order_no || ''))}</title>
@@ -4587,7 +4748,14 @@ table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6p
 .pdf-offer-tables .pdf-items-table tbody td:nth-child(2){text-align:center}
 .pdf-offer-tables .pdf-items-table tbody td:nth-child(3),.pdf-offer-tables .pdf-items-table tbody td:nth-child(4){text-align:right}
 .pdf-offer-tables .pdf-totals-table,.pdf-offer-tables .pdf-totals-table td,.pdf-offer-tables .pdf-totals-table th{font:inherit}
-.pdf-offer-tables .pdf-items-table th,.pdf-offer-tables .pdf-items-table td{overflow-wrap:break-word;word-break:break-word}</style></head><body>
+.pdf-offer-tables .pdf-items-table th,.pdf-offer-tables .pdf-items-table td{overflow-wrap:break-word;word-break:break-word}
+.pdf-offer-notes-bundle{display:flex;flex-direction:column;gap:0.45rem;line-height:1.5}
+.pdf-offer-notes-categories{display:flex;flex-direction:column;gap:0.45rem}
+.pdf-offer-note-line{margin:0;padding:0}
+.pdf-offer-dahil-haric{display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin:0;line-height:1.5}
+.pdf-offer-dahil-haric ul{margin:0.35rem 0 0 1rem;padding:0;list-style:disc}
+.pdf-offer-dahil-haric li{margin:0 0 0.35rem 0}
+.pdf-offer-dahil-haric li:last-child{margin-bottom:0}</style></head><body>
 ${coverHtml}
 ${blocksHtml}
 ${attachmentsHtml}
@@ -8254,7 +8422,8 @@ function prepareAttrsForParasutProductCreate(attrs: Record<string, unknown>): Re
 /** Paraşüt ürün attributes içinde yalnızca API'nin kabul ettiği yazılabilir alanlar (supplier_code vb. reddedilir) */
 const PARASUT_PRODUCT_WRITABLE_ATTR_KEYS = new Set([
   'name', 'code', 'list_price', 'currency', 'buying_price', 'buying_currency',
-  'unit', 'vat_rate', 'barcode', 'gtip', 'photo', 'initial_stock_count', 'stock_count',
+  'unit', 'vat_rate', 'barcode', 'gtip', 'photo', 'initial_stock_count',
+  // stock_count: ProductAttributes şemasında read-only; PUT ile göndermek 400 üretir (stok depo/inventory API)
   'inventory_tracking', 'archived',
   'sales_excise_duty', 'sales_excise_duty_type', 'purchase_excise_duty', 'purchase_excise_duty_type',
   'communications_tax_rate',
@@ -8272,14 +8441,127 @@ function pickWritableParasutProductAttributes(attrs: Record<string, unknown>): R
   return out;
 }
 
+/** PUT 400/422 iken sırayla çıkarılacak alanlar (en sık sorun çıkaranlar önce); name hiç çıkarılmaz */
+const PARASUT_PUT_RETRY_STRIP_ORDER: readonly string[] = [
+  'gtip',
+  'barcode',
+  'unit',
+  'photo',
+  'code',
+  'inventory_tracking',
+  'archived',
+  'communications_tax_rate',
+  'sales_excise_duty',
+  'sales_excise_duty_type',
+  'purchase_excise_duty',
+  'purchase_excise_duty_type',
+  'vat_rate',
+  'currency',
+  'list_price',
+  'buying_price',
+  'buying_currency',
+];
+
 function parasutApiErrorMessage(json: unknown, httpStatus: number): string {
-  const j = json as { errors?: Array<{ detail?: string; title?: string; code?: string }> };
+  if (json && typeof json === 'object' && json !== null) {
+    const top = json as { error?: unknown; message?: unknown };
+    if (typeof top.error === 'string' && top.error.trim()) return top.error.trim();
+    if (typeof top.message === 'string' && top.message.trim()) return top.message.trim();
+  }
+  const j = json as { errors?: Array<{ detail?: unknown; title?: string; code?: string }> };
   const errs = j?.errors;
   if (Array.isArray(errs) && errs.length > 0) {
-    const parts = errs.map((e) => (e.detail || e.title || e.code || '').trim()).filter(Boolean);
+    const parts = errs.map((e) => {
+      const d = e.detail;
+      if (typeof d === 'string' && d.trim()) return d.trim();
+      if (d != null && typeof d === 'object') {
+        try {
+          return JSON.stringify(d);
+        } catch {
+          return String(d);
+        }
+      }
+      return (e.title || e.code || '').trim();
+    }).filter(Boolean);
     if (parts.length > 0) return parts.join(' — ');
   }
+  if (json && typeof json === 'object' && json !== null) {
+    try {
+      const s = JSON.stringify(json);
+      if (s && s !== '{}' && s.length < 800) return s;
+    } catch { /* ignore */ }
+  }
   return `HTTP ${httpStatus}`;
+}
+
+/** Paraşüt gtip alanı sayısal formatta; harf/ayraçlı değerler 400 üretebilir */
+function normalizeParasutGtipInAttributes(attrs: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(attrs, 'gtip')) return;
+  const raw = attrs.gtip;
+  const s = raw != null ? String(raw).trim() : '';
+  if (!s) {
+    delete attrs.gtip;
+    return;
+  }
+  const digits = s.replace(/\D/g, '');
+  if (digits.length >= 8 && digits.length <= 14) {
+    attrs.gtip = digits;
+    return;
+  }
+  if (digits.length > 0) {
+    attrs.gtip = digits;
+    return;
+  }
+  delete attrs.gtip;
+}
+
+/** Güncelleme öncesi: Paraşüt'teki kayıt (alış fiyatı vb. PUT'ta zorunlu olabiliyor) */
+async function fetchParasutProductAttributes(
+  base: string,
+  companyId: string,
+  token: string,
+  parasutId: string,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(`${base}/v4/${companyId}/products/${encodeURIComponent(parasutId)}`, {
+    headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+  });
+  if (!res.ok) return null;
+  const j = await res.json().catch(() => ({}));
+  const attrs = (j as { data?: { attributes?: Record<string, unknown> } }).data?.attributes;
+  return attrs && typeof attrs === 'object' ? attrs : null;
+}
+
+/** PUT gövdesine: uzaktaki alış fiyatı / döviz (göndermezsek Paraşüt reddedebilir) */
+function mergeParasutUpdateAttrsWithExistingRemote(
+  updateAttrs: Record<string, unknown>,
+  remote: Record<string, unknown> | null,
+): void {
+  if (!remote) return;
+  const pickRemote = (k: string) => {
+    if (Object.prototype.hasOwnProperty.call(updateAttrs, k)) return;
+    const v = remote[k];
+    if (v === undefined || v === null) return;
+    if (typeof v === 'string' && !v.trim() && k !== 'name' && k !== 'code') return;
+    updateAttrs[k] = v;
+  };
+  pickRemote('buying_price');
+  pickRemote('buying_currency');
+  pickRemote('inventory_tracking');
+}
+
+/** Hâlâ eksikse satış fiyatı / para birimi ile doldur (create ile aynı mantık) */
+function applyParasutUpdateBuyingDefaults(attrs: Record<string, unknown>): void {
+  const listRaw = attrs.list_price;
+  const listNum = typeof listRaw === 'number' && Number.isFinite(listRaw)
+    ? listRaw
+    : parseFloat(String(listRaw ?? '').replace(',', '.'));
+  if (!Object.prototype.hasOwnProperty.call(attrs, 'buying_price') && Number.isFinite(listNum)) {
+    attrs.buying_price = listNum;
+  }
+  const cur = attrs.currency != null ? String(attrs.currency).trim().toUpperCase() : '';
+  if (cur && !Object.prototype.hasOwnProperty.call(attrs, 'buying_currency')) {
+    attrs.buying_currency = cur;
+  }
 }
 
 /** Yeni ürün: Paraşüt çoğu hesapta alış fiyatı / para birimi bekler */
@@ -8509,6 +8791,8 @@ app.post('/api/parasut/products/push', async (c) => {
       if (createAttrs.initial_stock_count === 0 || createAttrs.initial_stock_count === '0') {
         delete createAttrs.initial_stock_count;
       }
+      normalizeParasutGtipInAttributes(createAttrs);
+      const hadInitialStock = Object.prototype.hasOwnProperty.call(createAttrs, 'initial_stock_count');
       const createData: {
         type: string;
         attributes: Record<string, unknown>;
@@ -8533,12 +8817,37 @@ app.post('/api/parasut/products/push', async (c) => {
           };
         }
       }
-      const createRes = await fetch(`${base}/v4/${auth.companyId}/products`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ data: createData }),
-      });
-      const createJson = await createRes.json().catch(() => ({}));
+      const postParasutProduct = async (payload: typeof createData) =>
+        fetch(`${base}/v4/${auth.companyId}/products`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ data: payload }),
+        });
+
+      let createRes = await postParasutProduct(createData);
+      let createJson = await createRes.json().catch(() => ({}));
+      if (!createRes.ok && hadInitialStock && (createRes.status === 400 || createRes.status === 422)) {
+        const attrsNoStock = { ...createAttrs };
+        delete attrsNoStock.initial_stock_count;
+        const createDataRetry: typeof createData = {
+          type: 'products',
+          attributes: attrsNoStock,
+          ...(createData.relationships ? { relationships: createData.relationships } : {}),
+        };
+        createRes = await postParasutProduct(createDataRetry);
+        createJson = await createRes.json().catch(() => ({}));
+        if (createRes.ok) {
+          const newIdRaw = (createJson as { data?: { id?: string | number } }).data?.id;
+          const newId = newIdRaw != null && String(newIdRaw).trim() !== '' ? String(newIdRaw).trim() : '';
+          return c.json({
+            ok: true,
+            message:
+              'Paraşüt\'te yeni ürün oluşturuldu. Başlangıç stok alanı gönderilemedi (ör. çoklu depo); stoku Paraşüt üzerinden güncelleyebilirsiniz.',
+            parasut_id: newId || undefined,
+            stock_omitted: true,
+          });
+        }
+      }
       if (!createRes.ok) {
         return c.json({ error: `Paraşüt: ${parasutApiErrorMessage(createJson, createRes.status)}` }, 400);
       }
@@ -8552,35 +8861,75 @@ app.post('/api/parasut/products/push', async (c) => {
     }
 
     const parasutId = parasutIdRaw;
-    if (
-      Object.prototype.hasOwnProperty.call(attrs, 'initial_stock_count') &&
-      !Object.prototype.hasOwnProperty.call(attrs, 'stock_count')
-    ) {
-      const raw = attrs.initial_stock_count;
-      const n = typeof raw === 'number' ? raw : parseFloat(String(raw).replace(',', '.'));
-      attrs.stock_count = Number.isFinite(n) ? Math.round(n) : 0;
-      delete attrs.initial_stock_count;
-    }
+    // Ürün PUT: stock_count şemada read-only; miktar eşlemesi buraya düşerse Paraşüt 400 döner.
+    // Stok güncellemesi inventory_levels / depo API ile yapılmalı.
+    delete attrs.stock_count;
+    delete attrs.initial_stock_count;
 
     const updateAttrs = pickWritableParasutProductAttributes(attrs);
+    normalizeParasutGtipInAttributes(updateAttrs);
     stripOversizedParasutPhoto(updateAttrs);
 
-    const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({
-        data: {
-          id: parasutId,
-          type: 'products',
-          attributes: updateAttrs,
-        },
-      }),
-    });
-    const updateJson = await updateRes.json().catch(() => ({}));
-    if (!updateRes.ok) {
-      return c.json({ error: `Paraşüt: ${parasutApiErrorMessage(updateJson, updateRes.status)}` }, 400);
+    const remoteAttrs = await fetchParasutProductAttributes(base, String(auth.companyId), auth.token, parasutId);
+    mergeParasutUpdateAttrsWithExistingRemote(updateAttrs, remoteAttrs);
+    applyParasutUpdateBuyingDefaults(updateAttrs);
+    const updateAttrsFinal = pickWritableParasutProductAttributes(updateAttrs);
+
+    const putParasutProduct = (attributes: Record<string, unknown>) =>
+      fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          data: {
+            id: parasutId,
+            type: 'products',
+            attributes,
+          },
+        }),
+      });
+
+    let attrsToSend: Record<string, unknown> = { ...updateAttrsFinal };
+    const parasutFieldsOmitted: string[] = [];
+    let lastUpdateJson: unknown = {};
+    let lastUpdateStatus = 400;
+
+    for (let attempt = 0; attempt <= PARASUT_PUT_RETRY_STRIP_ORDER.length + 1; attempt += 1) {
+      const updateRes = await putParasutProduct(attrsToSend);
+      const updateJson = await updateRes.json().catch(() => ({}));
+      lastUpdateJson = updateJson;
+      lastUpdateStatus = updateRes.status;
+      if (updateRes.ok) {
+        const msg =
+          parasutFieldsOmitted.length > 0
+            ? `Paraşüt'e gönderildi. Paraşüt reddettiği için çıkarılan alanlar: ${parasutFieldsOmitted.join(', ')}. Bu alanları Paraşüt üzerinden kontrol edin.`
+            : 'Paraşüt\'e gönderildi';
+        return c.json({
+          ok: true,
+          message: msg,
+          ...(parasutFieldsOmitted.length > 0 ? { parasut_fields_omitted: parasutFieldsOmitted } : {}),
+        });
+      }
+      if (updateRes.status !== 400 && updateRes.status !== 422) {
+        break;
+      }
+      const nextKey = PARASUT_PUT_RETRY_STRIP_ORDER.find((k) =>
+        Object.prototype.hasOwnProperty.call(attrsToSend, k),
+      );
+      if (!nextKey) break;
+      const next = { ...attrsToSend };
+      delete next[nextKey];
+      attrsToSend = next;
+      parasutFieldsOmitted.push(nextKey);
+      const remaining = Object.keys(attrsToSend).filter((k) => attrsToSend[k] !== undefined);
+      if (remaining.length === 0 || (remaining.length === 1 && remaining[0] === 'name')) {
+        break;
+      }
     }
-    return c.json({ ok: true, message: 'Paraşüt\'e gönderildi' });
+
+    return c.json(
+      { error: `Paraşüt: ${parasutApiErrorMessage(lastUpdateJson, lastUpdateStatus)}` },
+      400,
+    );
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Gönderme hatası' }, 500);
   }
@@ -8625,25 +8974,34 @@ app.put('/api/parasut/products/:id', async (c) => {
     if (body?.buying_currency != null) attrs.buying_currency = String(body.buying_currency).trim().toUpperCase();
     if (body?.unit != null) attrs.unit = String(body.unit).trim();
     if (body?.vat_rate != null) attrs.vat_rate = typeof body.vat_rate === 'number' ? body.vat_rate : parseFloat(String(body.vat_rate)) ?? 0;
-    if (body?.stock_count != null) attrs.stock_count = typeof body.stock_count === 'number' ? body.stock_count : parseInt(String(body.stock_count), 10) ?? 0;
+    // stock_count Paraşüt ürün PUT'unda read-only; gönderilmez
     if (body?.gtip != null) attrs.gtip = String(body.gtip).trim();
     if (body?.photo != null) attrs.photo = String(body.photo).trim();
     if (typeof body?.archived === 'boolean') attrs.archived = body.archived;
     if (typeof body?.inventory_tracking === 'boolean') attrs.inventory_tracking = body.inventory_tracking;
 
+    let attrOut = pickWritableParasutProductAttributes(attrs);
+    normalizeParasutGtipInAttributes(attrOut);
+    stripOversizedParasutPhoto(attrOut);
+
+    const base = 'https://api.parasut.com';
+    const remoteAttrs = await fetchParasutProductAttributes(base, String(auth.companyId), auth.token, parasutId);
+    mergeParasutUpdateAttrsWithExistingRemote(attrOut, remoteAttrs);
+    applyParasutUpdateBuyingDefaults(attrOut);
+    attrOut = pickWritableParasutProductAttributes(attrOut);
+
     const payload: { id: string; type: string; attributes: Record<string, unknown>; relationships?: Record<string, unknown> } = {
       id: parasutId,
       type: 'products',
-      attributes: attrs,
+      attributes: attrOut,
     };
     const parasutCategoryId = body?.category_id != null && String(body.category_id).trim() ? String(body.category_id).trim() : undefined;
     if (parasutCategoryId) {
       payload.relationships = { category: { data: { type: 'item_categories', id: parasutCategoryId } } };
     }
 
-    if (Object.keys(attrs).length === 0 && !parasutCategoryId) return c.json({ error: 'Güncellenecek alan bulunamadı' }, 400);
+    if (Object.keys(attrOut).length === 0 && !parasutCategoryId) return c.json({ error: 'Güncellenecek alan bulunamadı' }, 400);
 
-    const base = 'https://api.parasut.com';
     const updateRes = await fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
       method: 'PUT',
       headers: { 'Authorization': `Bearer ${auth.token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },

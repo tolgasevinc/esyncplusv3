@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Download,
   Upload,
@@ -72,8 +73,24 @@ function saveConfigs(configs: TransferConfig[]) {
 }
 
 export function VeriAktarimPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabFromUrl = useMemo(() => {
+    const t = searchParams.get('tab')
+    return t === 'import' || t === 'export' ? t : 'export'
+  }, [searchParams])
+
   const [configs, setConfigs] = useState<TransferConfig[]>(loadConfigs)
-  const [activeTab, setActiveTab] = useState<'export' | 'import'>('export')
+  const [activeTab, setActiveTab] = useState<'export' | 'import'>(tabFromUrl)
+
+  useEffect(() => {
+    setActiveTab(tabFromUrl)
+  }, [tabFromUrl])
+
+  const handleTransferTabChange = (v: string) => {
+    const next = v === 'import' ? 'import' : 'export'
+    setActiveTab(next)
+    setSearchParams({ tab: next }, { replace: true })
+  }
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<Partial<TransferConfig>>({
@@ -241,8 +258,9 @@ export function VeriAktarimPage() {
     <PageLayout
       title="Veri Aktarım"
       description="Dışa ve içe aktarım ayarlarını yönetin"
+      backTo="/ayarlar"
     >
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'export' | 'import')}>
+      <Tabs value={activeTab} onValueChange={handleTransferTabChange}>
         <TabsList className="grid w-full max-w-md grid-cols-2">
           <TabsTrigger value="export" className="flex items-center gap-2">
             <Download className="h-4 w-4" />

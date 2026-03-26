@@ -99,7 +99,7 @@ export function YasalTiplerPage() {
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
       closeModal()
       fetchData()
-      toastSuccess('Yasal tip güncellendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess('Fatura modeli güncellendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -111,8 +111,8 @@ export function YasalTiplerPage() {
 
   return (
     <PageLayout
-      title="Yasal Tipler"
-      description="E-fatura yasal tipleri (TEMELFATURA, TICARIFATURA, IHRACAT, EARSIV)"
+      title="Fatura Modelleri"
+      description="E-fatura yasal / fatura modeli tipleri (TEMELFATURA, TICARIFATURA, IHRACAT, EARSIV)"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -158,7 +158,7 @@ export function YasalTiplerPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="text-left p-3 font-medium">Yasal Tip</th>
+                  <th className="text-left p-3 font-medium">Model</th>
                   <th className="text-left p-3 font-medium">Açıklama</th>
                 </tr>
               </thead>
@@ -188,7 +188,7 @@ export function YasalTiplerPage() {
       <Dialog open={modalOpen} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Yasal Tip Düzenle</DialogTitle>
+            <DialogTitle>Fatura modeli düzenle</DialogTitle>
             <DialogDescription>Açıklama ve sıralamayı güncelleyebilirsiniz.</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, Link } from 'react-router-dom'
 import { Search, Plus, Trash2, SquarePen, Save, ArrowDownToLine, ChevronDown, ChevronUp, Copy, FileDown, Check, X, Share2, Mail, MessageCircle, RefreshCw } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -54,7 +54,13 @@ import {
   filterCustomersByWords,
   offerFieldsFromCustomerRecord,
   customerSearchRowToOfferRecord,
+  emptyOfferCustomerPdfSnapshot,
 } from './teklif-common'
+import {
+  fetchTeklifCiktiAyarlari,
+  customerPdfOutputFlagsFromLayout,
+  defaultCustomerPdfOutputFlags,
+} from '@/lib/teklif-cikti-ayarlari-settings'
 
 type RowDetailPanels = { discount: boolean; description: boolean; tax: boolean }
 const emptyRowPanels = (): RowDetailPanels => ({ discount: false, description: false, tax: false })
@@ -95,6 +101,7 @@ export function TeklifFormPage() {
   const [newContactModalOpen, setNewContactModalOpen] = useState(false)
   const [newContactForm, setNewContactForm] = useState({ full_name: '', phone: '', role: '' })
   const [newContactSaving, setNewContactSaving] = useState(false)
+  const [customerPdfFlags, setCustomerPdfFlags] = useState(() => defaultCustomerPdfOutputFlags())
   const [activeProductSearchRow, setActiveProductSearchRow] = useState<number | null>(null)
   const [addRowFormOpen, setAddRowFormOpen] = useState(false)
   const [addRowPanels, setAddRowPanels] = useState<RowDetailPanels>(() => emptyRowPanels())
@@ -641,6 +648,20 @@ export function TeklifFormPage() {
   useEffect(() => {
     if (newCustomerModalOpen) fetchCustomerLookups()
   }, [newCustomerModalOpen, fetchCustomerLookups])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchTeklifCiktiAyarlari()
+      .then((cfg) => {
+        if (!cancelled) setCustomerPdfFlags(customerPdfOutputFlagsFromLayout(cfg.rows))
+      })
+      .catch(() => {
+        if (!cancelled) setCustomerPdfFlags(defaultCustomerPdfOutputFlags())
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (form.contact_id && contacts.length > 0) {
@@ -1354,7 +1375,12 @@ export function TeklifFormPage() {
                               value={customerInput}
                               onChange={(e) => {
                                 setCustomerInput(e.target.value)
-                                setForm((f) => ({ ...f, customer_id: '', contact_id: '' }))
+                                setForm((f) => ({
+                                  ...f,
+                                  customer_id: '',
+                                  contact_id: '',
+                                  ...emptyOfferCustomerPdfSnapshot,
+                                }))
                                 fetchCustomerSearch(e.target.value)
                               }}
                               onFocus={() => customerInput && fetchCustomerSearch(customerInput)}
@@ -1417,7 +1443,21 @@ export function TeklifFormPage() {
                           ))}
                         </PopoverContent>
                       </Popover>
-                      <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => { setForm((f) => ({ ...f, customer_id: '', contact_id: '' })); setCustomerInput('') }}>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => {
+                          setForm((f) => ({
+                            ...f,
+                            customer_id: '',
+                            contact_id: '',
+                            ...emptyOfferCustomerPdfSnapshot,
+                          }))
+                          setCustomerInput('')
+                        }}
+                      >
                         İsimsiz
                       </Button>
                     </div>
@@ -1436,36 +1476,38 @@ export function TeklifFormPage() {
                   )}
                 </div>
                 </div>
-                <div className="flex-1 min-w-0 space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Yetkili (teklif çıktısı)</Label>
-                  <Input
-                    value={form.authorized_name || ''}
-                    onChange={(e) => setForm((f) => ({ ...f, authorized_name: e.target.value }))}
-                    placeholder="Kayıtlı yetkili seçebilir veya metin girebilirsiniz"
-                    className="h-9 w-full"
-                  />
-                  {form.customer_id && contacts.length > 0 ? (
-                    <div className="space-y-1 pt-0.5">
-                      <Label className="text-[10px] text-muted-foreground">Kayıtlı yetkili (müşteri kartı)</Label>
-                      <select
-                        className="flex h-9 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
-                        value={form.contact_id === '' ? '' : String(form.contact_id)}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          void syncOfferFieldsFromCustomerCard(v === '' ? '' : parseInt(v, 10), { silent: true })
-                        }}
-                      >
-                        <option value="">— Seçili değil —</option>
-                        {contacts.map((ct) => (
-                          <option key={ct.id} value={ct.id}>
-                            {ct.full_name}
-                            {ct.role ? ` (${ct.role})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ) : null}
-                </div>
+                {customerPdfFlags.showAuthorized ? (
+                  <div className="flex-1 min-w-0 space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Yetkili (teklif çıktısı)</Label>
+                    <Input
+                      value={form.authorized_name || ''}
+                      onChange={(e) => setForm((f) => ({ ...f, authorized_name: e.target.value }))}
+                      placeholder="Kayıtlı yetkili seçebilir veya metin girebilirsiniz"
+                      className="h-9 w-full"
+                    />
+                    {form.customer_id && contacts.length > 0 ? (
+                      <div className="space-y-1 pt-0.5">
+                        <Label className="text-[10px] text-muted-foreground">Kayıtlı yetkili (müşteri kartı)</Label>
+                        <select
+                          className="flex h-9 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
+                          value={form.contact_id === '' ? '' : String(form.contact_id)}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            void syncOfferFieldsFromCustomerCard(v === '' ? '' : parseInt(v, 10), { silent: true })
+                          }}
+                        >
+                          <option value="">— Seçili değil —</option>
+                          {contacts.map((ct) => (
+                            <option key={ct.id} value={ct.id}>
+                              {ct.full_name}
+                              {ct.role ? ` (${ct.role})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -1481,8 +1523,14 @@ export function TeklifFormPage() {
                 <div className="border rounded-lg p-4 mt-2 space-y-4 bg-muted/10">
                   <div className="rounded-md border border-dashed bg-background/60 p-3 space-y-2">
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      Aşağıdaki alanlar kayıtlı müşteriden gelir; yalnızca <strong>bu teklifin PDF çıktısı</strong> için
-                      değiştirebilirsiniz. Müşteri kartındaki kayıt güncellenmez.
+                      Bu alanlar PDF’teki <strong>«Müşteri (teklifteki firma)»</strong> bloğuna gider. Hangi satırların
+                      basılacağı{' '}
+                      <Link to="/parametreler/teklif-cikti-ayarlari" className="underline underline-offset-2 text-foreground">
+                        Teklif Çıktı Ayarları
+                      </Link>
+                      ’ndaki müşteri bloğu anahtarlarıyla aynıdır; burada yalnızca açık olanlar gösterilir. Çıktı
+                      düzenindeki <strong>Teklif veren firma</strong> bloğu sizin şirketinizdir. Veriler karttan
+                      doldurulur; yalnızca bu teklif için düzenleyebilirsiniz (kart güncellenmez).
                     </p>
                     <Button
                       type="button"
@@ -1497,26 +1545,36 @@ export function TeklifFormPage() {
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label className="text-xs">Müşteri / firma adı (çıktı)</Label>
-                      <Input value={form.company_name || ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} placeholder="Müşteri adı" className="h-9" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs">Telefon (çıktı)</Label>
-                      <Input value={form.company_phone || ''} onChange={(e) => setForm((f) => ({ ...f, company_phone: e.target.value }))} placeholder="Telefon" className="h-9" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs">E-posta (çıktı)</Label>
-                      <Input type="email" value={form.company_email || ''} onChange={(e) => setForm((f) => ({ ...f, company_email: e.target.value }))} placeholder="E-posta" className="h-9" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs">Vergi dairesi (çıktı)</Label>
-                      <Input value={form.tax_office || ''} onChange={(e) => setForm((f) => ({ ...f, tax_office: e.target.value }))} placeholder="Vergi dairesi" className="h-9" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs">Vergi no (çıktı)</Label>
-                      <Input value={form.tax_no || ''} onChange={(e) => setForm((f) => ({ ...f, tax_no: e.target.value }))} placeholder="Vergi no" className="h-9" />
-                    </div>
+                    {customerPdfFlags.showTitle ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs">Müşteri / firma adı (çıktı)</Label>
+                        <Input value={form.company_name || ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} placeholder="Müşteri adı" className="h-9" />
+                      </div>
+                    ) : null}
+                    {customerPdfFlags.showPhone ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs">Telefon (çıktı)</Label>
+                        <Input value={form.company_phone || ''} onChange={(e) => setForm((f) => ({ ...f, company_phone: e.target.value }))} placeholder="Telefon" className="h-9" />
+                      </div>
+                    ) : null}
+                    {customerPdfFlags.showEmail ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs">E-posta (çıktı)</Label>
+                        <Input type="email" value={form.company_email || ''} onChange={(e) => setForm((f) => ({ ...f, company_email: e.target.value }))} placeholder="E-posta" className="h-9" />
+                      </div>
+                    ) : null}
+                    {customerPdfFlags.showTaxOffice ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs">Vergi dairesi (çıktı)</Label>
+                        <Input value={form.tax_office || ''} onChange={(e) => setForm((f) => ({ ...f, tax_office: e.target.value }))} placeholder="Vergi dairesi" className="h-9" />
+                      </div>
+                    ) : null}
+                    {customerPdfFlags.showTaxNo ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs">Vergi no (çıktı)</Label>
+                        <Input value={form.tax_no || ''} onChange={(e) => setForm((f) => ({ ...f, tax_no: e.target.value }))} placeholder="Vergi no" className="h-9" />
+                      </div>
+                    ) : null}
                     <div className="space-y-2 md:col-span-2">
                       <Label className="text-xs">Proje Adı</Label>
                       <Input value={form.project_name || ''} onChange={(e) => setForm((f) => ({ ...f, project_name: e.target.value }))} placeholder="Tanımsız Proje" className="h-9" />

@@ -25,7 +25,7 @@ export type PdfBlock = {
   fontWeight?: 'normal' | 'bold'
   fontStyle?: 'normal' | 'italic'
   textDecoration?: 'none' | 'underline'
-  textAlign?: 'left' | 'center' | 'right'
+  textAlign?: 'left' | 'center' | 'right' | 'justify'
   visible: boolean
   /** @deprecated Eski düz blok listesi */
   sortOrder?: number
@@ -39,8 +39,8 @@ export type PdfBlock = {
   company_name?: string
   company_address?: string
   company_phone?: string
+  /** Eski kayıtlarda kalabilir; teklif PDF’inde basılmaz */
   company_tax_office?: string
-  /** Teklif düzenleyen firma — vergi numarası */
   company_tax_no?: string
   footer_text?: string
   image_key?: string
@@ -50,13 +50,20 @@ export type PdfBlock = {
   lineLength?: number
   lineThickness?: number
   lineColor?: string
+  /** Müşteri bloğu: PDF’te gösterilsin mi (false = gizle). Tanımsız = göster. */
+  customer_show_title?: boolean
+  customer_show_authorized?: boolean
+  customer_show_phone?: boolean
+  customer_show_email?: boolean
+  customer_show_tax_office?: boolean
+  customer_show_tax_no?: boolean
 }
 
-/** Satır içi hücre: yüzde genişlik + blok */
+/** Satır içi hücre: genişlik yüzdesi (1–100); satır toplamı en fazla 100 */
 export type PdfLayoutCell = {
   id: string
   sortOrder: number
-  /** Satır içinde yüzde (satırdaki hücrelerin toplamı 100 olacak şekilde normalize edilir) */
+  /** 1–100; diğer hücreleri değiştirmeden düzenlenir, satır toplamı 100’ü aşamaz */
   widthPercent: number
   block: PdfBlock
 }
@@ -90,7 +97,7 @@ export type TeklifCiktiLayoutConfig = {
 /** Blok tipi etiketleri */
 export const BLOCK_TYPE_LABELS: Record<PdfBlockType, string> = {
   company: 'Teklif veren firma',
-  customer: 'Müşteri Bilgileri',
+  customer: 'Müşteri (teklifteki firma)',
   offer_header: 'Teklif Üst Bilgileri',
   offer_items: 'Teklif Satırları',
   offer_notes: 'Teklif Notları',
@@ -208,94 +215,112 @@ function newId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
-/** Hücre genişliklerini 100'e normalize et */
-export function normalizeRowCellWidths(cells: PdfLayoutCell[]): PdfLayoutCell[] {
-  if (cells.length === 0) return cells
-  const sorted = [...cells].sort((a, b) => a.sortOrder - b.sortOrder)
-  const sum = sorted.reduce((s, c) => s + Math.max(0, c.widthPercent || 0), 0)
-  if (sum <= 0) {
-    const eq = 100 / sorted.length
-    return sorted.map((c) => ({ ...c, widthPercent: eq }))
+/** PDF müşteri satırı gösterilsin mi; false/0/"false" kapalı, aksi (undefined dahil) açık */
+export function parseCustomerShowField(v: unknown): boolean {
+  if (v === false || v === 0) return false
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase()
+    if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false
   }
-  if (Math.abs(sum - 100) > 0.001) {
-    return sorted.map((c) => ({ ...c, widthPercent: (Math.max(0, c.widthPercent || 0) / sum) * 100 }))
-  }
-  return sorted
+  return true
 }
 
-/**
- * Bir hücrenin yüzdesini kullanıcı değerine ayarlar; kalan %100 payı diğer hücreler
- * önceki genişlik oranlarına göre paylaşır (düzenlenen hücrenin girdiği değer korunur).
- */
-export function redistributeWidthsAfterCellEdit(
-  cells: PdfLayoutCell[],
-  editedCellId: string,
-  newPercentForEdited: number
-): PdfLayoutCell[] {
-  const round4 = (x: number) => Math.round(x * 10000) / 10000
-  if (cells.length === 0) return cells
-  const sorted = [...cells].sort((a, b) => a.sortOrder - b.sortOrder)
-  if (sorted.length === 1) {
-    return [{ ...sorted[0], widthPercent: 100, sortOrder: 0 }]
+function normalizeCustomerBlockShowFlags(block: PdfBlock): PdfBlock {
+  if (block.type !== 'customer') return block
+  return {
+    ...block,
+    customer_show_title: parseCustomerShowField(block.customer_show_title),
+    customer_show_authorized: parseCustomerShowField(block.customer_show_authorized),
+    customer_show_phone: parseCustomerShowField(block.customer_show_phone),
+    customer_show_email: parseCustomerShowField(block.customer_show_email),
+    customer_show_tax_office: parseCustomerShowField(block.customer_show_tax_office),
+    customer_show_tax_no: parseCustomerShowField(block.customer_show_tax_no),
   }
+}
 
-  const p = round4(Math.max(0, Math.min(100, newPercentForEdited)))
-  const others = sorted.filter((c) => c.id !== editedCellId)
-  const rem = round4(100 - p)
-
-  if (rem <= 0) {
-    return sorted.map((c, i) => ({
-      ...c,
-      sortOrder: i,
-      widthPercent: c.id === editedCellId ? 100 : 0,
-    }))
+/** Kayıtta customer_show_* her zaman açık boolean olsun (false değerleri JSON'dan düşmesin) */
+export function ensureCustomerPdfShowFlagsInLayout(config: TeklifCiktiLayoutConfig): TeklifCiktiLayoutConfig {
+  return {
+    ...config,
+    rows: config.rows.map((row) => ({
+      ...row,
+      cells: row.cells.map((cell) => ({
+        ...cell,
+        block: normalizeCustomerBlockShowFlags(cell.block),
+      })),
+    })),
   }
+}
 
-  if (others.length === 1) {
-    return sorted.map((c, i) => ({
-      ...c,
-      sortOrder: i,
-      widthPercent: c.id === editedCellId ? p : rem,
-    }))
+function numOrRaw(c: Record<string, unknown>, key: string, d: number): number {
+  const v = Number(c[key])
+  return Number.isFinite(v) ? v : d
+}
+
+export function clampCellWidthPercent(w: number): number {
+  return Math.max(1, Math.min(100, Math.round(Number(w) || 1)))
+}
+
+/** Ağırlıklara göre 1–100 tam yüzdeler, toplamı tam 100 (sadece bozuk / >100 kayıtlar için) */
+function redistributePercentsToSum100(weights: number[]): number[] {
+  const n = weights.length
+  if (n === 0) return []
+  if (n === 1) return [100]
+  const w = weights.map((x) => Math.max(1e-6, x))
+  const W = w.reduce((a, b) => a + b, 0)
+  const ideal = w.map((x) => (x / W) * 100)
+  const ints = ideal.map((x) => Math.max(1, Math.floor(x)))
+  let rem = 100 - ints.reduce((a, b) => a + b, 0)
+  const byFrac = ideal.map((x, i) => ({ i, r: x - Math.floor(x) })).sort((a, b) => b.r - a.r)
+  let t = 0
+  while (rem > 0 && t < 200) {
+    ints[byFrac[t % n].i]++
+    rem--
+    t++
   }
+  return ints
+}
 
-  const sumOthers = others.reduce((s, c) => s + Math.max(0, c.widthPercent || 0), 0)
-  const widths = new Map<string, number>()
-  widths.set(editedCellId, p)
-
-  let sumMid = 0
-  for (let i = 0; i < others.length - 1; i++) {
-    const c = others[i]
-    const raw =
-      sumOthers <= 1e-9
-        ? rem / others.length
-        : (rem * Math.max(0, c.widthPercent || 0)) / sumOthers
-    const nw = round4(raw)
-    widths.set(c.id, nw)
-    sumMid = round4(sumMid + nw)
-  }
-  const last = others[others.length - 1]
-  widths.set(last.id, Math.max(0, round4(100 - p - sumMid)))
-
-  return sorted.map((c, i) => ({
-    ...c,
-    sortOrder: i,
-    widthPercent: widths.get(c.id) ?? 0,
-  }))
+function rowPercentsFromColSpans(spans: number[]): number[] {
+  const sumS = spans.reduce((a, b) => a + b, 0) || 1
+  const raw = spans.map((s) => Math.max(1, Math.round((100 * s) / sumS)))
+  let drift = 100 - raw.reduce((a, b) => a + b, 0)
+  const out = [...raw]
+  out[out.length - 1] = clampCellWidthPercent(out[out.length - 1] + drift)
+  return out
 }
 
 function normalizeBlock(b: Record<string, unknown>): PdfBlock {
   const type = (b.type as string) || 'text'
+  const t = type as PdfBlockType
+  const customerFlags =
+    t === 'customer'
+      ? {
+          customer_show_title: parseCustomerShowField(b.customer_show_title),
+          customer_show_authorized: parseCustomerShowField(b.customer_show_authorized),
+          customer_show_phone: parseCustomerShowField(b.customer_show_phone),
+          customer_show_email: parseCustomerShowField(b.customer_show_email),
+          customer_show_tax_office: parseCustomerShowField(b.customer_show_tax_office),
+          customer_show_tax_no: parseCustomerShowField(b.customer_show_tax_no),
+        }
+      : {
+          customer_show_title: b.customer_show_title as boolean | undefined,
+          customer_show_authorized: b.customer_show_authorized as boolean | undefined,
+          customer_show_phone: b.customer_show_phone as boolean | undefined,
+          customer_show_email: b.customer_show_email as boolean | undefined,
+          customer_show_tax_office: b.customer_show_tax_office as boolean | undefined,
+          customer_show_tax_no: b.customer_show_tax_no as boolean | undefined,
+        }
   return {
     id: (b.id as string) || newId('block'),
-    type: type as PdfBlockType,
+    type: t,
     fontSize: (b.fontSize as number) ?? 11,
     fontFamily: (b.fontFamily as string) || 'Roboto',
     fontColor: (b.fontColor as string) || '#000000',
     fontWeight: (b.fontWeight as 'normal' | 'bold') || 'normal',
     fontStyle: (b.fontStyle as 'normal' | 'italic') || 'normal',
     textDecoration: (b.textDecoration as 'none' | 'underline') || 'none',
-    textAlign: (b.textAlign as 'left' | 'center' | 'right') || 'left',
+    textAlign: (b.textAlign as 'left' | 'center' | 'right' | 'justify') || 'left',
     visible: (b.visible as boolean) !== false,
     sortOrder: b.sortOrder as number | undefined,
     x: b.x as number | undefined,
@@ -318,27 +343,64 @@ function normalizeBlock(b: Record<string, unknown>): PdfBlock {
     lineLength: (b.lineLength as number) ?? 170,
     lineThickness: (b.lineThickness as number) ?? 0.5,
     lineColor: (b.lineColor as string) || '#000000',
-  }
-}
-
-function normalizeCell(c: Record<string, unknown>): PdfLayoutCell {
-  const blockRaw = c.block as Record<string, unknown> | undefined
-  return {
-    id: (c.id as string) || newId('cell'),
-    sortOrder: (c.sortOrder as number) ?? 0,
-    widthPercent: Math.max(0, Number(c.widthPercent) || 0),
-    block: blockRaw ? normalizeBlock(blockRaw) : normalizeBlock({ type: 'text', id: newId('block') }),
+    ...customerFlags,
   }
 }
 
 function normalizeRow(r: Record<string, unknown>): PdfLayoutRow {
-  const cellsRaw = (r.cells as unknown[]) || []
-  const cells = cellsRaw.filter(Boolean).map((x) => normalizeCell(x as Record<string, unknown>))
+  const cellsRaw = ((r.cells as unknown[]) || []).filter(Boolean) as Record<string, unknown>[]
+  const sortedRaw = [...cellsRaw].sort((a, b) => numOrRaw(a, 'sortOrder', 0) - numOrRaw(b, 'sortOrder', 0))
+
+  const useColMigrate =
+    sortedRaw.length > 0 &&
+    sortedRaw.every((c) => {
+      const wp = Number(c.widthPercent)
+      if (Number.isFinite(wp) && wp > 0) return false
+      const cs = Number(c.colSpan)
+      return Number.isFinite(cs) && cs >= 1 && cs <= 12
+    })
+
+  let cells: PdfLayoutCell[]
+  if (useColMigrate) {
+    const spans = sortedRaw.map((c) => {
+      const cs = Number(c.colSpan)
+      return Number.isFinite(cs) && cs >= 1 && cs <= 12 ? cs : 12
+    })
+    const wps = rowPercentsFromColSpans(spans)
+    cells = sortedRaw.map((c, i) => {
+      const blockRaw = c.block as Record<string, unknown> | undefined
+      return {
+        id: (c.id as string) || newId('cell'),
+        sortOrder: i,
+        widthPercent: clampCellWidthPercent(wps[i] ?? 100),
+        block: blockRaw ? normalizeBlock(blockRaw) : normalizeBlock({ type: 'text', id: newId('block') }),
+      }
+    })
+  } else {
+    const n = sortedRaw.length
+    cells = sortedRaw.map((c, i) => {
+      const blockRaw = c.block as Record<string, unknown> | undefined
+      const wp = Number(c.widthPercent)
+      let w = Number.isFinite(wp) && wp > 0 ? Math.round(wp) : n === 1 ? 100 : Math.max(1, Math.round(100 / n))
+      return {
+        id: (c.id as string) || newId('cell'),
+        sortOrder: i,
+        widthPercent: clampCellWidthPercent(w),
+        block: blockRaw ? normalizeBlock(blockRaw) : normalizeBlock({ type: 'text', id: newId('block') }),
+      }
+    })
+    const sumW = cells.reduce((s, c) => s + c.widthPercent, 0)
+    if (sumW > 100) {
+      const next = redistributePercentsToSum100(cells.map((c) => c.widthPercent))
+      cells = cells.map((c, i) => ({ ...c, widthPercent: clampCellWidthPercent(next[i] ?? c.widthPercent) }))
+    }
+  }
+
   return {
     id: (r.id as string) || newId('row'),
     sortOrder: (r.sortOrder as number) ?? 0,
     marginTopMm: Math.max(0, Number(r.marginTopMm) ?? 0),
-    cells: normalizeRowCellWidths(cells),
+    cells,
   }
 }
 
@@ -403,7 +465,16 @@ export function createDefaultBlock(type: PdfBlockType): PdfBlock {
     case 'company':
       return { ...base, logo_width: 60, logo_height: 40, fontSize: 11 }
     case 'customer':
-      return { ...base, fontSize: 11 }
+      return {
+        ...base,
+        fontSize: 11,
+        customer_show_title: true,
+        customer_show_authorized: true,
+        customer_show_phone: true,
+        customer_show_email: true,
+        customer_show_tax_office: true,
+        customer_show_tax_no: true,
+      }
     case 'offer_header':
       return { ...base, fontSize: 12 }
     case 'offer_items':
@@ -435,7 +506,7 @@ export function createDefaultCell(block: PdfBlock, widthPercent = 100, sortOrder
   return {
     id: newId('cell'),
     sortOrder,
-    widthPercent,
+    widthPercent: clampCellWidthPercent(widthPercent),
     block,
   }
 }
@@ -466,10 +537,7 @@ export function parseLayoutConfig(json: string | undefined): TeklifCiktiLayoutCo
     const pageHeight = Number(parsed.pageHeight) || 2970
     if (parsed && Array.isArray(parsed.rows)) {
       const rows = (parsed.rows as unknown[]).filter(Boolean).map((r) => normalizeRow(r as Record<string, unknown>))
-      const sorted = rows.sort((a, b) => a.sortOrder - b.sortOrder).map((row) => ({
-        ...row,
-        cells: normalizeRowCellWidths(row.cells.map((c, j) => ({ ...c, sortOrder: j }))),
-      }))
+      const sorted = rows.sort((a, b) => a.sortOrder - b.sortOrder).map((row, i) => ({ ...row, sortOrder: i }))
       return { rows: sorted, pageWidth, pageHeight }
     }
     if (parsed && Array.isArray(parsed.blocks)) {
@@ -505,12 +573,13 @@ export async function fetchTeklifCiktiAyarlari(): Promise<TeklifCiktiLayoutConfi
 }
 
 export async function saveTeklifCiktiAyarlari(config: TeklifCiktiLayoutConfig): Promise<void> {
+  const toStore = ensureCustomerPdfShowFlagsInLayout(config)
   const res = await fetch(`${API_URL}/api/app-settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       category: TEKLIF_CIKTI_AYARLARI_CATEGORY,
-      settings: { layout_config: JSON.stringify(config) },
+      settings: { layout_config: JSON.stringify(toStore) },
     }),
   })
   const data = await parseJsonResponse<unknown>(res)
@@ -530,4 +599,38 @@ export function flattenBlocksFromRows(rows: PdfLayoutRow[]): PdfBlock[] {
         .sort((a, b) => a.sortOrder - b.sortOrder)
         .map((c) => c.block)
     )
+}
+
+/** PDF müşteri bloğunda açık alanlar (birden fazla müşteri bloğunda biri açıksa formda gösterilir) */
+export type CustomerPdfOutputFlags = {
+  showTitle: boolean
+  showAuthorized: boolean
+  showPhone: boolean
+  showEmail: boolean
+  showTaxOffice: boolean
+  showTaxNo: boolean
+}
+
+export function defaultCustomerPdfOutputFlags(): CustomerPdfOutputFlags {
+  return {
+    showTitle: true,
+    showAuthorized: true,
+    showPhone: true,
+    showEmail: true,
+    showTaxOffice: true,
+    showTaxNo: true,
+  }
+}
+
+export function customerPdfOutputFlagsFromLayout(rows: PdfLayoutRow[]): CustomerPdfOutputFlags {
+  const blocks = flattenBlocksFromRows(rows).filter((b) => b.type === 'customer')
+  if (blocks.length === 0) return defaultCustomerPdfOutputFlags()
+  return {
+    showTitle: blocks.some((b) => parseCustomerShowField(b.customer_show_title)),
+    showAuthorized: blocks.some((b) => parseCustomerShowField(b.customer_show_authorized)),
+    showPhone: blocks.some((b) => parseCustomerShowField(b.customer_show_phone)),
+    showEmail: blocks.some((b) => parseCustomerShowField(b.customer_show_email)),
+    showTaxOffice: blocks.some((b) => parseCustomerShowField(b.customer_show_tax_office)),
+    showTaxNo: blocks.some((b) => parseCustomerShowField(b.customer_show_tax_no)),
+  }
 }

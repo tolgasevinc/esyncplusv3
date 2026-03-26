@@ -203,7 +203,12 @@ export function ParasutProductsPage() {
   const [units, setUnits] = useState<{ id: number; name: string; code?: string }[]>([])
   const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
   const [matchModalProduct, setMatchModalProduct] = useState<ParasutProduct | null>(null)
-  const [matchMasterProduct, setMatchMasterProduct] = useState<{ id: number; name: string; sku?: string } | null>(null)
+  const [matchMasterProduct, setMatchMasterProduct] = useState<{
+    id: number
+    name: string
+    sku?: string
+    category_id?: number | null
+  } | null>(null)
   const [matchMasterSearch, setMatchMasterSearch] = useState('')
   const [matchMasterSearchDebounced, setMatchMasterSearchDebounced] = useState('')
   const [matchMasterSuggestions, setMatchMasterSuggestions] = useState<{ id: number; name: string; sku?: string }[]>([])
@@ -327,6 +332,18 @@ export function ParasutProductsPage() {
       fetchRules()
     }
   }, [pullModalProduct, pushModalProduct])
+
+  /** Eşleştir modalı: kategori Paraşüt’e yazılsın diye mapping gerekir (çek modalı açılmadan da yükle) */
+  useEffect(() => {
+    if (!matchModalProduct) return
+    fetch(`${API_URL}/api/parasut/category-mappings`)
+      .then((r) => r.json())
+      .then((d: { mappings?: Record<string, string> }) => {
+        const m = d.mappings ?? {}
+        if (Object.keys(m).length > 0) setCategoryMappings(m)
+      })
+      .catch(() => {})
+  }, [matchModalProduct])
 
   /** Çek modalı açıldığında formu ürün verisiyle doldur (name, image vb.) */
   useEffect(() => {
@@ -464,11 +481,14 @@ export function ParasutProductsPage() {
       const res = await fetch(`${API_URL}/api/products/search-by-name?q=${encodeURIComponent(q)}&limit=25`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      const list = (data.products ?? []).map((p: { id: number; name: string; sku?: string }) => ({
-        id: p.id,
-        name: p.name,
-        sku: p.sku,
-      }))
+      const list = (data.products ?? []).map(
+        (p: { id: number; name: string; sku?: string; category_id?: number | null }) => ({
+          id: p.id,
+          name: p.name,
+          sku: p.sku,
+          category_id: p.category_id ?? null,
+        })
+      )
       setPushMasterSuggestions(list)
     } catch {
       setPushMasterSuggestions([])
@@ -484,11 +504,14 @@ export function ParasutProductsPage() {
       const res = await fetch(`${API_URL}/api/products/search-by-name?q=${encodeURIComponent(q)}&limit=25`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      const list = (data.products ?? []).map((p: { id: number; name: string; sku?: string }) => ({
-        id: p.id,
-        name: p.name,
-        sku: p.sku,
-      }))
+      const list = (data.products ?? []).map(
+        (p: { id: number; name: string; sku?: string; category_id?: number | null }) => ({
+          id: p.id,
+          name: p.name,
+          sku: p.sku,
+          category_id: p.category_id ?? null,
+        })
+      )
       setMatchMasterSuggestions(list)
     } catch {
       setMatchMasterSuggestions([])
@@ -645,13 +668,23 @@ export function ParasutProductsPage() {
       toastError('Hata', 'Ana ürünün SKU\'su veya Paraşüt ürün kodundan biri dolu olmalı')
       return
     }
+    const masterCatId = matchMasterProduct.category_id
+    const parasutCategoryId =
+      masterCatId != null && masterCatId > 0 ? (categoryMappings[String(masterCatId)] ?? '').trim() : ''
+    const categorySkipped =
+      masterCatId != null && masterCatId > 0 && !parasutCategoryId
+    const parasutBody: Record<string, string> = {
+      code: value,
+      name: (matchModalProduct.name ?? 'Ürün').trim() || 'Ürün',
+    }
+    if (parasutCategoryId) parasutBody.category_id = parasutCategoryId
     setMatchLoading(true)
     try {
       const [parasutRes, masterRes] = await Promise.all([
         fetch(`${API_URL}/api/parasut/products/${matchModalProduct.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: value, name: matchModalProduct.name ?? 'Ürün' }),
+          body: JSON.stringify(parasutBody),
         }),
         fetch(`${API_URL}/api/products/${matchMasterProduct.id}`, {
           method: 'PUT',
@@ -663,7 +696,14 @@ export function ParasutProductsPage() {
       const masterData = await masterRes.json()
       if (!parasutRes.ok) throw new Error((parasutData as { error?: string }).error || 'Paraşüt güncellenemedi')
       if (!masterRes.ok) throw new Error((masterData as { error?: string }).error || 'Ana ürün güncellenemedi')
-      toastSuccess('Başarılı', 'Eşleştirme tamamlandı. Paraşüt kodu ve ana ürün SKU\'su güncellendi.')
+      toastSuccess(
+        'Başarılı',
+        categorySkipped
+          ? 'Paraşüt kodu ve ana ürün SKU\'su güncellendi. Kategori Paraşüt\'e yazılmadı — Paraşüt Kategoriler sayfasında bu master kategoriyi eşleyin.'
+          : parasutCategoryId
+            ? 'Eşleştirme tamamlandı. Paraşüt kodu, kategori ve ana ürün SKU\'su güncellendi.'
+            : 'Eşleştirme tamamlandı. Paraşüt kodu ve ana ürün SKU\'su güncellendi.',
+      )
       setMatchModalProduct(null)
       setMatchMasterProduct(null)
       fetchProducts()
@@ -672,7 +712,7 @@ export function ParasutProductsPage() {
     } finally {
       setMatchLoading(false)
     }
-  }, [matchModalProduct, matchMasterProduct, fetchProducts])
+  }, [matchModalProduct, matchMasterProduct, categoryMappings, fetchProducts])
 
   const handleEditSave = useCallback(async () => {
     if (!editModalProduct) return
@@ -1323,7 +1363,7 @@ export function ParasutProductsPage() {
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              Eşleştirme sonrası Paraşüt ürün kodu ve ana ürün SKU\'su aynı değere ayarlanacak (ana ürün SKU öncelikli, boşsa Paraşüt kodu kullanılır).
+              Eşleştirme sonrası Paraşüt ürün kodu ve ana ürün SKU&apos;su aynı değere ayarlanır (SKU öncelikli, boşsa Paraşüt kodu). Ana üründe kategori varsa ve Paraşüt Kategoriler sayfasında eşleşme tanımlıysa Paraşüt ürün kategorisi de güncellenir.
             </p>
           </div>
           <DialogFooter>

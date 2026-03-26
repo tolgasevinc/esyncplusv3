@@ -164,8 +164,8 @@ export function FiyatTipleriPage() {
 
   return (
     <PageLayout
-      title="Fiyat Tipleri"
-      description="Fiyat tiplerini yönetin (Genel, E-Ticaret vb.)"
+      title="Fiyatlar"
+      description="Fiyat tipleri; hesaplamalar ileride bu bölüme taşınacak"
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh

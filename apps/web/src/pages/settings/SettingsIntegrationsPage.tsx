@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Umbrella, Sparkles } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -63,8 +64,29 @@ function TabIcon({
   return <FallbackIcon className={className} />
 }
 
+const INT_TABS = ['parasut', 'openai'] as const
+type IntTab = (typeof INT_TABS)[number]
+
+function parseIntTab(raw: string | null): IntTab {
+  if (raw === 'openai' || raw === 'parasut') return raw
+  return 'parasut'
+}
+
 export function SettingsIntegrationsPage() {
-  const [activeTab, setActiveTab] = useState('parasut')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabFromUrl = useMemo(() => parseIntTab(searchParams.get('tab')), [searchParams])
+
+  const [activeTab, setActiveTab] = useState<IntTab>(tabFromUrl)
+
+  useEffect(() => {
+    setActiveTab(tabFromUrl)
+  }, [tabFromUrl])
+
+  const handleTabChange = (v: string) => {
+    const next = parseIntTab(v)
+    setActiveTab(next)
+    setSearchParams({ tab: next }, { replace: true })
+  }
   const [parasutIconPath, setParasutIconPath] = useState<string | undefined>()
   const [parasutSettings, setParasutSettings] = useState<ParasutSettings>({})
   const [openaiSettings, setOpenaiSettings] = useState<OpenAISettings>({})
@@ -176,7 +198,7 @@ export function SettingsIntegrationsPage() {
         )
       }
     >
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
         <TabsList className="grid w-full max-w-md grid-cols-2">
           <TabsTrigger value="parasut" className="flex items-center gap-2">
             <TabIcon
