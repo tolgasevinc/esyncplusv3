@@ -1453,7 +1453,7 @@ export function ProductsPage() {
     }
   }
 
-  async function handlePublish(platform: 'opencart' | 'okm' | 'trendyol', opencartOptions?: { update_price: boolean; update_description: boolean; update_images: boolean }) {
+  async function handlePublish(platform: 'opencart' | 'okm' | 'trendyol' | 'ideasoft', opencartOptions?: { update_price: boolean; update_description: boolean; update_images: boolean }) {
     const productId = editingId
     if (!productId) {
       toastError('Önce kaydedin', 'Ürünü yayınlamak için önce kaydedin.')
@@ -1461,7 +1461,21 @@ export function ProductsPage() {
     }
     setPublishLoading(platform)
     try {
-      if (platform === 'opencart') {
+      if (platform === 'ideasoft') {
+        const res = await fetch(`${API_URL}/api/products/${productId}/publish/ideasoft`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ecommerce_name: form.ecommerce_name ?? '',
+            main_description: form.main_description ?? '',
+            update_description: true,
+          }),
+        })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error ?? 'Yayınlama başarısız')
+        const msg = json.message ?? 'Ideasoft\'a yayınlandı'
+        toastSuccess(msg, `Ideasoft ürün kimliği: ${json.ideasoft_product_id ?? '—'}`)
+      } else if (platform === 'opencart') {
         const images = (form.images ?? []).filter((x): x is string => typeof x === 'string' && !!x.trim() && !x.startsWith('http'))
         let uploadedPaths: string[] = []
         if (images.length > 0) {
@@ -2973,6 +2987,9 @@ export function ProductsPage() {
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem onClick={() => setOpenCartPublishOpen(true)} disabled={!!publishLoading}>
                         OpenCart
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => handlePublish('ideasoft')} disabled={!!publishLoading}>
+                        IdeaSoft
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => handlePublish('okm')} disabled={!!publishLoading}>
                         OKM

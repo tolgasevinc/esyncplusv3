@@ -38,6 +38,7 @@ const SettingsGeneralPage = lazy(() => import('@/pages/settings/SettingsGeneralP
 const SettingsDatabasePage = lazy(() => import('@/pages/settings/SettingsDatabasePage').then((m) => ({ default: m.SettingsDatabasePage })))
 const SettingsStoragePage = lazy(() => import('@/pages/settings/SettingsStoragePage').then((m) => ({ default: m.SettingsStoragePage })))
 const SettingsIntegrationsPage = lazy(() => import('@/pages/settings/SettingsIntegrationsPage').then((m) => ({ default: m.SettingsIntegrationsPage })))
+const SettingsIdeasoftPage = lazy(() => import('@/pages/settings/SettingsIdeasoftPage').then((m) => ({ default: m.SettingsIdeasoftPage })))
 const SettingsCalculationsPage = lazy(() => import('@/pages/settings/SettingsCalculationsPage').then((m) => ({ default: m.SettingsCalculationsPage })))
 const SettingsAccessPage = lazy(() => import('@/pages/settings/SettingsAccessPage').then((m) => ({ default: m.SettingsAccessPage })))
 const SettingsSuppliersPage = lazy(() => import('@/pages/settings/SettingsSuppliersPage').then((m) => ({ default: m.SettingsSuppliersPage })))
@@ -71,6 +72,7 @@ function App() {
         <Route path="/ayarlar/veritabani" element={<SettingsDatabasePage />} />
         <Route path="/ayarlar/depolama" element={<SettingsStoragePage />} />
         <Route path="/ayarlar/entegrasyonlar" element={<SettingsIntegrationsPage />} />
+        <Route path="/ayarlar/entegrasyonlar/ideasoft" element={<SettingsIdeasoftPage />} />
         <Route path="/ayarlar/hesaplamalar" element={<SettingsCalculationsPage />} />
         <Route path="/ayarlar/erisim" element={<SettingsAccessPage />} />
         <Route path="/ayarlar/tedarikciler" element={<SettingsSuppliersPage />} />

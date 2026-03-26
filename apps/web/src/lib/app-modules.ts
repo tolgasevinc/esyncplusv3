@@ -29,6 +29,7 @@ export const APP_MODULES: AppModule[] = [
   { id: 'ayarlar-veritabani', label: 'settings › database', path: '/ayarlar/veritabani' },
   { id: 'ayarlar-depolama', label: 'settings › storage', path: '/ayarlar/depolama' },
   { id: 'ayarlar-entegrasyonlar', label: 'settings › integrations', path: '/ayarlar/entegrasyonlar' },
+  { id: 'ayarlar-ideasoft', label: 'settings › integrations › IdeaSoft', path: '/ayarlar/entegrasyonlar/ideasoft' },
   { id: 'opencart', label: 'OpenCart', path: '/opencart' },
   { id: 'parasut', label: 'Paraşüt', path: '/parasut' },
   { id: 'parasut-products', label: 'Paraşüt › Ürünler', path: '/parasut/products' },
