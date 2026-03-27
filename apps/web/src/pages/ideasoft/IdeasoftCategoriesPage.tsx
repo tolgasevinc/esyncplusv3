@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug, PlusCircle, ArrowLeft } from 'lucide-react'
+import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug, PlusCircle, ArrowLeft, ArrowUpDown } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,6 +24,7 @@ interface IdeasoftCategory {
   id: string
   name?: string
   parent_id?: string | null
+  sortOrder?: number
 }
 
 interface MasterTreeNode {
@@ -164,6 +165,13 @@ export function IdeasoftCategoriesPage() {
   const [creating, setCreating] = useState(false)
   const createInputRef = useRef<HTMLInputElement>(null)
 
+  // Sıralama paneli
+  const [sortPanel, setSortPanel] = useState(false)
+  const [sortEdits, setSortEdits] = useState<Record<string, string>>({})
+  const [savingSort, setSavingSort] = useState<Set<string>>(new Set())
+  const [savedSort, setSavedSort] = useState<Set<string>>(new Set())
+  const sortTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
   const fullHierarchy = useMemo(
     () => buildHierarchyWithSelectableGroups(masterCategories),
     [masterCategories]
@@ -234,8 +242,19 @@ export function IdeasoftCategoriesPage() {
     setPickerOpen(true)
     setCreateMode(false)
     setCreateName(masterName ?? '')
-    setCreateParentId('')
-  }, [])
+
+    // Master kategorinin ebeveyni Ideasoft'ta eşleştirildiyse üst kategori ön-seçili gelsin
+    const masterCat = masterCategories.find((c) => c.id === masterId)
+    let autoParentId = ''
+    if (masterCat) {
+      const parentMasterId = masterCat.category_id || masterCat.group_id || 0
+      if (parentMasterId > 0) {
+        const mapped = mappings[String(parentMasterId)]
+        if (mapped) autoParentId = mapped
+      }
+    }
+    setCreateParentId(autoParentId)
+  }, [masterCategories, mappings])
 
   const closePicker = useCallback(() => {
     setPickerOpen(false)
@@ -273,12 +292,13 @@ export function IdeasoftCategoriesPage() {
         )
         throw new Error(msg)
       }
-      const raw = (data.data ?? []) as { id: string; name: string; parentId: string | null }[]
+      const raw = (data.data ?? []) as { id: string; name: string; parentId: string | null; sortOrder?: number }[]
       setIdeasoftCategories(
         raw.map((x) => ({
           id: String(x.id),
           name: x.name,
           parent_id: x.parentId != null ? String(x.parentId) : null,
+          sortOrder: typeof x.sortOrder === 'number' ? x.sortOrder : undefined,
         }))
       )
     } catch (err) {
@@ -422,6 +442,40 @@ export function IdeasoftCategoriesPage() {
       setCreating(false)
     }
   }, [createName, createParentId, pickerForMasterId, mappings, closePicker])
+
+  const handleSortChange = useCallback((id: string, value: string) => {
+    setSortEdits((p) => ({ ...p, [id]: value }))
+    clearTimeout(sortTimers.current[id])
+    const num = parseInt(value, 10)
+    if (isNaN(num)) return
+    sortTimers.current[id] = setTimeout(async () => {
+      setSavingSort((p) => new Set(p).add(id))
+      try {
+        const res = await fetch(`${API_URL}/api/ideasoft/categories/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sortOrder: num }),
+        })
+        if (res.ok) {
+          setIdeasoftCategories((prev) =>
+            prev.map((c) => (c.id === id ? { ...c, sortOrder: num } : c))
+          )
+          setSavedSort((p) => {
+            const next = new Set(p).add(id)
+            setTimeout(() => setSavedSort((s) => { const n = new Set(s); n.delete(id); return n }), 1500)
+            return next
+          })
+        } else {
+          const d = await res.json().catch(() => ({})) as { error?: string }
+          toastError('Hata', d.error || 'Sıralama kaydedilemedi')
+        }
+      } catch {
+        toastError('Hata', 'Sıralama kaydedilemedi')
+      } finally {
+        setSavingSort((p) => { const n = new Set(p); n.delete(id); return n })
+      }
+    }, 800)
+  }, [])
 
   useEffect(() => {
     fetchMaster()
@@ -575,6 +629,15 @@ export function IdeasoftCategoriesPage() {
               <Button
                 variant="outline"
                 size="sm"
+                onClick={() => setSortPanel((p) => !p)}
+                title="Ideasoft kategori sıralama düzenleyici"
+              >
+                <ArrowUpDown className="h-4 w-4 mr-1" />
+                Sırala
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => debugOpen ? setDebugOpen(false) : fetchDebug()}
                 disabled={debugLoading}
                 title="Ideasoft API tanı — ham yanıtları göster"
@@ -590,9 +653,12 @@ export function IdeasoftCategoriesPage() {
             <div className="flex flex-col gap-2 p-4 text-destructive bg-destructive/10 mx-4 rounded-lg shrink-0 sm:flex-row sm:items-center sm:justify-between">
               <span>{error}</span>
               {oauthReconnectHint && (
-                <Button variant="outline" size="sm" className="shrink-0 border-destructive/40" asChild>
-                  <Link to="/ayarlar/entegrasyonlar/ideasoft">IdeaSoft ayarlarına git</Link>
-                </Button>
+                <Link
+                  to="/ayarlar/entegrasyonlar/ideasoft"
+                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-destructive/40 bg-background px-3 h-9 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+                >
+                  IdeaSoft ayarlarına git
+                </Link>
               )}
             </div>
           )}
@@ -613,9 +679,12 @@ export function IdeasoftCategoriesPage() {
                       <Button variant="outline" size="sm" className="h-7 text-xs border-amber-400" onClick={() => fetchDebug()}>
                         <Bug className="h-3 w-3 mr-1" />Ham Ideasoft yanıtını göster (Tanı)
                       </Button>
-                      <Button variant="outline" size="sm" className="h-7 text-xs border-amber-400" asChild>
-                        <Link to="/ayarlar/entegrasyonlar/ideasoft">OAuth ayarları</Link>
-                      </Button>
+                      <Link
+                        to="/ayarlar/entegrasyonlar/ideasoft"
+                        className="inline-flex items-center h-7 px-3 text-xs rounded-md border border-amber-400 bg-background hover:bg-accent"
+                      >
+                        OAuth ayarları
+                      </Link>
                     </div>
                   </div>
                 )}
@@ -631,7 +700,7 @@ export function IdeasoftCategoriesPage() {
       </Card>
 
       <Dialog open={pickerOpen} onOpenChange={(open) => !open && closePicker()}>
-        <DialogContent className="max-w-md max-h-[80vh] flex flex-col">
+        <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>
               {createMode ? 'Ideasoft\'ta yeni kategori oluştur' : 'Ideasoft kategorisi seç'}
@@ -752,6 +821,17 @@ export function IdeasoftCategoriesPage() {
             </div>
           )}
 
+          {/* Seçilen kategori — footer üstünde ayrı satır */}
+          {!createMode && pickerForMasterId && selections[String(pickerForMasterId)] && (
+            <div className="border-t px-4 py-2 text-sm text-muted-foreground truncate">
+              <span className="font-medium text-foreground">Seçilen: </span>
+              {(() => {
+                const pc = ideasoftById.get(selections[String(pickerForMasterId)]!)
+                return pc ? buildDisplayPath(pc) : 'Seçildi'
+              })()}
+            </div>
+          )}
+
           <DialogFooter className={cn('gap-2', createMode && 'flex-col sm:flex-row')}>
             {createMode ? (
               <>
@@ -790,14 +870,6 @@ export function IdeasoftCategoriesPage() {
                     <PlusCircle className="h-4 w-4 mr-1" />
                     Yeni kategori oluştur
                   </Button>
-                  <span className="text-sm text-muted-foreground hidden sm:block">
-                    {selections[String(pickerForMasterId)]
-                      ? (() => {
-                          const pc = ideasoftById.get(selections[String(pickerForMasterId)]!)
-                          return pc ? `Seçilen: ${buildDisplayPath(pc)}` : 'Seçildi'
-                        })()
-                      : ''}
-                  </span>
                   <Button variant="outline" onClick={closePicker}>
                     İptal
                   </Button>
@@ -828,6 +900,58 @@ export function IdeasoftCategoriesPage() {
         Master kategoriler ağaç yapısında. OAuth bağlantısı (Ayarlar → IdeaSoft) gerekir. &quot;Kategori seç&quot; ile
         Ideasoft kategorisi seçip &quot;Eşleştir&quot; ile kaydedin.
       </p>
+
+      {sortPanel && (
+        <div className="mt-4 rounded-lg border bg-background">
+          <div className="flex items-center justify-between px-4 py-3 border-b">
+            <span className="font-semibold text-sm flex items-center gap-2">
+              <ArrowUpDown className="h-4 w-4" />
+              Ideasoft Kategori Sıralama
+            </span>
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSortPanel(false)}>
+              Kapat
+            </Button>
+          </div>
+          {ideasoftCategories.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-muted-foreground text-center">Ideasoft kategorisi bulunamadı.</p>
+          ) : (
+            <div className="divide-y">
+              {ideasoftCategories
+                .slice()
+                .sort((a, b) => {
+                  const sa = a.sortOrder ?? 9999
+                  const sb = b.sortOrder ?? 9999
+                  return sa !== sb ? sa - sb : (a.name ?? '').localeCompare(b.name ?? '')
+                })
+                .map((cat) => {
+                  const id = cat.id
+                  const currentVal = sortEdits[id] ?? String(cat.sortOrder ?? '')
+                  const isSaving = savingSort.has(id)
+                  const isSaved = savedSort.has(id)
+                  return (
+                    <div key={id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/30">
+                      <input
+                        type="number"
+                        className="w-20 h-8 rounded-md border border-input bg-transparent px-2 text-sm text-center shadow-sm focus:outline-none focus:ring-1 focus:ring-ring [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-auto [&::-webkit-inner-spin-button]:appearance-auto"
+                        value={currentVal}
+                        placeholder="—"
+                        onChange={(e) => handleSortChange(id, e.target.value)}
+                      />
+                      <span className="flex-1 text-sm truncate">{buildDisplayPath(cat)}</span>
+                      <span className="text-xs w-14 text-right shrink-0">
+                        {isSaving ? (
+                          <span className="text-muted-foreground">Kaydediliyor…</span>
+                        ) : isSaved ? (
+                          <span className="text-emerald-600">Kaydedildi</span>
+                        ) : null}
+                      </span>
+                    </div>
+                  )
+                })}
+            </div>
+          )}
+        </div>
+      )}
 
       {debugOpen && (
         <div className="mt-4 rounded-lg border bg-muted/40 p-4 text-xs font-mono space-y-3">

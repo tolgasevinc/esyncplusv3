@@ -541,6 +541,7 @@ export type IdeasoftCategory = {
   name: string;
   /** Üst kategori yoksa null */
   parentId: string | null;
+  sortOrder?: number;
 };
 
 function extractIdFromIri(iri: string): string | null {
@@ -585,6 +586,15 @@ function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
   }
   if (!item || typeof item !== 'object') return null;
   const o = item as Record<string, unknown>;
+
+  // Sadece aktif (status=1) kategoriler
+  if (o.status != null && Number(o.status) !== 1) return null;
+
+  // Silinmiş kategorileri atla (deletedAt, deleted, is_deleted)
+  if (o.deletedAt != null && o.deletedAt !== '' && o.deletedAt !== false) return null;
+  if (o.deleted === true || o.deleted === 1) return null;
+  if (o.is_deleted === true || o.is_deleted === 1 || o.is_deleted === '1') return null;
+
   let idStr: string | null = null;
   if (o.id != null && String(o.id).trim()) idStr = String(o.id).trim();
   else if (typeof o['@id'] === 'string') idStr = extractIdFromIri(o['@id']);
@@ -602,10 +612,27 @@ function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
 
   const parentId = parseIdeasoftCategoryParent(o);
 
-  return { id: idStr, name, parentId };
+  const sortOrderRaw = o.sortOrder ?? o.sort_order;
+  const sortOrder =
+    typeof sortOrderRaw === 'number'
+      ? sortOrderRaw
+      : typeof sortOrderRaw === 'string' && sortOrderRaw !== ''
+        ? parseInt(sortOrderRaw, 10)
+        : undefined;
+
+  return { id: idStr, name, parentId, ...(sortOrder !== undefined ? { sortOrder } : {}) };
 }
 
 /** Admin API’de koleksiyon yolu mağazaya göre değişebilir; sırayla dene. */
+/**
+ * Admin API'de koleksiyon yolu mağazaya göre değişebilir; sırayla dene.
+ * status=1 ile sadece aktif kategoriler istenir (silinmemiş + yayında).
+ */
+/**
+ * Admin API'de koleksiyon yolu mağazaya göre değişebilir; sırayla dene.
+ * status=1 filtresi sorgu parametresi olarak gönderilmez — bildirilmemiş filtreler
+ * API Platform'da 400 döndürebilir; filtreleme parseIdeasoftCategoryItem'de yapılır.
+ */
 const IDEASOFT_CATEGORY_COLLECTION_PATHS = [
   '/categories?pagination=false',
   '/categories?itemsPerPage=250&page=1',
@@ -751,12 +778,26 @@ export type IdeasoftCategoryDebugResult = {
   rawPreview: string;
 };
 
+/** Türkçe dahil karakterleri URL uyumlu slug'a dönüştürür */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ş/g, 's')
+    .replace(/ı/g, 'i').replace(/İ/g, 'i').replace(/ö/g, 'o').replace(/ç/g, 'c')
+    .replace(/Ğ/g, 'g').replace(/Ü/g, 'u').replace(/Ş/g, 's').replace(/Ö/g, 'o').replace(/Ç/g, 'c')
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-');
+}
+
 /**
  * Ideasoft'ta yeni kategori oluşturur.
  * POST /admin-api/categories  (veya /api/categories)
  *
+ * Ideasoft zorunlu alanları: name, slug, status.
  * API Platform ilişki alanlarında IRI string bekler: "/admin-api/categories/6"
- * Bazı kurulumlar integer de kabul eder; her iki format sırayla denenir.
+ * 400 alındığında parent formatı ve gövde alternatifleri sırayla denenir.
  */
 export async function ideasoftCreateCategory(
   storeBase: string,
@@ -765,27 +806,30 @@ export async function ideasoftCreateCategory(
   parentId?: string | null
 ): Promise<{ ok: true; id: string; name: string } | { ok: false; error: string }> {
   const base = normalizeStoreBase(storeBase);
+  const trimmedName = name.trim();
+  const slug = slugify(trimmedName) || `kategori-${Date.now()}`;
 
   /**
-   * Parent alanı için deneme sırası:
-   * 1. IRI /admin-api/categories/{id}
-   * 2. IRI /api/categories/{id}
-   * 3. integer (eski API)
+   * Döküman formatı: POST /admin-api/categories
+   * parent alanı bir obje: { "parent": { "id": 6 } }
+   * Kök kategori için parent gönderilmez (veya boş obje).
+   * @see https://apidoc.ideasoft.dev/docs/admin-api/fejso6cwrlaan-category-post
    */
-  const buildBodies = (pid: string | null | undefined): Record<string, unknown>[] => {
-    const baseBody: Record<string, unknown> = { name: name.trim(), status: 1, sortOrder: 0 };
-    if (!pid) return [baseBody];
-    const numId = parseInt(pid, 10);
-    return [
-      { ...baseBody, parent: `${base}/admin-api/categories/${pid}` },
-      { ...baseBody, parent: `/admin-api/categories/${pid}` },
-      { ...baseBody, parent: `/api/categories/${pid}` },
-      { ...baseBody, parent: isNaN(numId) ? pid : numId },
-    ];
-  };
+  const bodies: Record<string, unknown>[] = parentId
+    ? [
+        // 1. Döküman formatı: parent obje, id integer
+        { name: trimmedName, slug, status: 1, sortOrder: 0, parent: { id: parseInt(parentId, 10) } },
+        // 2. id string varyant
+        { name: trimmedName, slug, status: 1, sortOrder: 0, parent: { id: parentId } },
+        // 3. IRI string fallback (API Platform kurulumları için)
+        { name: trimmedName, slug, status: 1, sortOrder: 0, parent: `/admin-api/categories/${parentId}` },
+      ]
+    : [
+        { name: trimmedName, slug, status: 1, sortOrder: 0 },
+        { name: trimmedName, slug, status: 1, sortOrder: 0, parent: {} },
+      ];
 
-  const bodies = buildBodies(parentId || null);
-
+  let lastErr = 'Ideasoft kategori oluşturma başarısız';
   for (const body of bodies) {
     const res = await ideasoftApiFetch(storeBase, accessToken, '/categories', {
       method: 'POST',
@@ -807,19 +851,49 @@ export async function ideasoftCreateCategory(
         if (m) id = m[1];
       }
       if (!id) return { ok: false, error: 'Ideasoft kategori oluşturuldu ama ID döndürülmedi.' };
-      const createdName = typeof raw.name === 'string' ? raw.name : name.trim();
+      const createdName = typeof raw.name === 'string' ? raw.name : trimmedName;
       return { ok: true, id, name: createdName };
     }
 
-    // 400 = validation hatası; parent formatı yanlış olabilir → sonraki body'yi dene
-    if (res.status === 400 && body.parent !== undefined) continue;
+    lastErr = parseIdeasoftHttpError(res.status, raw, rawText);
 
-    // Diğer hatalarda dur
-    const err = parseIdeasoftHttpError(res.status, raw, rawText);
-    return { ok: false, error: err };
+    // 401/403 → dur
+    if (res.status === 401 || res.status === 403) return { ok: false, error: lastErr };
+
+    // 400/422 → sonraki varyasyonu dene
+    if (res.status === 400 || res.status === 422) continue;
+
+    // Diğer hatalar → dur
+    return { ok: false, error: lastErr };
   }
 
-  return { ok: false, error: 'Ideasoft kategori oluşturma başarısız (tüm parent formatları denendi)' };
+  return { ok: false, error: lastErr };
+}
+
+/**
+ * Ideasoft'ta mevcut kategoriyi günceller.
+ * PUT /admin-api/categories/{id}
+ * Döküman: https://apidoc.ideasoft.dev/docs/admin-api/fejso6cwrlaan-category-post
+ */
+export async function ideasoftUpdateCategory(
+  storeBase: string,
+  accessToken: string,
+  id: string,
+  fields: { sortOrder?: number }
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const body: Record<string, unknown> = {};
+  if (fields.sortOrder !== undefined) body.sortOrder = fields.sortOrder;
+
+  const res = await ideasoftApiFetch(storeBase, accessToken, `/categories/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) return { ok: true };
+  const rawText = await res.text();
+  let raw: unknown = {};
+  try { raw = JSON.parse(rawText); } catch { /* ignore */ }
+  return { ok: false, error: parseIdeasoftHttpError(res.status, raw as Record<string, unknown>, rawText) };
 }
 
 /** Tanı: her path için Ideasoft ham yanıtını döndürür. Debug endpoint'te kullanılır. */
