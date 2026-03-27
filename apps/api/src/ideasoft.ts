@@ -751,6 +751,77 @@ export type IdeasoftCategoryDebugResult = {
   rawPreview: string;
 };
 
+/**
+ * Ideasoft'ta yeni kategori oluşturur.
+ * POST /admin-api/categories  (veya /api/categories)
+ *
+ * API Platform ilişki alanlarında IRI string bekler: "/admin-api/categories/6"
+ * Bazı kurulumlar integer de kabul eder; her iki format sırayla denenir.
+ */
+export async function ideasoftCreateCategory(
+  storeBase: string,
+  accessToken: string,
+  name: string,
+  parentId?: string | null
+): Promise<{ ok: true; id: string; name: string } | { ok: false; error: string }> {
+  const base = normalizeStoreBase(storeBase);
+
+  /**
+   * Parent alanı için deneme sırası:
+   * 1. IRI /admin-api/categories/{id}
+   * 2. IRI /api/categories/{id}
+   * 3. integer (eski API)
+   */
+  const buildBodies = (pid: string | null | undefined): Record<string, unknown>[] => {
+    const baseBody: Record<string, unknown> = { name: name.trim(), status: 1, sortOrder: 0 };
+    if (!pid) return [baseBody];
+    const numId = parseInt(pid, 10);
+    return [
+      { ...baseBody, parent: `${base}/admin-api/categories/${pid}` },
+      { ...baseBody, parent: `/admin-api/categories/${pid}` },
+      { ...baseBody, parent: `/api/categories/${pid}` },
+      { ...baseBody, parent: isNaN(numId) ? pid : numId },
+    ];
+  };
+
+  const bodies = buildBodies(parentId || null);
+
+  for (const body of bodies) {
+    const res = await ideasoftApiFetch(storeBase, accessToken, '/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const rawText = await res.text();
+    let raw: Record<string, unknown> = {};
+    try { raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+    if (res.ok) {
+      let id =
+        raw.id != null ? String(raw.id) :
+        (raw as { data?: { id?: unknown } }).data?.id != null
+          ? String((raw as { data: { id: unknown } }).data.id) : '';
+      if (!id) {
+        const loc = res.headers.get('Location') || '';
+        const m = loc.match(/\/(\d+)\/?$/);
+        if (m) id = m[1];
+      }
+      if (!id) return { ok: false, error: 'Ideasoft kategori oluşturuldu ama ID döndürülmedi.' };
+      const createdName = typeof raw.name === 'string' ? raw.name : name.trim();
+      return { ok: true, id, name: createdName };
+    }
+
+    // 400 = validation hatası; parent formatı yanlış olabilir → sonraki body'yi dene
+    if (res.status === 400 && body.parent !== undefined) continue;
+
+    // Diğer hatalarda dur
+    const err = parseIdeasoftHttpError(res.status, raw, rawText);
+    return { ok: false, error: err };
+  }
+
+  return { ok: false, error: 'Ideasoft kategori oluşturma başarısız (tüm parent formatları denendi)' };
+}
+
 /** Tanı: her path için Ideasoft ham yanıtını döndürür. Debug endpoint'te kullanılır. */
 export async function ideasoftDebugCategories(
   storeBase: string,

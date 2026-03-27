@@ -7,6 +7,7 @@ import {
   getIdeasoftAccessToken,
   getIdeasoftRedirectUriFromRequest,
   ideasoftFindProductIdBySku,
+  ideasoftCreateCategory,
   ideasoftDebugCategories,
   ideasoftFetchCategories,
   ideasoftUpsertProduct,
@@ -2159,6 +2160,26 @@ app.get('/api/ideasoft/categories', async (c) => {
     return c.json({ data: result.categories });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Kategoriler alınamadı' }, 500);
+  }
+});
+
+/** Ideasoft'ta yeni kategori oluştur */
+app.post('/api/ideasoft/categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    if (!storeBase) return c.json({ error: 'Ideasoft mağaza adresi ayarlı değil.' }, 400);
+    const token = await getIdeasoftAccessToken(c.env);
+    if (!token) return c.json({ error: 'Ideasoft OAuth bağlantısı yok veya süresi doldu.' }, 401);
+    const body = await c.req.json<{ name?: string; parentId?: string | null }>().catch(() => ({}));
+    const name = (body.name || '').trim();
+    if (!name) return c.json({ error: 'Kategori adı gerekli.' }, 400);
+    const result = await ideasoftCreateCategory(storeBase, token, name, body.parentId);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ id: result.id, name: result.name });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kategori oluşturulamadı' }, 500);
   }
 });
 

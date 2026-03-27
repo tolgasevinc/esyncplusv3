@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug } from 'lucide-react'
+import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug, PlusCircle, ArrowLeft } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Dialog,
   DialogClose,
@@ -155,6 +157,13 @@ export function IdeasoftCategoriesPage() {
   const [debugData, setDebugData] = useState<{ storeBase?: string; results?: { path: string; url: string; status: number; memberCount: number; rawPreview: string }[]; error?: string } | null>(null)
   const [debugLoading, setDebugLoading] = useState(false)
 
+  // Yeni kategori oluşturma
+  const [createMode, setCreateMode] = useState(false)
+  const [createName, setCreateName] = useState('')
+  const [createParentId, setCreateParentId] = useState<string>('')
+  const [creating, setCreating] = useState(false)
+  const createInputRef = useRef<HTMLInputElement>(null)
+
   const fullHierarchy = useMemo(
     () => buildHierarchyWithSelectableGroups(masterCategories),
     [masterCategories]
@@ -220,14 +229,20 @@ export function IdeasoftCategoriesPage() {
     [ideasoftById]
   )
 
-  const openPicker = useCallback((masterId: number) => {
+  const openPicker = useCallback((masterId: number, masterName?: string) => {
     setPickerForMasterId(masterId)
     setPickerOpen(true)
+    setCreateMode(false)
+    setCreateName(masterName ?? '')
+    setCreateParentId('')
   }, [])
 
   const closePicker = useCallback(() => {
     setPickerOpen(false)
     setPickerForMasterId(null)
+    setCreateMode(false)
+    setCreateName('')
+    setCreateParentId('')
   }, [])
 
   const fetchMaster = useCallback(async () => {
@@ -364,6 +379,50 @@ export function IdeasoftCategoriesPage() {
     }
   }, [])
 
+  const handleCreateCategory = useCallback(async () => {
+    if (!createName.trim() || !pickerForMasterId) return
+    setCreating(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/categories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: createName.trim(), parentId: createParentId || null }),
+      })
+      const data = await res.json() as { id?: string; name?: string; error?: string }
+      if (!res.ok) throw new Error(data.error || 'Oluşturulamadı')
+
+      const newId = String(data.id!)
+      const newName = data.name || createName.trim()
+
+      // Lokal state'e yeni kategoriyi ekle
+      const newCat: IdeasoftCategory = {
+        id: newId,
+        name: newName,
+        parent_id: createParentId || null,
+      }
+      setIdeasoftCategories((prev) => [...prev, newCat])
+
+      // Eşleştirmeyi kaydet
+      const key = String(pickerForMasterId)
+      const next = { ...mappings, [key]: newId }
+      const mapRes = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const mapData = await mapRes.json() as { error?: string }
+      if (!mapRes.ok) throw new Error(mapData.error || 'Eşleştirme kaydedilemedi')
+      setMappings(next)
+
+      toastSuccess('Başarılı', `"${newName}" Ideasoft'ta oluşturuldu ve eşleştirildi.`)
+      closePicker()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'İşlem başarısız')
+    } finally {
+      setCreating(false)
+    }
+  }, [createName, createParentId, pickerForMasterId, mappings, closePicker])
+
   useEffect(() => {
     fetchMaster()
   }, [fetchMaster])
@@ -375,6 +434,13 @@ export function IdeasoftCategoriesPage() {
   useEffect(() => {
     fetchMappings()
   }, [fetchMappings])
+
+  // createMode açıldığında input'a odaklan
+  useEffect(() => {
+    if (createMode && createInputRef.current) {
+      setTimeout(() => createInputRef.current?.focus(), 50)
+    }
+  }, [createMode])
 
   const isLoading = masterLoading || ideasoftLoading || mappingsLoading
 
@@ -447,7 +513,7 @@ export function IdeasoftCategoriesPage() {
                   variant="outline"
                   size="sm"
                   className="h-7 text-xs shrink-0"
-                  onClick={() => openPicker(item.id)}
+                  onClick={() => openPicker(item.id, item.name)}
                   disabled={ideasoftLoading}
                 >
                   Kategori seç
@@ -567,112 +633,192 @@ export function IdeasoftCategoriesPage() {
       <Dialog open={pickerOpen} onOpenChange={(open) => !open && closePicker()}>
         <DialogContent className="max-w-md max-h-[80vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>Ideasoft kategorisi seç</DialogTitle>
+            <DialogTitle>
+              {createMode ? 'Ideasoft\'ta yeni kategori oluştur' : 'Ideasoft kategorisi seç'}
+            </DialogTitle>
             <DialogDescription className="sr-only">
-              Master kategori ile eşleştirmek için Ideasoft mağaza kategorilerinden birini seçin.
+              {createMode
+                ? 'Ideasoft mağazasında yeni kategori oluşturup otomatik eşleştirin.'
+                : 'Master kategori ile eşleştirmek için Ideasoft mağaza kategorilerinden birini seçin.'}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex-1 min-h-0 overflow-y-auto py-2">
-            <div className="space-y-0.5">
-              {!ideasoftLoading && ideasoftTree.length === 0 && (
-                <p className="px-3 py-4 text-sm text-muted-foreground text-center">
-                  Ideasoft kategorisi bulunamadı. Mağazada kategori oluşturun veya API izinlerini kontrol edin.
-                </p>
-              )}
-              {ideasoftTree.map((node) => {
-                const renderIdeasoftNode = (n: IdeasoftTreeNode, d: number) => {
-                  const { category, children } = n
-                  const k = String(category.id)
-                  const hasChildren = children.length > 0
-                  const expKey = `p-${k}`
-                  const isExpanded = expandedIdeasoft.has(expKey)
-                  const isDisabled = matchedIdeasoftIds.has(k)
-                  const isSelected = pickerForMasterId && selections[String(pickerForMasterId)] === k
-                  const hasUnmatched = hasUnmatchedDescendant(n)
-                  const displayName = String(category.name ?? '').trim() || String(category.id)
-                  const indent = d * 24
 
-                  return (
-                    <div key={k}>
-                      <div
-                        className={cn(
-                          'flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer',
-                          isDisabled && 'opacity-50',
-                          isSelected && 'bg-primary/10',
-                          hasUnmatched && 'bg-amber-50 dark:bg-amber-950/30',
-                          !isDisabled && 'hover:bg-muted/50'
-                        )}
-                        style={{ paddingLeft: indent + 12 }}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => hasChildren && toggleIdeasoft(expKey)}
-                          className={cn('shrink-0 p-0.5 rounded', !hasChildren && 'invisible')}
-                        >
-                          {hasChildren ? (
-                            isExpanded ? (
-                              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                            ) : (
-                              <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                            )
-                          ) : (
-                            <span className="w-4" />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isDisabled}
-                          onClick={() => {
-                            if (isDisabled) return
-                            if (pickerForMasterId) {
-                              setSelections((p) => ({ ...p, [String(pickerForMasterId)]: k }))
-                            }
-                          }}
-                          className="flex-1 text-left text-sm truncate"
-                        >
-                          {displayName}
-                          {isDisabled && ' ✓'}
-                        </button>
-                      </div>
-                      {isExpanded && children.map((ch) => renderIdeasoftNode(ch, d + 1))}
-                    </div>
-                  )
-                }
-                return renderIdeasoftNode(node, 0)
-              })}
+          {createMode ? (
+            /* ── Yeni kategori oluşturma formu ── */
+            <div className="flex flex-col gap-4 py-2">
+              <div className="grid gap-1.5">
+                <Label htmlFor="create-cat-name">Kategori adı</Label>
+                <Input
+                  id="create-cat-name"
+                  ref={createInputRef}
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  placeholder="Kategori adı"
+                  onKeyDown={(e) => e.key === 'Enter' && !creating && void handleCreateCategory()}
+                />
+                <p className="text-xs text-muted-foreground">Master kategori adından dolduruldu; dilediğiniz gibi düzenleyin.</p>
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="create-cat-parent">Üst kategori (opsiyonel)</Label>
+                <select
+                  id="create-cat-parent"
+                  value={createParentId}
+                  onChange={(e) => setCreateParentId(e.target.value)}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="">— Kök kategori (üst yok) —</option>
+                  {ideasoftCategories
+                    .slice()
+                    .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {buildDisplayPath(c)}
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
-          </div>
-          <DialogFooter>
-            {pickerForMasterId && (
+          ) : (
+            /* ── Mevcut kategori seçimi ── */
+            <div className="flex-1 min-h-0 overflow-y-auto py-2">
+              <div className="space-y-0.5">
+                {!ideasoftLoading && ideasoftTree.length === 0 && (
+                  <p className="px-3 py-4 text-sm text-muted-foreground text-center">
+                    Ideasoft kategorisi bulunamadı. &quot;Yeni oluştur&quot; ile mağazaya ekleyebilirsiniz.
+                  </p>
+                )}
+                {ideasoftTree.map((node) => {
+                  const renderIdeasoftNode = (n: IdeasoftTreeNode, d: number) => {
+                    const { category, children } = n
+                    const k = String(category.id)
+                    const hasChildren = children.length > 0
+                    const expKey = `p-${k}`
+                    const isExpanded = expandedIdeasoft.has(expKey)
+                    const isDisabled = matchedIdeasoftIds.has(k)
+                    const isSelected = pickerForMasterId && selections[String(pickerForMasterId)] === k
+                    const hasUnmatched = hasUnmatchedDescendant(n)
+                    const displayName = String(category.name ?? '').trim() || String(category.id)
+                    const indent = d * 24
+
+                    return (
+                      <div key={k}>
+                        <div
+                          className={cn(
+                            'flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer',
+                            isDisabled && 'opacity-50',
+                            isSelected && 'bg-primary/10',
+                            hasUnmatched && 'bg-amber-50 dark:bg-amber-950/30',
+                            !isDisabled && 'hover:bg-muted/50'
+                          )}
+                          style={{ paddingLeft: indent + 12 }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => hasChildren && toggleIdeasoft(expKey)}
+                            className={cn('shrink-0 p-0.5 rounded', !hasChildren && 'invisible')}
+                          >
+                            {hasChildren ? (
+                              isExpanded ? (
+                                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                              )
+                            ) : (
+                              <span className="w-4" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isDisabled}
+                            onClick={() => {
+                              if (isDisabled) return
+                              if (pickerForMasterId) {
+                                setSelections((p) => ({ ...p, [String(pickerForMasterId)]: k }))
+                              }
+                            }}
+                            className="flex-1 text-left text-sm truncate"
+                          >
+                            {displayName}
+                            {isDisabled && ' ✓'}
+                          </button>
+                        </div>
+                        {isExpanded && children.map((ch) => renderIdeasoftNode(ch, d + 1))}
+                      </div>
+                    )
+                  }
+                  return renderIdeasoftNode(node, 0)
+                })}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className={cn('gap-2', createMode && 'flex-col sm:flex-row')}>
+            {createMode ? (
               <>
-                <span className="text-sm text-muted-foreground mr-auto">
-                  {selections[String(pickerForMasterId)]
-                    ? (() => {
-                        const pc = ideasoftById.get(selections[String(pickerForMasterId)]!)
-                        return pc ? `Seçilen: ${buildDisplayPath(pc)}` : 'Seçildi'
-                      })()
-                    : 'Kategori seçin'}
-                </span>
-                <Button variant="outline" onClick={closePicker}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mr-auto"
+                  onClick={() => setCreateMode(false)}
+                  disabled={creating}
+                >
+                  <ArrowLeft className="h-4 w-4 mr-1" />
+                  Geri
+                </Button>
+                <Button variant="outline" onClick={closePicker} disabled={creating}>
                   İptal
                 </Button>
-                <DialogClose asChild>
+                <Button
+                  type="button"
+                  onClick={() => void handleCreateCategory()}
+                  disabled={!createName.trim() || creating}
+                >
+                  {creating ? 'Oluşturuluyor…' : 'Oluştur ve eşleştir'}
+                </Button>
+              </>
+            ) : (
+              pickerForMasterId && (
+                <>
                   <Button
                     type="button"
-                    onClick={() => {
-                      const sel = selections[String(pickerForMasterId)]
-                      const h = fullHierarchy.find((x) => x.id === pickerForMasterId)
-                      if (h && sel) handleMatch(h, sel)
-                    }}
-                    disabled={
-                      !selections[String(pickerForMasterId)] ||
-                      savingId === pickerForMasterId
-                    }
+                    variant="outline"
+                    size="sm"
+                    className="mr-auto shrink-0"
+                    onClick={() => setCreateMode(true)}
                   >
-                    {savingId === pickerForMasterId ? '...' : 'Eşleştir'}
+                    <PlusCircle className="h-4 w-4 mr-1" />
+                    Yeni kategori oluştur
                   </Button>
-                </DialogClose>
-              </>
+                  <span className="text-sm text-muted-foreground hidden sm:block">
+                    {selections[String(pickerForMasterId)]
+                      ? (() => {
+                          const pc = ideasoftById.get(selections[String(pickerForMasterId)]!)
+                          return pc ? `Seçilen: ${buildDisplayPath(pc)}` : 'Seçildi'
+                        })()
+                      : ''}
+                  </span>
+                  <Button variant="outline" onClick={closePicker}>
+                    İptal
+                  </Button>
+                  <DialogClose asChild>
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        const sel = selections[String(pickerForMasterId)]
+                        const h = fullHierarchy.find((x) => x.id === pickerForMasterId)
+                        if (h && sel) handleMatch(h, sel)
+                      }}
+                      disabled={
+                        !selections[String(pickerForMasterId)] ||
+                        savingId === pickerForMasterId
+                      }
+                    >
+                      {savingId === pickerForMasterId ? '…' : 'Eşleştir'}
+                    </Button>
+                  </DialogClose>
+                </>
+              )
             )}
           </DialogFooter>
         </DialogContent>
