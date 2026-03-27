@@ -1,11 +1,15 @@
 /**
  * Ideasoft Admin API + OAuth2 (mağaza tabanı: https://{subdomain}.myideasoft.com)
+ * REST istekleri önce `.../admin-api`, 404 veya boş koleksiyonda `.../api` ile tekrarlanır.
  * Dokümantasyon: https://apidoc.ideasoft.dev/
  */
 
 type IdeasoftEnv = { DB: D1Database };
 
 const CAT = 'ideasoft';
+
+/** REST kökü: dokümantasyonda /admin-api ve /api (aynı kaynaklar, farklı kök) */
+const IDEASOFT_RESOURCE_PREFIXES = ['admin-api', 'api'] as const;
 
 export type IdeasoftSettings = Record<string, string>;
 
@@ -262,22 +266,140 @@ export function buildIdeasoftAuthorizeUrl(
   return `${authorize}?${params.toString()}`;
 }
 
+/**
+ * Koleksiyon gövdesinden düz öğe listesi.
+ * Ideasoft /categories endpoint'i doğrudan JSON array döndürür (Hydra wrapper yok).
+ * Hem plain array hem de çeşitli sarmalayıcı formatlar desteklenir.
+ */
+function extractHydraMembers(raw: Record<string, unknown> | unknown[]): unknown[] {
+  // Ideasoft: doğrudan array yanıt (en yaygın format)
+  if (Array.isArray(raw)) return raw;
+  const m = raw['hydra:member'];
+  if (Array.isArray(m)) return m;
+  const graph = raw['@graph'];
+  if (Array.isArray(graph)) return graph;
+  const legacy = raw['member'];
+  if (Array.isArray(legacy)) return legacy;
+  const data = raw['data'];
+  if (Array.isArray(data)) return data;
+  const cats = raw['categories'];
+  if (Array.isArray(cats)) return cats;
+  const items = raw['items'];
+  if (Array.isArray(items)) return items;
+  const results = raw['results'];
+  if (Array.isArray(results)) return results;
+  const tree = raw['tree'];
+  if (Array.isArray(tree)) return tree;
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const inner = extractHydraMembers(data as Record<string, unknown>);
+    if (inner.length > 0) return inner;
+  }
+  if (cats && typeof cats === 'object' && !Array.isArray(cats)) {
+    const flat = flattenIdeasoftCategoryTreeNodes(cats);
+    if (flat.length > 0) return flat;
+  }
+  return [];
+}
+
+/** Ağaç kökü veya tek düğüm: children / subcategories ile düz liste */
+function flattenIdeasoftCategoryTreeNodes(node: unknown): unknown[] {
+  if (node == null) return [];
+  if (Array.isArray(node)) {
+    const out: unknown[] = [];
+    for (const n of node) out.push(...flattenIdeasoftCategoryTreeNodes(n));
+    return out;
+  }
+  if (typeof node === 'object') {
+    const o = node as Record<string, unknown>;
+    const out: unknown[] = [o];
+    for (const k of ['children', 'subcategories', 'nodes', 'childCategories']) {
+      const ch = o[k];
+      if (Array.isArray(ch)) out.push(...flattenIdeasoftCategoryTreeNodes(ch));
+    }
+    return out;
+  }
+  return [];
+}
+
+function hydraNextPath(raw: Record<string, unknown>): string | null {
+  const view = raw['hydra:view'] as Record<string, string> | undefined;
+  const nextHref = view?.['hydra:next'];
+  if (typeof nextHref !== 'string' || !nextHref.trim()) return null;
+  if (nextHref.startsWith('http')) return nextHref;
+  return nextHref.startsWith('/') ? nextHref : `/${nextHref}`;
+}
+
+/** Boş yanıtta diğer kökü denemek için — extractHydraMembers ile aynı kurallar (categories/member vb.) */
+function countHydraLikeMembers(raw: Record<string, unknown> | unknown[]): number {
+  return extractHydraMembers(raw).length;
+}
+
+type IdeasoftApiFetchOptions = {
+  /** 200 + boş hydra:member ise sıradaki köke (api) geç */
+  retryEmptyJsonCollection?: boolean;
+};
+
+/**
+ * Admin API istekleri: önce /admin-api, 404 veya (isteğe bağlı) boş koleksiyonda /api.
+ * Tam URL veya /admin-api/... ve /api/... ile başlayan mağaza göreli yollar olduğu gibi kullanılır.
+ */
 async function ideasoftApiFetch(
   storeBase: string,
   accessToken: string,
   path: string,
-  init?: RequestInit
+  init?: RequestInit,
+  options?: IdeasoftApiFetchOptions
 ): Promise<Response> {
   const base = normalizeStoreBase(storeBase);
-  const url = path.startsWith('http') ? path : `${base}/admin-api${path.startsWith('/') ? path : `/${path}`}`;
-  return fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
+  const mergedHeaders: HeadersInit = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: 'application/json',
+    ...(init?.headers || {}),
+  };
+  const doFetch = (url: string) =>
+    fetch(url, {
+      ...init,
+      headers: mergedHeaders,
+    });
+
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return doFetch(path);
+  }
+
+  if (path.startsWith('/admin-api/') || path.startsWith('/api/')) {
+    return doFetch(`${base}${path}`);
+  }
+
+  const rel = path.startsWith('/') ? path : `/${path}`;
+  let last: Response | null = null;
+
+  for (const prefix of IDEASOFT_RESOURCE_PREFIXES) {
+    const url = `${base}/${prefix}${rel}`;
+    const res = await doFetch(url);
+    last = res;
+
+    if (res.status === 401 || res.status === 403) return res;
+
+    if (res.ok) {
+      if (options?.retryEmptyJsonCollection) {
+        const txt = await res.clone().text();
+        try {
+          const j = JSON.parse(txt) as Record<string, unknown> | unknown[];
+          if (countHydraLikeMembers(j) === 0) {
+            continue;
+          }
+        } catch {
+          /* JSON değil veya parse hatası — yanıtı olduğu gibi kullan */
+        }
+      }
+      return res;
+    }
+
+    if (res.status === 404) continue;
+    return res;
+  }
+
+  return last!;
 }
 
 /** Ürün oluştur / güncelle — API Platform (JSON-LD) uyumlu deneme + düz JSON yedek */
@@ -315,6 +437,17 @@ export async function ideasoftUpsertProduct(params: {
     },
     {
       '@context': `${base}/admin-api/contexts/Product`,
+      '@type': 'Product',
+      sku,
+      name,
+      shortDescription: description.slice(0, 500),
+      longDescription: description,
+      stockAmount: Math.max(0, Math.floor(quantity)),
+      listPrice: price.toFixed(2),
+      currency: 'TRY',
+    },
+    {
+      '@context': `${base}/api/contexts/Product`,
       '@type': 'Product',
       sku,
       name,
@@ -472,32 +605,17 @@ function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
   return { id: idStr, name, parentId };
 }
 
-function extractHydraMembers(raw: Record<string, unknown>): unknown[] {
-  const m = raw['hydra:member'];
-  if (Array.isArray(m)) return m;
-  const graph = raw['@graph'];
-  if (Array.isArray(graph)) return graph;
-  const legacy = raw['member'];
-  if (Array.isArray(legacy)) return legacy;
-  const data = raw['data'];
-  if (Array.isArray(data)) return data;
-  const cats = raw['categories'];
-  if (Array.isArray(cats)) return cats;
-  return [];
-}
-
-function hydraNextPath(raw: Record<string, unknown>): string | null {
-  const view = raw['hydra:view'] as Record<string, string> | undefined;
-  const nextHref = view?.['hydra:next'];
-  if (typeof nextHref !== 'string' || !nextHref.trim()) return null;
-  if (nextHref.startsWith('http')) return nextHref;
-  return nextHref.startsWith('/') ? nextHref : `/${nextHref}`;
-}
-
 /** Admin API’de koleksiyon yolu mağazaya göre değişebilir; sırayla dene. */
 const IDEASOFT_CATEGORY_COLLECTION_PATHS = [
+  '/categories?pagination=false',
+  '/categories?itemsPerPage=250&page=1',
   '/categories?itemsPerPage=100',
+  '/categories',
+  '/categories/search_tree',
+  '/product_categories?pagination=false',
+  '/product_categories?itemsPerPage=250&page=1',
   '/product_categories?itemsPerPage=100',
+  '/product-categories?pagination=false',
   '/product-categories?itemsPerPage=100',
 ];
 
@@ -515,34 +633,35 @@ export async function ideasoftFetchCategories(
   accessToken: string
 ): Promise<{ ok: true; categories: IdeasoftCategory[] } | { ok: false; error: string }> {
   const all: IdeasoftCategory[] = [];
-  let firstPath: string | null = null;
-  let rawFirst: Record<string, unknown> | null = null;
+  type RawJson = Record<string, unknown> | unknown[];
+  let rawFirst: RawJson | null = null;
   let gotAnyOkResponse = false;
 
   for (const path of IDEASOFT_CATEGORY_COLLECTION_PATHS) {
-    const res = await ideasoftApiFetch(storeBase, accessToken, path, categoryFetchInit);
+    const res = await ideasoftApiFetch(storeBase, accessToken, path, categoryFetchInit, {
+      retryEmptyJsonCollection: true,
+    });
     const rawText = await res.text();
-    let raw: Record<string, unknown> = {};
+    let raw: RawJson = {};
     try {
-      raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+      raw = rawText ? (JSON.parse(rawText) as RawJson) : {};
     } catch {
       return { ok: false, error: 'Ideasoft kategori yanıtı JSON değil' };
     }
     if (!res.ok) {
       if (res.status === 404) continue;
-      const err = parseIdeasoftHttpError(res.status, raw, rawText);
+      const err = parseIdeasoftHttpError(res.status, raw as Record<string, unknown>, rawText);
       return { ok: false, error: err };
     }
     gotAnyOkResponse = true;
     const arr = extractHydraMembers(raw);
     if (arr.length > 0) {
-      firstPath = path;
       rawFirst = raw;
       break;
     }
   }
 
-  if (!firstPath || !rawFirst) {
+  if (!rawFirst) {
     if (!gotAnyOkResponse) {
       return {
         ok: false,
@@ -553,7 +672,7 @@ export async function ideasoftFetchCategories(
     return { ok: true, categories: [] };
   }
 
-  const collectPage = (raw: Record<string, unknown>) => {
+  const collectPage = (raw: RawJson) => {
     for (const m of extractHydraMembers(raw)) {
       const c = parseIdeasoftCategoryItem(m);
       if (c) all.push(c);
@@ -562,19 +681,59 @@ export async function ideasoftFetchCategories(
 
   collectPage(rawFirst);
 
-  let nextPath = hydraNextPath(rawFirst);
+  // Ideasoft plain-array yanıtında sayfalama yok; Hydra view sadece obje yanıtında olabilir
+  let nextPath = Array.isArray(rawFirst) ? null : hydraNextPath(rawFirst as Record<string, unknown>);
   while (nextPath) {
-    const res = await ideasoftApiFetch(storeBase, accessToken, nextPath, categoryFetchInit);
+    const res = await ideasoftApiFetch(storeBase, accessToken, nextPath, categoryFetchInit, {
+      retryEmptyJsonCollection: true,
+    });
     const rawText = await res.text();
-    let raw: Record<string, unknown> = {};
+    let raw: RawJson = {};
     try {
-      raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+      raw = rawText ? (JSON.parse(rawText) as RawJson) : {};
     } catch {
       break;
     }
     if (!res.ok) break;
     collectPage(raw);
-    nextPath = hydraNextPath(raw);
+    nextPath = Array.isArray(raw) ? null : hydraNextPath(raw as Record<string, unknown>);
+  }
+
+  // Ideasoft: kök kategoriler için hasChildren:1 ise alt kategorileri çek
+  // GET /categories/{id}/sub_categories veya /categories?parent={id}
+  const rootsWithChildren = all.filter(
+    (c) => c.parentId === null
+  );
+  const fetchedSubIds = new Set(all.map((c) => c.id));
+  const subPaths = [
+    (id: string) => `/categories/${id}/sub_categories`,
+    (id: string) => `/categories?parent=${id}&pagination=false`,
+    (id: string) => `/categories?parentId=${id}&pagination=false`,
+  ];
+
+  for (const root of rootsWithChildren) {
+    if (fetchedSubIds.size > 500) break;
+    let fetchedSubs = false;
+    for (const pathFn of subPaths) {
+      if (fetchedSubs) break;
+      const subPath = pathFn(root.id);
+      const res = await ideasoftApiFetch(storeBase, accessToken, subPath, categoryFetchInit);
+      if (!res.ok) continue;
+      const txt = await res.text();
+      let rawSub: RawJson = {};
+      try { rawSub = txt ? (JSON.parse(txt) as RawJson) : {}; } catch { continue; }
+      const subMembers = extractHydraMembers(rawSub);
+      if (subMembers.length === 0) continue;
+      for (const m of subMembers) {
+        const c = parseIdeasoftCategoryItem(m);
+        if (c) {
+          if (!c.parentId) c.parentId = root.id;
+          all.push(c);
+          fetchedSubIds.add(c.id);
+        }
+      }
+      fetchedSubs = true;
+    }
   }
 
   const seen = new Map<string, IdeasoftCategory>();
@@ -582,6 +741,58 @@ export async function ideasoftFetchCategories(
     if (!seen.has(c.id)) seen.set(c.id, c);
   }
   return { ok: true, categories: [...seen.values()] };
+}
+
+export type IdeasoftCategoryDebugResult = {
+  path: string;
+  url: string;
+  status: number;
+  memberCount: number;
+  rawPreview: string;
+};
+
+/** Tanı: her path için Ideasoft ham yanıtını döndürür. Debug endpoint'te kullanılır. */
+export async function ideasoftDebugCategories(
+  storeBase: string,
+  accessToken: string
+): Promise<IdeasoftCategoryDebugResult[]> {
+  const base = normalizeStoreBase(storeBase);
+  const results: IdeasoftCategoryDebugResult[] = [];
+
+  for (const path of IDEASOFT_CATEGORY_COLLECTION_PATHS.slice(0, 6)) {
+    for (const prefix of IDEASOFT_RESOURCE_PREFIXES) {
+      const rel = path.startsWith('/') ? path : `/${path}`;
+      const url = `${base}/${prefix}${rel}`;
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/ld+json, application/json',
+          },
+        });
+        const text = await res.text();
+        let memberCount = 0;
+        try {
+          const j = JSON.parse(text) as Record<string, unknown>;
+          memberCount = extractHydraMembers(j).length;
+          const total = (j as { 'hydra:totalItems'?: number })['hydra:totalItems'];
+          results.push({
+            path: `/${prefix}${rel}`,
+            url,
+            status: res.status,
+            memberCount: memberCount || (typeof total === 'number' ? total : 0),
+            rawPreview: text.slice(0, 500),
+          });
+        } catch {
+          results.push({ path: `/${prefix}${rel}`, url, status: res.status, memberCount: 0, rawPreview: text.slice(0, 200) });
+        }
+      } catch (e) {
+        results.push({ path: `/${prefix}${rel}`, url, status: 0, memberCount: 0, rawPreview: String(e).slice(0, 200) });
+      }
+    }
+  }
+  return results;
 }
 
 const OAUTH_PENDING_KEY = 'ideasoft_oauth_pending';

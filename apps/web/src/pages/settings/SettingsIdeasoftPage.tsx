@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { Save, ShoppingBag, Link2 } from 'lucide-react'
+import { useSearchParams, Link } from 'react-router-dom'
+import { Save, ShoppingBag, Link2, CheckCircle2, XCircle, AlertTriangle, FolderTree } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { API_URL } from '@/lib/api'
 import {
   fetchIdeasoftSettings,
   saveIdeasoftSettings,
@@ -15,13 +16,33 @@ import {
   type IdeasoftSettings,
 } from '@/lib/ideasoft-settings'
 
+type IdeasoftStatus = {
+  connected: boolean
+  hasToken?: boolean
+  isExpired?: boolean
+  expiresInSec?: number
+  storeBase?: string
+  reason?: string
+}
+
 export function SettingsIdeasoftPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [settings, setSettings] = useState<IdeasoftSettings>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [oauthNavigating, setOauthNavigating] = useState(false)
+  const [status, setStatus] = useState<IdeasoftStatus | null>(null)
   const redirectUri = getIdeasoftRedirectUri()
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/status`)
+      const data = await res.json() as IdeasoftStatus
+      setStatus(data)
+    } catch {
+      setStatus(null)
+    }
+  }, [])
 
   const loadSettings = useCallback(async () => {
     setLoading(true)
@@ -37,7 +58,8 @@ export function SettingsIdeasoftPage() {
 
   useEffect(() => {
     loadSettings()
-  }, [loadSettings])
+    loadStatus()
+  }, [loadSettings, loadStatus])
 
   useEffect(() => {
     const connected = searchParams.get('ideasoft_connected')
@@ -104,6 +126,52 @@ export function SettingsIdeasoftPage() {
     }
   }
 
+  function formatExpiry(sec: number) {
+    if (sec <= 0) return null
+    if (sec < 120) return `${sec} saniye`
+    if (sec < 7200) return `${Math.round(sec / 60)} dakika`
+    if (sec < 172800) return `${Math.round(sec / 3600)} saat`
+    return `${Math.round(sec / 86400)} gün`
+  }
+
+  const statusBadge = () => {
+    if (!status) return null
+    if (status.connected) {
+      const exp = formatExpiry(status.expiresInSec ?? 0)
+      return (
+        <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-2 rounded-lg border border-emerald-200 dark:border-emerald-800">
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <span>Bağlı{exp ? ` — token ${exp} içinde yenilenir` : ''}</span>
+          <Link to="/ideasoft/categories" className="ml-auto text-xs underline hover:no-underline flex items-center gap-1">
+            <FolderTree className="h-3 w-3" />Kategoriler
+          </Link>
+        </div>
+      )
+    }
+    if (status.reason === 'config_missing') {
+      return (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg border">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span>Mağaza adresi veya Client ID girilmemiş.</span>
+        </div>
+      )
+    }
+    if (status.isExpired) {
+      return (
+        <div className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span>Token süresi doldu. &quot;Ideasoft ile bağlan&quot; ile yenileyin.</span>
+        </div>
+      )
+    }
+    return (
+      <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg border border-destructive/20">
+        <XCircle className="h-4 w-4 shrink-0" />
+        <span>OAuth bağlantısı yok. Ayarları doldurup &quot;Ideasoft ile bağlan&quot;a tıklayın.</span>
+      </div>
+    )
+  }
+
   return (
     <PageLayout
       title="IdeaSoft"
@@ -124,6 +192,10 @@ export function SettingsIdeasoftPage() {
           </CardTitle>
           <CardDescription>
             Mağaza adresiniz ve Ideasoft panelinden oluşturduğunuz OAuth uygulama bilgileri.{' '}
+            <span className="text-muted-foreground">
+              API çağrıları dokümantasyondaki gibi hem <code className="text-xs">/admin-api</code> hem{' '}
+              <code className="text-xs">/api</code> kökü otomatik denenir.
+            </span>{' '}
             <a
               href="https://apidoc.ideasoft.dev/"
               target="_blank"
@@ -135,6 +207,7 @@ export function SettingsIdeasoftPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4 max-w-xl">
+          {statusBadge()}
           {loading ? (
             <p className="text-sm text-muted-foreground py-6">Yükleniyor...</p>
           ) : (
@@ -219,8 +292,16 @@ export function SettingsIdeasoftPage() {
                   disabled={loading || saving || oauthNavigating}
                 >
                   <Link2 className="h-4 w-4 mr-1" />
-                  {oauthNavigating ? 'Kaydediliyor…' : 'Ideasoft ile bağlan'}
+                  {oauthNavigating ? 'Kaydediliyor…' : status?.connected ? 'Yeniden bağlan' : 'Ideasoft ile bağlan'}
                 </Button>
+                {status?.connected && (
+                  <Button type="button" variant="outline" asChild>
+                    <Link to="/ideasoft/categories">
+                      <FolderTree className="h-4 w-4 mr-1" />
+                      Kategori eşleştirmeye git
+                    </Link>
+                  </Button>
+                )}
                 <p className="text-xs text-muted-foreground w-full">
                   Tıkladığınızda ayarlar önce sunucuya kaydedilir, ardından Ideasoft giriş sayfasına yönlendirilirsiniz.
                 </p>

@@ -8,6 +8,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
@@ -567,6 +568,9 @@ export function ParasutCategoriesPage() {
         <DialogContent className="max-w-md max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Paraşüt Kategorisi Seç</DialogTitle>
+            <DialogDescription className="sr-only">
+              Master kategori ile eşleştirmek için Paraşüt kategorilerinden birini seçin.
+            </DialogDescription>
           </DialogHeader>
           <div className="flex-1 min-h-0 overflow-y-auto py-2">
             <div className="space-y-0.5">

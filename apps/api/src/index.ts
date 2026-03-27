@@ -7,6 +7,7 @@ import {
   getIdeasoftAccessToken,
   getIdeasoftRedirectUriFromRequest,
   ideasoftFindProductIdBySku,
+  ideasoftDebugCategories,
   ideasoftFetchCategories,
   ideasoftUpsertProduct,
   loadIdeasoftSettings,
@@ -1871,6 +1872,32 @@ async function ensureIdeasoftMarketplaceId(db: D1Database): Promise<number> {
   return last?.id ?? 0;
 }
 
+/** Ideasoft bağlantı durumu: token var mı, süresi dolmuş mu? */
+app.get('/api/ideasoft/status', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ connected: false, error: 'DB bulunamadı' });
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    const hasConfig = !!(storeBase && settings.client_id?.trim());
+    if (!hasConfig) return c.json({ connected: false, reason: 'config_missing' });
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = parseInt(settings.IDEASOFT_TOKEN_EXPIRES_AT || '0', 10);
+    const hasToken = !!(settings.IDEASOFT_ACCESS_TOKEN?.trim());
+    const isExpired = hasToken && expiresAt > 0 && expiresAt <= now;
+    const expiresInSec = hasToken && expiresAt > now ? expiresAt - now : 0;
+    return c.json({
+      connected: hasToken && !isExpired,
+      hasToken,
+      isExpired,
+      expiresInSec,
+      storeBase,
+      reason: !hasToken ? 'no_token' : isExpired ? 'expired' : 'ok',
+    });
+  } catch {
+    return c.json({ connected: false, reason: 'error' });
+  }
+});
+
 /** Ideasoft OAuth: yetkilendirme sayfasına yönlendir */
 app.get('/api/ideasoft/oauth/start', async (c) => {
   try {
@@ -2132,6 +2159,22 @@ app.get('/api/ideasoft/categories', async (c) => {
     return c.json({ data: result.categories });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Kategoriler alınamadı' }, 500);
+  }
+});
+
+/** Ideasoft kategori API tanı (ham Ideasoft yanıtı + denenen yollar) */
+app.get('/api/ideasoft/debug/categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    if (!storeBase) return c.json({ error: 'Mağaza adresi ayarlı değil' }, 400);
+    const token = await getIdeasoftAccessToken(c.env);
+    if (!token) return c.json({ error: 'OAuth bağlantısı yok veya süresi doldu', hint: 'Ayarlar > IdeaSoft > Ideasoft ile bağlan' }, 401);
+    const results = await ideasoftDebugCategories(storeBase, token);
+    return c.json({ storeBase, results });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Tanı başarısız' }, 500);
   }
 });
 

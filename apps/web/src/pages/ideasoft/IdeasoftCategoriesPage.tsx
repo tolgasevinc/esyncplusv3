@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown } from 'lucide-react'
+import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -9,6 +9,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
@@ -150,6 +151,9 @@ export function IdeasoftCategoriesPage() {
   const [pickerForMasterId, setPickerForMasterId] = useState<number | null>(null)
   const [expandedMaster, setExpandedMaster] = useState<Set<string>>(new Set())
   const [expandedIdeasoft, setExpandedIdeasoft] = useState<Set<string>>(new Set())
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugData, setDebugData] = useState<{ storeBase?: string; results?: { path: string; url: string; status: number; memberCount: number; rawPreview: string }[]; error?: string } | null>(null)
+  const [debugLoading, setDebugLoading] = useState(false)
 
   const fullHierarchy = useMemo(
     () => buildHierarchyWithSelectableGroups(masterCategories),
@@ -346,6 +350,20 @@ export function IdeasoftCategoriesPage() {
     [mappings]
   )
 
+  const fetchDebug = useCallback(async () => {
+    setDebugLoading(true)
+    setDebugOpen(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/debug/categories`)
+      const data = await res.json()
+      setDebugData(data as typeof debugData)
+    } catch (err) {
+      setDebugData({ error: err instanceof Error ? err.message : 'Tanı başarısız' })
+    } finally {
+      setDebugLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     fetchMaster()
   }, [fetchMaster])
@@ -474,19 +492,31 @@ export function IdeasoftCategoriesPage() {
               <FolderTree className="h-5 w-5" />
               Kategori Eşleştirme
             </CardTitle>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                fetchMaster()
-                fetchIdeasoft()
-                fetchMappings()
-              }}
-              disabled={isLoading}
-            >
-              <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
-              Yenile
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  fetchMaster()
+                  fetchIdeasoft()
+                  fetchMappings()
+                }}
+                disabled={isLoading}
+              >
+                <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
+                Yenile
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => debugOpen ? setDebugOpen(false) : fetchDebug()}
+                disabled={debugLoading}
+                title="Ideasoft API tanı — ham yanıtları göster"
+              >
+                <Bug className="h-4 w-4 mr-1" />
+                {debugLoading ? 'Sorgulanıyor…' : 'Tanı'}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 min-h-0 overflow-hidden flex flex-col">
@@ -509,6 +539,20 @@ export function IdeasoftCategoriesPage() {
               </div>
             ) : (
               <div className="border-t">
+                {!ideasoftLoading && ideasoftCategories.length === 0 && !error && (
+                  <div className="px-4 py-3 text-sm text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/30 border-b space-y-1.5">
+                    <p className="font-medium">Ideasoft kategorileri boş geldi.</p>
+                    <p>Olası nedenler: OAuth uygulamasında kategori/ürün izni yok; mağazada kategori tanımlı değil; API yolu bu mağazada farklı.</p>
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <Button variant="outline" size="sm" className="h-7 text-xs border-amber-400" onClick={() => fetchDebug()}>
+                        <Bug className="h-3 w-3 mr-1" />Ham Ideasoft yanıtını göster (Tanı)
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-7 text-xs border-amber-400" asChild>
+                        <Link to="/ayarlar/entegrasyonlar/ideasoft">OAuth ayarları</Link>
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-[1fr_320px] gap-4 border-b bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground">
                   <div>Master kategori</div>
                   <div>Ideasoft eşleşmesi</div>
@@ -524,9 +568,17 @@ export function IdeasoftCategoriesPage() {
         <DialogContent className="max-w-md max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Ideasoft kategorisi seç</DialogTitle>
+            <DialogDescription className="sr-only">
+              Master kategori ile eşleştirmek için Ideasoft mağaza kategorilerinden birini seçin.
+            </DialogDescription>
           </DialogHeader>
           <div className="flex-1 min-h-0 overflow-y-auto py-2">
             <div className="space-y-0.5">
+              {!ideasoftLoading && ideasoftTree.length === 0 && (
+                <p className="px-3 py-4 text-sm text-muted-foreground text-center">
+                  Ideasoft kategorisi bulunamadı. Mağazada kategori oluşturun veya API izinlerini kontrol edin.
+                </p>
+              )}
               {ideasoftTree.map((node) => {
                 const renderIdeasoftNode = (n: IdeasoftTreeNode, d: number) => {
                   const { category, children } = n
@@ -630,6 +682,41 @@ export function IdeasoftCategoriesPage() {
         Master kategoriler ağaç yapısında. OAuth bağlantısı (Ayarlar → IdeaSoft) gerekir. &quot;Kategori seç&quot; ile
         Ideasoft kategorisi seçip &quot;Eşleştir&quot; ile kaydedin.
       </p>
+
+      {debugOpen && (
+        <div className="mt-4 rounded-lg border bg-muted/40 p-4 text-xs font-mono space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-sm not-italic font-sans">Ideasoft API Tanı</span>
+            <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => setDebugOpen(false)}>Kapat</Button>
+          </div>
+          {debugData?.error && (
+            <p className="text-destructive">{debugData.error}</p>
+          )}
+          {debugData?.storeBase && (
+            <p className="text-muted-foreground">Mağaza: <span className="text-foreground">{debugData.storeBase}</span></p>
+          )}
+          {debugData?.results?.map((r, i) => (
+            <div key={i} className="border rounded p-2 space-y-1 bg-background">
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  'px-1.5 py-0.5 rounded text-[10px] font-semibold',
+                  r.status === 200 && r.memberCount > 0 ? 'bg-emerald-100 text-emerald-800' :
+                  r.status === 200 ? 'bg-amber-100 text-amber-800' :
+                  r.status === 404 ? 'bg-muted text-muted-foreground' :
+                  'bg-destructive/10 text-destructive'
+                )}>
+                  {r.status || 'ERR'}
+                </span>
+                <span className="truncate text-foreground">{r.path}</span>
+                {r.memberCount > 0 && (
+                  <span className="ml-auto shrink-0 text-emerald-700 font-semibold">{r.memberCount} kategori</span>
+                )}
+              </div>
+              <pre className="text-[10px] text-muted-foreground overflow-x-auto whitespace-pre-wrap break-all">{r.rawPreview}</pre>
+            </div>
+          ))}
+        </div>
+      )}
     </PageLayout>
   )
 }
