@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug, PlusCircle, ArrowLeft, ArrowUpDown } from 'lucide-react'
+import { FolderTree, RefreshCw, Link2, ChevronRight, ChevronDown, Bug, PlusCircle, ArrowLeft } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -25,6 +26,18 @@ interface IdeasoftCategory {
   name?: string
   parent_id?: string | null
   sortOrder?: number
+  slug?: string
+}
+
+/** API bazen ad yerine id döner; slug veya okunabilir yedek */
+function ideasoftCategoryLabel(c: IdeasoftCategory): string {
+  const raw = String(c.name ?? '').trim()
+  const id = String(c.id)
+  const looksLikeBareId = raw === id && /^\d+$/.test(raw)
+  if (raw && !looksLikeBareId) return raw
+  const s = c.slug?.trim()
+  if (s) return s.replace(/-/g, ' ')
+  return raw || id
 }
 
 interface MasterTreeNode {
@@ -109,36 +122,6 @@ function buildMasterTree(categories: CategoryItem[], fullHierarchy: HierarchyIte
   return result
 }
 
-interface IdeasoftTreeNode {
-  category: IdeasoftCategory
-  children: IdeasoftTreeNode[]
-}
-
-function buildIdeasoftTree(categories: IdeasoftCategory[]): IdeasoftTreeNode[] {
-  const byParent = new Map<string, IdeasoftCategory[]>()
-  const roots: IdeasoftCategory[] = []
-  categories.forEach((c) => {
-    const pid = c.parent_id
-    const pidStr =
-      pid != null && pid !== '' && String(pid) !== '0' ? String(pid) : null
-    if (!pidStr) roots.push(c)
-    else {
-      if (!byParent.has(pidStr)) byParent.set(pidStr, [])
-      byParent.get(pidStr)!.push(c)
-    }
-  })
-  roots.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-
-  const build = (items: IdeasoftCategory[]): IdeasoftTreeNode[] =>
-    items.map((c) => {
-      const children = byParent.get(String(c.id)) || []
-      children.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-      return { category: c, children: build(children) }
-    })
-
-  return build(roots)
-}
-
 export function IdeasoftCategoriesPage() {
   const [masterCategories, setMasterCategories] = useState<CategoryItem[]>([])
   const [ideasoftCategories, setIdeasoftCategories] = useState<IdeasoftCategory[]>([])
@@ -153,7 +136,6 @@ export function IdeasoftCategoriesPage() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerForMasterId, setPickerForMasterId] = useState<number | null>(null)
   const [expandedMaster, setExpandedMaster] = useState<Set<string>>(new Set())
-  const [expandedIdeasoft, setExpandedIdeasoft] = useState<Set<string>>(new Set())
   const [debugOpen, setDebugOpen] = useState(false)
   const [debugData, setDebugData] = useState<{ storeBase?: string; results?: { path: string; url: string; status: number; memberCount: number; rawPreview: string }[]; error?: string } | null>(null)
   const [debugLoading, setDebugLoading] = useState(false)
@@ -165,13 +147,6 @@ export function IdeasoftCategoriesPage() {
   const [creating, setCreating] = useState(false)
   const createInputRef = useRef<HTMLInputElement>(null)
 
-  // Sıralama paneli
-  const [sortPanel, setSortPanel] = useState(false)
-  const [sortEdits, setSortEdits] = useState<Record<string, string>>({})
-  const [savingSort, setSavingSort] = useState<Set<string>>(new Set())
-  const [savedSort, setSavedSort] = useState<Set<string>>(new Set())
-  const sortTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
-
   const fullHierarchy = useMemo(
     () => buildHierarchyWithSelectableGroups(masterCategories),
     [masterCategories]
@@ -182,8 +157,6 @@ export function IdeasoftCategoriesPage() {
     [masterCategories, fullHierarchy]
   )
 
-  const ideasoftTree = useMemo(() => buildIdeasoftTree(ideasoftCategories), [ideasoftCategories])
-
   const toggleMaster = useCallback((key: string) => {
     setExpandedMaster((p) => {
       const next = new Set(p)
@@ -193,26 +166,7 @@ export function IdeasoftCategoriesPage() {
     })
   }, [])
 
-  const toggleIdeasoft = useCallback((key: string) => {
-    setExpandedIdeasoft((p) => {
-      const next = new Set(p)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }, [])
-
   const matchedIdeasoftIds = useMemo(() => new Set(Object.values(mappings)), [mappings])
-
-  /** Alt kategorilerde eşleşmemiş varsa true (üst kategorileri turuncu yapmak için) */
-  const hasUnmatchedDescendant = useCallback(
-    (node: IdeasoftTreeNode): boolean => {
-      const k = String(node.category.id)
-      if (!matchedIdeasoftIds.has(k)) return true
-      return node.children.some((ch) => hasUnmatchedDescendant(ch))
-    },
-    [matchedIdeasoftIds]
-  )
 
   const ideasoftById = useMemo(() => {
     const m = new Map<string, IdeasoftCategory>()
@@ -228,11 +182,11 @@ export function IdeasoftCategoriesPage() {
       for (let i = 0; i < 10 && cur; i++) {
         if (seen.has(String(cur.id))) break
         seen.add(String(cur.id))
-        const n = String(cur.name ?? '').trim() || (cur === c ? String(cur.id) : '')
+        const n = ideasoftCategoryLabel(cur)
         if (n) parts.unshift(n)
         cur = cur.parent_id ? ideasoftById.get(String(cur.parent_id)) : undefined
       }
-      return parts.join(' > ') || String(c.name ?? '') || String(c.id)
+      return parts.join(' > ') || ideasoftCategoryLabel(c)
     },
     [ideasoftById]
   )
@@ -292,13 +246,20 @@ export function IdeasoftCategoriesPage() {
         )
         throw new Error(msg)
       }
-      const raw = (data.data ?? []) as { id: string; name: string; parentId: string | null; sortOrder?: number }[]
+      const raw = (data.data ?? []) as {
+        id: string
+        name: string
+        parentId: string | null
+        sortOrder?: number
+        slug?: string
+      }[]
       setIdeasoftCategories(
         raw.map((x) => ({
           id: String(x.id),
           name: x.name,
           parent_id: x.parentId != null ? String(x.parentId) : null,
           sortOrder: typeof x.sortOrder === 'number' ? x.sortOrder : undefined,
+          slug: typeof x.slug === 'string' ? x.slug : undefined,
         }))
       )
     } catch (err) {
@@ -443,40 +404,6 @@ export function IdeasoftCategoriesPage() {
     }
   }, [createName, createParentId, pickerForMasterId, mappings, closePicker])
 
-  const handleSortChange = useCallback((id: string, value: string) => {
-    setSortEdits((p) => ({ ...p, [id]: value }))
-    clearTimeout(sortTimers.current[id])
-    const num = parseInt(value, 10)
-    if (isNaN(num)) return
-    sortTimers.current[id] = setTimeout(async () => {
-      setSavingSort((p) => new Set(p).add(id))
-      try {
-        const res = await fetch(`${API_URL}/api/ideasoft/categories/${encodeURIComponent(id)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sortOrder: num }),
-        })
-        if (res.ok) {
-          setIdeasoftCategories((prev) =>
-            prev.map((c) => (c.id === id ? { ...c, sortOrder: num } : c))
-          )
-          setSavedSort((p) => {
-            const next = new Set(p).add(id)
-            setTimeout(() => setSavedSort((s) => { const n = new Set(s); n.delete(id); return n }), 1500)
-            return next
-          })
-        } else {
-          const d = await res.json().catch(() => ({})) as { error?: string }
-          toastError('Hata', d.error || 'Sıralama kaydedilemedi')
-        }
-      } catch {
-        toastError('Hata', 'Sıralama kaydedilemedi')
-      } finally {
-        setSavingSort((p) => { const n = new Set(p); n.delete(id); return n })
-      }
-    }, 800)
-  }, [])
-
   useEffect(() => {
     fetchMaster()
   }, [fetchMaster])
@@ -509,11 +436,21 @@ export function IdeasoftCategoriesPage() {
     const expKey = `m-${item.id}`
     const isExpanded = expandedMaster.has(expKey)
 
+    const ideasoftColText = isMatched
+      ? matchedIdeasoft
+        ? buildDisplayPath(matchedIdeasoft)
+        : String(ideasoftId ?? '')
+      : sel && ideasoftById.get(sel)
+        ? buildDisplayPath(ideasoftById.get(sel)!)
+        : sel
+          ? sel
+          : null
+
     return (
       <div key={item.id}>
         <div
           className={cn(
-            'grid grid-cols-[1fr_320px] gap-4 items-center border-b px-4 py-2.5 text-sm',
+            'grid grid-cols-1 sm:grid-cols-[minmax(0,1.15fr)_minmax(0,1.25fr)_minmax(0,12rem)] gap-3 sm:gap-4 items-start sm:items-center border-b px-4 py-2.5 text-sm',
             isMatched ? 'bg-emerald-50/50 dark:bg-emerald-950/20' : 'hover:bg-muted/30'
           )}
         >
@@ -543,18 +480,27 @@ export function IdeasoftCategoriesPage() {
               [{hierarchyItem.path[hierarchyItem.path.length - 1]?.code}]
             </span>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+
+          <div className="min-w-0 sm:pl-0 pl-8">
+            {ideasoftColText ? (
+              <p className="text-foreground break-words leading-snug">{ideasoftColText}</p>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end sm:pl-0 pl-8">
             {isMatched ? (
               <>
-                <span className="flex-1 truncate text-muted-foreground">
-                  {matchedIdeasoft
-                    ? buildDisplayPath(matchedIdeasoft)
-                    : String(ideasoftId ?? '')}
-                </span>
+                <Badge
+                  className="border-transparent bg-emerald-600/15 text-emerald-900 dark:bg-emerald-500/20 dark:text-emerald-100"
+                >
+                  Eşleşti
+                </Badge>
                 <Button
-                  variant="ghost"
+                  variant="outline"
                   size="sm"
-                  className="h-7 text-xs text-destructive hover:text-destructive shrink-0"
+                  className="h-7 text-xs shrink-0"
                   onClick={() => removeMapping(item.id)}
                   disabled={savingId === item.id}
                 >
@@ -563,6 +509,15 @@ export function IdeasoftCategoriesPage() {
               </>
             ) : (
               <>
+                {savingId === item.id ? (
+                  <Badge variant="secondary">Kaydediliyor…</Badge>
+                ) : sel ? (
+                  <Badge variant="secondary">Kayda hazır</Badge>
+                ) : (
+                  <Badge variant="outline" className="font-normal text-muted-foreground">
+                    Eşleşmedi
+                  </Badge>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -572,22 +527,19 @@ export function IdeasoftCategoriesPage() {
                 >
                   Kategori seç
                 </Button>
-                {sel && (
-                  <span className="text-xs text-muted-foreground truncate max-w-[120px]">
-                    {(() => {
-                      const pc = ideasoftById.get(sel)
-                      return pc ? buildDisplayPath(pc) : sel
-                    })()}
-                  </span>
-                )}
                 <Button
-                  variant="outline"
+                  variant="default"
                   size="sm"
                   className="h-7 px-2 text-xs shrink-0"
                   onClick={() => sel && handleMatch(hierarchyItem, sel)}
                   disabled={savingId === item.id || !sel}
                 >
-                  {savingId === item.id ? '...' : <><Link2 className="h-3.5 w-3 mr-1" />Eşleştir</>}
+                  {savingId === item.id ? '…' : (
+                    <>
+                      <Link2 className="h-3.5 w-3 mr-1" />
+                      Eşleştir
+                    </>
+                  )}
                 </Button>
               </>
             )}
@@ -603,52 +555,43 @@ export function IdeasoftCategoriesPage() {
       title="Ideasoft Kategoriler"
       description="Master kategorileri Ideasoft mağaza kategorileriyle eşleştirin"
       backTo="/ideasoft"
-      contentOverflow="hidden"
+      contentOverflow="auto"
+      headerActions={
+        <div className="flex flex-wrap items-center gap-2 justify-end max-w-[min(100%,42rem)]">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              fetchMaster()
+              fetchIdeasoft()
+              fetchMappings()
+            }}
+            disabled={isLoading}
+          >
+            <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
+            Yenile
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => (debugOpen ? setDebugOpen(false) : fetchDebug())}
+            disabled={debugLoading}
+            title="Ideasoft API tanı — ham yanıtları göster"
+          >
+            <Bug className="h-4 w-4 mr-1" />
+            {debugLoading ? 'Sorgulanıyor…' : 'Tanı'}
+          </Button>
+        </div>
+      }
     >
-      <Card className="flex-1 min-h-0 overflow-hidden flex flex-col">
+      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden">
         <CardHeader className="pb-3 shrink-0">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <CardTitle className="flex items-center gap-2">
-              <FolderTree className="h-5 w-5" />
-              Kategori Eşleştirme
-            </CardTitle>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  fetchMaster()
-                  fetchIdeasoft()
-                  fetchMappings()
-                }}
-                disabled={isLoading}
-              >
-                <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
-                Yenile
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setSortPanel((p) => !p)}
-                title="Ideasoft kategori sıralama düzenleyici"
-              >
-                <ArrowUpDown className="h-4 w-4 mr-1" />
-                Sırala
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => debugOpen ? setDebugOpen(false) : fetchDebug()}
-                disabled={debugLoading}
-                title="Ideasoft API tanı — ham yanıtları göster"
-              >
-                <Bug className="h-4 w-4 mr-1" />
-                {debugLoading ? 'Sorgulanıyor…' : 'Tanı'}
-              </Button>
-            </div>
-          </div>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <FolderTree className="h-5 w-5" />
+            Kategori Eşleştirme
+          </CardTitle>
         </CardHeader>
-        <CardContent className="p-0 flex-1 min-h-0 overflow-hidden flex flex-col">
+        <CardContent className="p-0 flex-1 min-h-0 flex flex-col overflow-hidden">
           {error && (
             <div className="flex flex-col gap-2 p-4 text-destructive bg-destructive/10 mx-4 rounded-lg shrink-0 sm:flex-row sm:items-center sm:justify-between">
               <span>{error}</span>
@@ -662,6 +605,7 @@ export function IdeasoftCategoriesPage() {
               )}
             </div>
           )}
+
           <div className="flex-1 min-h-0 overflow-y-auto">
             {isLoading ? (
               <div className="p-8 text-center text-muted-foreground">Yükleniyor...</div>
@@ -688,9 +632,10 @@ export function IdeasoftCategoriesPage() {
                     </div>
                   </div>
                 )}
-                <div className="grid grid-cols-[1fr_320px] gap-4 border-b bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground">
+                <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1.15fr)_minmax(0,1.25fr)_minmax(0,12rem)] gap-3 sm:gap-4 border-b bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground">
                   <div>Master kategori</div>
                   <div>Ideasoft eşleşmesi</div>
+                  <div className="sm:text-right">Durum</div>
                 </div>
                 {masterTree.map((node) => renderMasterRow(node, 0))}
               </div>
@@ -748,75 +693,46 @@ export function IdeasoftCategoriesPage() {
               </div>
             </div>
           ) : (
-            /* ── Mevcut kategori seçimi ── */
-            <div className="flex-1 min-h-0 overflow-y-auto py-2">
-              <div className="space-y-0.5">
-                {!ideasoftLoading && ideasoftTree.length === 0 && (
-                  <p className="px-3 py-4 text-sm text-muted-foreground text-center">
-                    Ideasoft kategorisi bulunamadı. &quot;Yeni oluştur&quot; ile mağazaya ekleyebilirsiniz.
+            /* ── Mevcut kategori: düz liste (tam yol) — dropdown ── */
+            <div className="flex flex-col gap-2 py-2">
+              <div className="grid gap-1.5">
+                <Label htmlFor="ideasoft-picker-select">Ideasoft kategorisi</Label>
+                <select
+                  id="ideasoft-picker-select"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={ideasoftLoading || ideasoftCategories.length === 0}
+                  value={pickerForMasterId ? (selections[String(pickerForMasterId)] ?? '') : ''}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (pickerForMasterId) {
+                      setSelections((p) => ({ ...p, [String(pickerForMasterId)]: v }))
+                    }
+                  }}
+                >
+                  <option value="">— Kategori seçin —</option>
+                  {ideasoftCategories
+                    .slice()
+                    .sort((a, b) => buildDisplayPath(a).localeCompare(buildDisplayPath(b), 'tr'))
+                    .map((c) => {
+                      const id = String(c.id)
+                      const taken = matchedIdeasoftIds.has(id)
+                      const label = `${buildDisplayPath(c)}${taken ? ' (başka satırda eşleşmiş)' : ''}`
+                      return (
+                        <option key={id} value={id} disabled={taken}>
+                          {label}
+                        </option>
+                      )
+                    })}
+                </select>
+                {ideasoftLoading && (
+                  <p className="text-xs text-muted-foreground">Ideasoft kategorileri yükleniyor…</p>
+                )}
+                {!ideasoftLoading && ideasoftCategories.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    Ideasoft kategorisi bulunamadı. &quot;Yeni kategori oluştur&quot; ile ekleyebilir veya
+                    Ayarlar → OAuth bağlantısını kontrol edebilirsiniz.
                   </p>
                 )}
-                {ideasoftTree.map((node) => {
-                  const renderIdeasoftNode = (n: IdeasoftTreeNode, d: number) => {
-                    const { category, children } = n
-                    const k = String(category.id)
-                    const hasChildren = children.length > 0
-                    const expKey = `p-${k}`
-                    const isExpanded = expandedIdeasoft.has(expKey)
-                    const isDisabled = matchedIdeasoftIds.has(k)
-                    const isSelected = pickerForMasterId && selections[String(pickerForMasterId)] === k
-                    const hasUnmatched = hasUnmatchedDescendant(n)
-                    const displayName = String(category.name ?? '').trim() || String(category.id)
-                    const indent = d * 24
-
-                    return (
-                      <div key={k}>
-                        <div
-                          className={cn(
-                            'flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer',
-                            isDisabled && 'opacity-50',
-                            isSelected && 'bg-primary/10',
-                            hasUnmatched && 'bg-amber-50 dark:bg-amber-950/30',
-                            !isDisabled && 'hover:bg-muted/50'
-                          )}
-                          style={{ paddingLeft: indent + 12 }}
-                        >
-                          <button
-                            type="button"
-                            onClick={() => hasChildren && toggleIdeasoft(expKey)}
-                            className={cn('shrink-0 p-0.5 rounded', !hasChildren && 'invisible')}
-                          >
-                            {hasChildren ? (
-                              isExpanded ? (
-                                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                              ) : (
-                                <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                              )
-                            ) : (
-                              <span className="w-4" />
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isDisabled}
-                            onClick={() => {
-                              if (isDisabled) return
-                              if (pickerForMasterId) {
-                                setSelections((p) => ({ ...p, [String(pickerForMasterId)]: k }))
-                              }
-                            }}
-                            className="flex-1 text-left text-sm truncate"
-                          >
-                            {displayName}
-                            {isDisabled && ' ✓'}
-                          </button>
-                        </div>
-                        {isExpanded && children.map((ch) => renderIdeasoftNode(ch, d + 1))}
-                      </div>
-                    )
-                  }
-                  return renderIdeasoftNode(node, 0)
-                })}
               </div>
             </div>
           )}
@@ -896,62 +812,10 @@ export function IdeasoftCategoriesPage() {
         </DialogContent>
       </Dialog>
 
-      <p className="text-xs text-muted-foreground mt-4 px-1">
-        Master kategoriler ağaç yapısında. OAuth bağlantısı (Ayarlar → IdeaSoft) gerekir. &quot;Kategori seç&quot; ile
-        Ideasoft kategorisi seçip &quot;Eşleştir&quot; ile kaydedin.
+      <p className="text-xs text-muted-foreground mt-4 px-1 shrink-0">
+        Master kategoriler ağaç yapısında. OAuth (Ayarlar → IdeaSoft) gerekir. &quot;Kategori seç&quot; ile Ideasoft
+        kategorisi seçip &quot;Eşleştir&quot; ile kaydedin.
       </p>
-
-      {sortPanel && (
-        <div className="mt-4 rounded-lg border bg-background">
-          <div className="flex items-center justify-between px-4 py-3 border-b">
-            <span className="font-semibold text-sm flex items-center gap-2">
-              <ArrowUpDown className="h-4 w-4" />
-              Ideasoft Kategori Sıralama
-            </span>
-            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSortPanel(false)}>
-              Kapat
-            </Button>
-          </div>
-          {ideasoftCategories.length === 0 ? (
-            <p className="px-4 py-6 text-sm text-muted-foreground text-center">Ideasoft kategorisi bulunamadı.</p>
-          ) : (
-            <div className="divide-y">
-              {ideasoftCategories
-                .slice()
-                .sort((a, b) => {
-                  const sa = a.sortOrder ?? 9999
-                  const sb = b.sortOrder ?? 9999
-                  return sa !== sb ? sa - sb : (a.name ?? '').localeCompare(b.name ?? '')
-                })
-                .map((cat) => {
-                  const id = cat.id
-                  const currentVal = sortEdits[id] ?? String(cat.sortOrder ?? '')
-                  const isSaving = savingSort.has(id)
-                  const isSaved = savedSort.has(id)
-                  return (
-                    <div key={id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/30">
-                      <input
-                        type="number"
-                        className="w-20 h-8 rounded-md border border-input bg-transparent px-2 text-sm text-center shadow-sm focus:outline-none focus:ring-1 focus:ring-ring [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-auto [&::-webkit-inner-spin-button]:appearance-auto"
-                        value={currentVal}
-                        placeholder="—"
-                        onChange={(e) => handleSortChange(id, e.target.value)}
-                      />
-                      <span className="flex-1 text-sm truncate">{buildDisplayPath(cat)}</span>
-                      <span className="text-xs w-14 text-right shrink-0">
-                        {isSaving ? (
-                          <span className="text-muted-foreground">Kaydediliyor…</span>
-                        ) : isSaved ? (
-                          <span className="text-emerald-600">Kaydedildi</span>
-                        ) : null}
-                      </span>
-                    </div>
-                  )
-                })}
-            </div>
-          )}
-        </div>
-      )}
 
       {debugOpen && (
         <div className="mt-4 rounded-lg border bg-muted/40 p-4 text-xs font-mono space-y-3">

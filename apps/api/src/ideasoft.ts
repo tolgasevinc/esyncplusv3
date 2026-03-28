@@ -402,7 +402,398 @@ async function ideasoftApiFetch(
   return last!;
 }
 
-/** Ürün oluştur / güncelle — API Platform (JSON-LD) uyumlu deneme + düz JSON yedek */
+/** Tam mağaza kökü + IRI (bazı endpoint'ler için) */
+function ideasoftRelationIri(
+  storeBase: string,
+  resource: 'categories' | 'brands' | 'currencies',
+  id: string
+): string {
+  const b = normalizeStoreBase(storeBase);
+  return `${b}/admin-api/${resource}/${id}`;
+}
+
+/** Ideasoft ilişki id: yalnızca tam sayı string ise sayı; UUID vb. için null */
+function parseIdeasoftRelationNumericId(raw: string | null | undefined): number | null {
+  if (raw == null || String(raw).trim() === '') return null;
+  const t = String(raw).trim();
+  const n = parseInt(t, 10);
+  if (!Number.isNaN(n) && String(n) === t) return n;
+  return null;
+}
+
+/**
+ * Kategori + para birimi gövde katmanları (marka **dahil değil**).
+ * Ideasoft Product POST/PUT gövdesinde `brand` ilişkisi çoğu kurulumda API Platform denormalizer’ında
+ * 400 veriyor (IRI / @id / tam URL). Marka `ideasoftApplyProductBrandAfterUpsert` ile ayrı istekte atanır.
+ */
+function buildIdeasoftProductCategoryCurrencyLayers(params: {
+  storeBase: string;
+  categoryIdeasoftId?: string | null;
+  currencyIdeasoftNumericId?: number | null;
+}): Record<string, unknown>[] {
+  const { storeBase } = params;
+  const baseNorm = normalizeStoreBase(storeBase);
+  const cNum = parseIdeasoftRelationNumericId(params.categoryIdeasoftId);
+  const cur = params.currencyIdeasoftNumericId;
+  const cStr = (params.categoryIdeasoftId ?? '').trim();
+
+  const enc = (s: string) => encodeURIComponent(s);
+
+  const layers: Record<string, unknown>[] = [];
+
+  const pushIf = (o: Record<string, unknown>) => {
+    if (Object.keys(o).length > 0) layers.push(o);
+  };
+
+  const iriAdmin = (resource: 'categories' | 'currencies', id: string): string | null => {
+    if (!baseNorm || !id.trim()) return null;
+    return `${baseNorm}/admin-api/${resource}/${enc(id.trim())}`;
+  };
+  const iriApi = (resource: 'categories' | 'currencies', id: string): string | null => {
+    if (!baseNorm || !id.trim()) return null;
+    return `${baseNorm}/api/${resource}/${enc(id.trim())}`;
+  };
+
+  if (baseNorm) {
+    const o: Record<string, unknown> = {};
+    const ci = cStr ? iriAdmin('categories', cStr) : null;
+    const cui = cur != null ? iriAdmin('currencies', String(cur)) : null;
+    if (ci) o.category = { '@id': ci };
+    if (cui) o.currency = { '@id': cui };
+    pushIf(o);
+  }
+  if (baseNorm) {
+    const o: Record<string, unknown> = {};
+    const ci = cStr ? iriApi('categories', cStr) : null;
+    const cui = cur != null ? iriApi('currencies', String(cur)) : null;
+    if (ci) o.category = { '@id': ci };
+    if (cui) o.currency = { '@id': cui };
+    pushIf(o);
+  }
+  {
+    const o: Record<string, unknown> = {};
+    if (cNum != null) o.category = cNum;
+    if (cur != null) o.currency = cur;
+    pushIf(o);
+  }
+  {
+    const o: Record<string, unknown> = {};
+    if (cNum != null) o.category = { id: cNum };
+    if (cur != null) o.currency = { id: cur };
+    pushIf(o);
+  }
+  if (baseNorm) {
+    const o: Record<string, unknown> = {};
+    if (cStr) {
+      const u = iriAdmin('categories', cStr);
+      if (u) o.category = u;
+    }
+    if (cur != null) {
+      const u = iriAdmin('currencies', String(cur));
+      if (u) o.currency = u;
+    }
+    pushIf(o);
+  }
+  if (baseNorm) {
+    const o: Record<string, unknown> = {};
+    if (cStr) {
+      const u = iriApi('categories', cStr);
+      if (u) o.category = u;
+    }
+    if (cur != null) {
+      const u = iriApi('currencies', String(cur));
+      if (u) o.currency = u;
+    }
+    pushIf(o);
+  }
+
+  if (layers.length === 0) layers.push({});
+
+  return layers;
+}
+
+/**
+ * Ürün kaydından sonra marka atama (POST gövdesinde brand göndermek Ideasoft’ta güvenilir değil).
+ * Sıra: özel change_* yolları → PATCH → yalnızca marka alanı PUT → GET+temizle+PUT.
+ */
+async function ideasoftApplyProductBrandAfterUpsert(
+  storeBase: string,
+  accessToken: string,
+  productId: string,
+  brandIdeasoftId: string
+): Promise<{ ok: true } | { ok: false; status: number; error: string; raw?: unknown }> {
+  const raw = brandIdeasoftId.trim();
+  if (!raw) return { ok: true };
+  const n = parseIdeasoftRelationNumericId(brandIdeasoftId);
+  const pid = encodeURIComponent(productId);
+
+  /** IRI bu API’de tutarlı şekilde reddediliyor; yalnızca sayısal / id gövdeleri (alt istek sayısı sınırı) */
+  const bodiesBrandOnly: Record<string, unknown>[] = [];
+  if (n != null) {
+    bodiesBrandOnly.push({ brand: n });
+    bodiesBrandOnly.push({ brand: { id: n } });
+    bodiesBrandOnly.push({ brandId: n });
+    bodiesBrandOnly.push({ productBrand: n });
+  }
+
+  const seen = new Set<string>();
+  const deduped = bodiesBrandOnly.filter((b) => {
+    const k = JSON.stringify(b);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  if (deduped.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        'Ideasoft marka eşlemesi sayısal kimlik olmalı (örn. 12). Harf/slug ile eşleme bu uçta desteklenmiyor.',
+    };
+  }
+
+  const patchPath = `/products/${pid}`;
+
+  for (const body of deduped) {
+    for (const ct of ['application/merge-patch+json', 'application/json'] as const) {
+      const res = await ideasoftApiFetch(storeBase, accessToken, patchPath, {
+        method: 'PATCH',
+        headers: { 'Content-Type': ct, Accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const rawJson = await res.json().catch(() => ({}));
+      if (res.ok) return { ok: true };
+      if (res.status === 404 || res.status === 405) break;
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, status: res.status, error: parseIdeasoftHttpError(res.status, rawJson, ''), raw: rawJson };
+      }
+      if (res.status !== 400 && res.status !== 422) break;
+    }
+  }
+
+  const subPaths = [
+    `/products/${pid}/change_brand`,
+    `/products/${pid}/change-brand`,
+    `/products/${pid}/changeBrand`,
+    `/products/${pid}/set_brand`,
+  ];
+
+  for (const p of subPaths) {
+    for (const body of deduped) {
+      const res = await ideasoftApiFetch(storeBase, accessToken, p, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const rawJson = await res.json().catch(() => ({}));
+      if (res.ok) return { ok: true };
+      if (res.status === 404) break;
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, status: res.status, error: parseIdeasoftHttpError(res.status, rawJson, ''), raw: rawJson };
+      }
+      if (res.status !== 400 && res.status !== 422) break;
+    }
+  }
+
+  for (const body of deduped) {
+    const res = await ideasoftApiFetch(storeBase, accessToken, patchPath, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const rawJson = await res.json().catch(() => ({}));
+    if (res.ok) return { ok: true };
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, status: res.status, error: parseIdeasoftHttpError(res.status, rawJson, ''), raw: rawJson };
+    }
+    if (res.status !== 400 && res.status !== 422) break;
+  }
+
+  if (n != null) {
+    const g = await ideasoftGetProduct(storeBase, accessToken, productId);
+    if (g.ok) {
+      const r = { ...(g.raw as Record<string, unknown>) };
+      for (const k of Object.keys(r)) {
+        if (k.startsWith('@') || k.startsWith('hydra:')) delete r[k];
+      }
+      r.brand = n;
+      const res = await ideasoftApiFetch(storeBase, accessToken, patchPath, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(r),
+      });
+      const rawJson = await res.json().catch(() => ({}));
+      if (res.ok) return { ok: true };
+      return { ok: false, status: res.status, error: parseIdeasoftHttpError(res.status, rawJson, ''), raw: rawJson };
+    }
+  }
+
+  return {
+    ok: false,
+    status: 400,
+    error:
+      'Marka Ideasoft ürününe yazılamadı (PATCH/PUT/change_brand ve tam gövde denendi). Mağaza API sürümünü veya marka eşlemesini kontrol edin.',
+  };
+}
+
+/** Tek ürün GET — [Product GET](https://apidoc.ideasoft.dev/docs/admin-api/cgov84whtjhzn-product-get) */
+export async function ideasoftGetProduct(
+  storeBase: string,
+  accessToken: string,
+  productId: string
+): Promise<{ ok: true; raw: Record<string, unknown> } | { ok: false; status: number; error: string }> {
+  const res = await ideasoftApiFetch(storeBase, accessToken, `/products/${encodeURIComponent(productId)}`, {
+    method: 'GET',
+    headers: { Accept: 'application/json, application/ld+json' },
+  });
+  const rawText = await res.text();
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+  } catch {
+    return { ok: false, status: res.status, error: 'Ideasoft ürün yanıtı JSON değil' };
+  }
+  if (!res.ok) {
+    return { ok: false, status: res.status, error: parseIdeasoftHttpError(res.status, raw, rawText) };
+  }
+  return { ok: true, raw };
+}
+
+/**
+ * Ürün kategorisini değiştirir — [ChangeCategoryAction PUT](https://apidoc.ideasoft.dev/docs/admin-api/zlywejrq617xq-product-change-category-action-put)
+ */
+export async function ideasoftChangeProductCategory(
+  storeBase: string,
+  accessToken: string,
+  productId: string,
+  categoryIdeasoftId: string
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const catIri = ideasoftRelationIri(storeBase, 'categories', categoryIdeasoftId);
+  const bodies: Record<string, unknown>[] = [
+    { category: catIri },
+    { category: `/admin-api/categories/${categoryIdeasoftId}` },
+    { category: { id: parseInt(categoryIdeasoftId, 10) } },
+  ];
+  const paths = [
+    `/products/${encodeURIComponent(productId)}/change_category`,
+    `/products/${encodeURIComponent(productId)}/change-category`,
+  ];
+  let lastErr = 'Kategori güncellenemedi';
+  let lastStatus = 500;
+  for (const path of paths) {
+    for (const body of bodies) {
+      const res = await ideasoftApiFetch(storeBase, accessToken, path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const rawText = await res.text();
+      let raw: Record<string, unknown> = {};
+      try {
+        raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+      } catch {
+        /* ignore */
+      }
+      if (res.ok) return { ok: true };
+      lastErr = parseIdeasoftHttpError(res.status, raw, rawText);
+      lastStatus = res.status;
+      if (res.status === 401 || res.status === 403) return { ok: false, status: res.status, error: lastErr };
+      if (res.status !== 400 && res.status !== 422) break;
+    }
+  }
+  return { ok: false, status: lastStatus, error: lastErr };
+}
+
+/** ISO 4217 (TRY, USD, EUR); geçersizse TRY */
+function normalizeIdeasoftCurrencyCode(code: string | undefined | null): string {
+  const c = (code ?? 'TRY').trim().toUpperCase();
+  if (/^[A-Z]{3}$/.test(c)) return c;
+  return 'TRY';
+}
+
+/** Ürün slug'u: önce SKU, boşsa isim; Ideasoft benzersizlik için timestamp eki */
+function makeProductSlug(sku: string, name: string): string {
+  const fromSku = sku.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (fromSku.length >= 2) return fromSku;
+  const fromName = slugify(name) || `urun-${Date.now()}`;
+  return fromName;
+}
+
+/**
+ * Ideasoft para birimi kod eşleme: ISO 4217 → Ideasoft'ta kullanılan kod varyantları.
+ * Örn: "TRY" → ["TRY", "TL", "LIRA"] (Ideasoft Türkçe kurulumlar "TL" kullanır).
+ */
+const IDEASOFT_CURRENCY_ALIASES: Record<string, string[]> = {
+  TRY: ['TRY', 'TL', 'LIRA', '₺'],
+  USD: ['USD', 'US', 'DOLAR', '$'],
+  EUR: ['EUR', 'EURO', '€'],
+  GBP: ['GBP', 'POUND', '£'],
+};
+
+function ideasoftCurrencyMatches(oCode: string, targetIso: string): boolean {
+  const oc = oCode.trim().toUpperCase();
+  const tc = targetIso.trim().toUpperCase();
+  if (oc === tc) return true;
+  const aliases = IDEASOFT_CURRENCY_ALIASES[tc] ?? [];
+  return aliases.some((a) => a.toUpperCase() === oc);
+}
+
+/**
+ * Mağazadaki Currency kaydının sayısal kimliği.
+ * Cloudflare Workers alt istek limiti için: tek koleksiyon yolu + en fazla 3 hydra sayfa (ideasoftApiFetch içi dahil).
+ */
+async function ideasoftResolveCurrencyNumericId(
+  storeBase: string,
+  accessToken: string,
+  isoCode: string
+): Promise<number | null> {
+  const base = normalizeStoreBase(storeBase);
+  const targetIso = isoCode.trim().toUpperCase();
+
+  const toNumericId = (o: Record<string, unknown>): number | null => {
+    if (o.id == null) return null;
+    const n = typeof o.id === 'number' ? o.id : parseInt(String(o.id).trim(), 10);
+    return !Number.isNaN(n) ? n : null;
+  };
+
+  let nextPath: string | null = '/currencies';
+  let pages = 0;
+  const maxPages = 3;
+
+  while (nextPath && pages < maxPages) {
+    pages++;
+    const res = await ideasoftApiFetch(base, accessToken, nextPath, {
+      method: 'GET',
+      headers: { Accept: 'application/json, application/ld+json' },
+    }).catch(() => null);
+    if (!res || !res.ok) break;
+    const rawText = await res.text();
+    let raw: Record<string, unknown> | unknown[] = {};
+    try {
+      raw = rawText ? (JSON.parse(rawText) as Record<string, unknown> | unknown[]) : {};
+    } catch {
+      break;
+    }
+    const arr = Array.isArray(raw) ? raw : (raw as Record<string, unknown>);
+    const members = extractHydraMembers(arr as Record<string, unknown> | unknown[]);
+    for (const m of members) {
+      const o = m as Record<string, unknown>;
+      const oCode =
+        (typeof o.code === 'string' ? o.code :
+         typeof o.iso === 'string' ? o.iso :
+         typeof o.isoCode === 'string' ? o.isoCode : '').trim().toUpperCase();
+      if (!ideasoftCurrencyMatches(oCode, targetIso)) continue;
+      const nid = toNumericId(o);
+      if (nid != null) return nid;
+    }
+    const nextObj = Array.isArray(raw) ? null : hydraNextPath(raw as Record<string, unknown>);
+    nextPath = nextObj;
+  }
+  return null;
+}
+
+/** Ürün oluştur / güncelle — [Product POST](https://apidoc.ideasoft.dev/docs/admin-api/8pzfiy7v4vow9-product-post) / [PUT](https://apidoc.ideasoft.dev/docs/admin-api/p7r7yfxlfjma9-product-put) */
 export async function ideasoftUpsertProduct(params: {
   storeBase: string;
   accessToken: string;
@@ -412,68 +803,190 @@ export async function ideasoftUpsertProduct(params: {
   description: string;
   price: number;
   quantity: number;
-}): Promise<{ ok: true; id: string; raw: unknown } | { ok: false; status: number; error: string; raw?: unknown }> {
-  const { storeBase, accessToken, existingId, sku, name, description, price, quantity } = params;
+  /** ISO 4217; ürün fiyatındaki para birimi (product_currencies.code) */
+  currency?: string | null;
+  /** Eşleştirme sayfalarından gelen Ideasoft kategori / marka id */
+  categoryIdeasoftId?: string | null;
+  brandIdeasoftId?: string | null;
+}): Promise<
+  | { ok: true; id: string; raw: unknown; brandWarning?: string }
+  | { ok: false; status: number; error: string; raw?: unknown }
+> {
+  const { storeBase, accessToken, existingId, sku, name, description, price, quantity, categoryIdeasoftId, brandIdeasoftId } =
+    params;
   const base = normalizeStoreBase(storeBase);
+  const isoCode = normalizeIdeasoftCurrencyCode(params.currency);
 
-  const tryBodies: Record<string, unknown>[] = [
+  /** API Platform şemaları float bekler; string "99.00" → 400 */
+  const listPrice = parseFloat(price.toFixed(2));
+  const stockAmount = Math.max(0, Math.floor(quantity));
+  /** slug — POST için genellikle zorunlu; PUT için mevcut değere dokunmaz */
+  const slug = makeProductSlug(sku, name);
+
+  const currencyNumericId = await ideasoftResolveCurrencyNumericId(base, accessToken, isoCode).catch(() => null);
+
+  const relationLayers = buildIdeasoftProductCategoryCurrencyLayers({
+    storeBase: base,
+    categoryIdeasoftId,
+    currencyIdeasoftNumericId: currencyNumericId,
+  });
+
+  /* 2 şablon yeterli; fazla varyant Workers alt istek limitini aşıyordu */
+  const baseTemplates: Record<string, unknown>[] = [
     {
       sku,
       name,
+      slug,
       shortDescription: description.slice(0, 500),
       longDescription: description,
-      stockAmount: Math.max(0, Math.floor(quantity)),
-      listPrice: price.toFixed(2),
-      currency: 'TRY',
+      stockAmount,
+      listPrice,
+      status: 1,
+    },
+    {
+      sku,
+      name,
+      slug,
+      shortDescription: description.slice(0, 500),
+      longDescription: description,
+      stockAmount,
+      listPrice,
       status: 'ACTIVE',
     },
-    {
-      code: sku,
-      name,
-      description,
-      stockAmount: Math.max(0, Math.floor(quantity)),
-      listPrice: price.toFixed(2),
-      currency: 'TRY',
-    },
-    {
-      '@context': `${base}/admin-api/contexts/Product`,
-      '@type': 'Product',
-      sku,
-      name,
-      shortDescription: description.slice(0, 500),
-      longDescription: description,
-      stockAmount: Math.max(0, Math.floor(quantity)),
-      listPrice: price.toFixed(2),
-      currency: 'TRY',
-    },
-    {
-      '@context': `${base}/api/contexts/Product`,
-      '@type': 'Product',
-      sku,
-      name,
-      shortDescription: description.slice(0, 500),
-      longDescription: description,
-      stockAmount: Math.max(0, Math.floor(quantity)),
-      listPrice: price.toFixed(2),
-      currency: 'TRY',
-    },
   ];
+
+  const tryBodies: Record<string, unknown>[] = [];
+  for (const layer of relationLayers) {
+    for (const tpl of baseTemplates) {
+      tryBodies.push({ ...tpl, ...layer });
+    }
+  }
+
+  const seenJson = new Set<string>();
+  const dedupedTryBodies: Record<string, unknown>[] = [];
+  for (const b of tryBodies) {
+    const key = JSON.stringify(b);
+    if (seenJson.has(key)) continue;
+    seenJson.add(key);
+    dedupedTryBodies.push(b);
+  }
 
   const path = existingId ? `/products/${encodeURIComponent(existingId)}` : '/products';
   const method = existingId ? 'PUT' : 'POST';
 
+  /** PUT: slug read-only; aynı gövdeleri slug'suz tekrarla (limit: Workers alt istek sayısı) */
+  const tryBodiesForMethod = existingId
+    ? [
+        ...dedupedTryBodies,
+        ...dedupedTryBodies.map((b) => {
+          const { slug: _s, ...rest } = b as Record<string, unknown>;
+          return rest;
+        }),
+      ]
+    : dedupedTryBodies;
+
   let lastErr = '';
   let lastStatus = 500;
   let lastRaw: unknown;
-  attemptLoop: for (const body of tryBodies) {
-    const attempts: { ct: string }[] = [{ ct: 'application/json' }, { ct: 'application/ld+json' }];
-    for (const { ct } of attempts) {
-      const res = await ideasoftApiFetch(storeBase, accessToken, path, {
+  attemptLoop: for (const body of tryBodiesForMethod) {
+    const doReq = (ct: string) =>
+      ideasoftApiFetch(storeBase, accessToken, path, {
         method,
         headers: { 'Content-Type': ct },
         body: JSON.stringify(body),
       });
-      const raw = await res.json().catch(() => ({}));
+
+    let res = await doReq('application/json');
+    let raw = await res.json().catch(() => ({}));
+    if (res.status === 415) {
+      res = await doReq('application/ld+json');
+      raw = await res.json().catch(() => ({}));
+    }
+    lastRaw = raw;
+    lastStatus = res.status;
+    if (res.ok) {
+      let id =
+        (raw as { id?: string | number }).id != null
+          ? String((raw as { id?: string | number }).id)
+          : (raw as { data?: { id?: string } })?.data?.id != null
+            ? String((raw as { data?: { id?: string } }).data?.id)
+            : existingId || '';
+      if (!id && !existingId) {
+        const found = await ideasoftFindProductIdBySku(storeBase, accessToken, sku, { maxPaths: 1 });
+        if (found) id = found;
+      }
+      if (id) {
+        const b = (brandIdeasoftId ?? '').trim();
+        if (b) {
+          const br = await ideasoftApplyProductBrandAfterUpsert(storeBase, accessToken, id, b);
+          if (!br.ok) {
+            return {
+              ok: true,
+              id,
+              raw,
+              brandWarning: br.error,
+            };
+          }
+        }
+        return { ok: true, id, raw };
+      }
+      lastErr = 'Yanıtta ürün kimliği yok';
+      continue;
+    }
+    const o = raw as Record<string, unknown>;
+    const detail =
+      (typeof o.detail === 'string' && o.detail.trim()) ||
+      (typeof o.message === 'string' && o.message.trim()) ||
+      (typeof o['hydra:description'] === 'string' && (o['hydra:description'] as string).trim()) ||
+      (typeof o.error === 'string' && o.error.trim()) ||
+      (typeof o.errorMessage === 'string' && o.errorMessage.trim()) ||
+      '';
+    const violationsText = Array.isArray(o.violations)
+      ? (o.violations as Array<{ propertyPath?: string; message?: string }>)
+          .map((v) => `${v.propertyPath ? v.propertyPath + ': ' : ''}${v.message ?? ''}`)
+          .filter(Boolean)
+          .join('; ')
+      : '';
+    lastErr = [detail, violationsText].filter(Boolean).join(' | ') || `HTTP ${res.status}`;
+    if (res.status !== 400 && res.status !== 422) break;
+  }
+
+  /** Bazı kurulumlar ürün oluştururken markayı aynı istekte sayı olarak ister (ayrı PATCH kabul etmez) */
+  const brandNumFallback = parseIdeasoftRelationNumericId(brandIdeasoftId);
+  if (brandNumFallback != null) {
+    const withBrand: Record<string, unknown>[] = [];
+    const seen2 = new Set<string>();
+    for (const b of dedupedTryBodies) {
+      const merged = { ...b, brand: brandNumFallback };
+      const key = JSON.stringify(merged);
+      if (seen2.has(key)) continue;
+      seen2.add(key);
+      withBrand.push(merged);
+    }
+    const tryWithBrand = existingId
+      ? [
+          ...withBrand,
+          ...withBrand.map((b) => {
+            const { slug: _s, ...rest } = b as Record<string, unknown>;
+            return rest;
+          }),
+        ]
+      : withBrand;
+
+    for (const body of tryWithBrand) {
+      const doReq = (ct: string) =>
+        ideasoftApiFetch(storeBase, accessToken, path, {
+          method,
+          headers: { 'Content-Type': ct },
+          body: JSON.stringify(body),
+        });
+
+      let res = await doReq('application/json');
+      let raw = await res.json().catch(() => ({}));
+      if (res.status === 415) {
+        res = await doReq('application/ld+json');
+        raw = await res.json().catch(() => ({}));
+      }
       lastRaw = raw;
       lastStatus = res.status;
       if (res.ok) {
@@ -484,21 +997,31 @@ export async function ideasoftUpsertProduct(params: {
               ? String((raw as { data?: { id?: string } }).data?.id)
               : existingId || '';
         if (!id && !existingId) {
-          const found = await ideasoftFindProductIdBySku(storeBase, accessToken, sku);
+          const found = await ideasoftFindProductIdBySku(storeBase, accessToken, sku, { maxPaths: 1 });
           if (found) id = found;
         }
-        if (id) return { ok: true, id, raw };
+        if (id) {
+          return { ok: true, id, raw };
+        }
         lastErr = 'Yanıtta ürün kimliği yok';
-        continue attemptLoop;
+        continue;
       }
-      lastErr =
-        (raw as { detail?: string }).detail
-        || (raw as { message?: string }).message
-        || (raw as { 'hydra:description'?: string })['hydra:description']
-        || (raw as { error?: string }).error
-        || `HTTP ${res.status}`;
-      if (res.status === 415) continue;
-      if (res.status !== 400 && res.status !== 422) break attemptLoop;
+      const o = raw as Record<string, unknown>;
+      const detail =
+        (typeof o.detail === 'string' && o.detail.trim()) ||
+        (typeof o.message === 'string' && o.message.trim()) ||
+        (typeof o['hydra:description'] === 'string' && (o['hydra:description'] as string).trim()) ||
+        (typeof o.error === 'string' && o.error.trim()) ||
+        (typeof o.errorMessage === 'string' && o.errorMessage.trim()) ||
+        '';
+      const violationsText = Array.isArray(o.violations)
+        ? (o.violations as Array<{ propertyPath?: string; message?: string }>)
+            .map((v) => `${v.propertyPath ? v.propertyPath + ': ' : ''}${v.message ?? ''}`)
+            .filter(Boolean)
+            .join('; ')
+        : '';
+      lastErr = [detail, violationsText].filter(Boolean).join(' | ') || `HTTP ${res.status}`;
+      if (res.status !== 400 && res.status !== 422) break;
     }
   }
 
@@ -509,7 +1032,8 @@ export async function ideasoftUpsertProduct(params: {
 export async function ideasoftFindProductIdBySku(
   storeBase: string,
   accessToken: string,
-  sku: string
+  sku: string,
+  opts?: { maxPaths?: number }
 ): Promise<string | null> {
   const q = encodeURIComponent(sku.trim());
   const paths = [
@@ -517,7 +1041,9 @@ export async function ideasoftFindProductIdBySku(
     `/products?code=${q}`,
     `/products?search=${q}`,
   ];
-  for (const p of paths) {
+  const maxPaths = opts?.maxPaths ?? paths.length;
+  for (let i = 0; i < Math.min(maxPaths, paths.length); i++) {
+    const p = paths[i];
     const res = await ideasoftApiFetch(storeBase, accessToken, p, { method: 'GET' });
     const raw = await res.json().catch(() => ({}));
     if (!res.ok) continue;
@@ -542,6 +1068,10 @@ export type IdeasoftCategory = {
   /** Üst kategori yoksa null */
   parentId: string | null;
   sortOrder?: number;
+  /** Ad yoksa veya sadece sayıysa gösterim için */
+  slug?: string;
+  /** API’de alt kategori var mı (çekim sırasında kullanılır; isteğe bağlı) */
+  hasChildren?: boolean;
 };
 
 function extractIdFromIri(iri: string): string | null {
@@ -578,6 +1108,49 @@ function parseIdeasoftCategoryParent(o: Record<string, unknown>): string | null 
   return null;
 }
 
+/** Ideasoft API'de kategori adı string, i18n objesi veya farklı alan adlarıyla gelebilir */
+function extractIdeasoftCategoryName(o: Record<string, unknown>): string {
+  const slug =
+    typeof o.slug === 'string' && o.slug.trim()
+      ? o.slug.trim().replace(/-/g, ' ')
+      : '';
+
+  const stringFields = ['name', 'title', 'label', 'categoryName', 'category_name', 'displayName'] as const;
+  for (const key of stringFields) {
+    const v = o[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+
+  const nameVal = o.name;
+  if (nameVal != null && typeof nameVal === 'object' && !Array.isArray(nameVal)) {
+    const obj = nameVal as Record<string, unknown>;
+    for (const k of ['tr', 'TR', 'tr-TR', 'default', 'name']) {
+      const v = obj[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    for (const v of Object.values(obj)) {
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+  }
+
+  const trans = o.translations;
+  if (trans && typeof trans === 'object' && !Array.isArray(trans)) {
+    const t = trans as Record<string, unknown>;
+    if (typeof t.name === 'string' && t.name.trim()) return t.name.trim();
+    if (typeof t.title === 'string' && t.title.trim()) return t.title.trim();
+    for (const v of Object.values(t)) {
+      if (typeof v === 'string' && v.trim()) return v.trim();
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const inner = v as Record<string, unknown>;
+        if (typeof inner.name === 'string' && inner.name.trim()) return inner.name.trim();
+      }
+    }
+  }
+
+  if (slug) return slug;
+  return '';
+}
+
 function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
   if (typeof item === 'string') {
     const id = extractIdFromIri(item);
@@ -600,15 +1173,8 @@ function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
   else if (typeof o['@id'] === 'string') idStr = extractIdFromIri(o['@id']);
   if (!idStr) return null;
 
-  const nameRaw =
-    typeof o.name === 'string'
-      ? o.name
-      : typeof o.title === 'string'
-        ? o.title
-        : typeof (o as { translations?: { name?: string } }).translations?.name === 'string'
-          ? (o as { translations: { name: string } }).translations.name
-          : '';
-  const name = nameRaw.trim() || idStr;
+  const nameFromFields = extractIdeasoftCategoryName(o);
+  const name = nameFromFields.trim() || idStr;
 
   const parentId = parseIdeasoftCategoryParent(o);
 
@@ -620,7 +1186,20 @@ function parseIdeasoftCategoryItem(item: unknown): IdeasoftCategory | null {
         ? parseInt(sortOrderRaw, 10)
         : undefined;
 
-  return { id: idStr, name, parentId, ...(sortOrder !== undefined ? { sortOrder } : {}) };
+  const slugStr = typeof o.slug === 'string' && o.slug.trim() ? o.slug.trim() : undefined;
+
+  const hcRaw = o.hasChildren ?? o.has_children;
+  const hasChildren =
+    hcRaw === 1 || hcRaw === true || hcRaw === '1' || hcRaw === 'true';
+
+  return {
+    id: idStr,
+    name,
+    parentId,
+    ...(sortOrder !== undefined ? { sortOrder } : {}),
+    ...(slugStr ? { slug: slugStr } : {}),
+    ...(hasChildren ? { hasChildren: true } : {}),
+  };
 }
 
 /** Admin API’de koleksiyon yolu mağazaya göre değişebilir; sırayla dene. */
@@ -659,36 +1238,42 @@ export async function ideasoftFetchCategories(
   storeBase: string,
   accessToken: string
 ): Promise<{ ok: true; categories: IdeasoftCategory[] } | { ok: false; error: string }> {
-  const all: IdeasoftCategory[] = [];
   type RawJson = Record<string, unknown> | unknown[];
-  let rawFirst: RawJson | null = null;
+  const byId = new Map<string, IdeasoftCategory>();
   let gotAnyOkResponse = false;
 
+  const mergePage = (raw: RawJson) => {
+    for (const m of extractHydraMembers(raw)) {
+      const c = parseIdeasoftCategoryItem(m);
+      if (c) byId.set(c.id, c);
+    }
+  };
+
   for (const path of IDEASOFT_CATEGORY_COLLECTION_PATHS) {
-    const res = await ideasoftApiFetch(storeBase, accessToken, path, categoryFetchInit, {
-      retryEmptyJsonCollection: true,
-    });
-    const rawText = await res.text();
-    let raw: RawJson = {};
-    try {
-      raw = rawText ? (JSON.parse(rawText) as RawJson) : {};
-    } catch {
-      return { ok: false, error: 'Ideasoft kategori yanıtı JSON değil' };
-    }
-    if (!res.ok) {
-      if (res.status === 404) continue;
-      const err = parseIdeasoftHttpError(res.status, raw as Record<string, unknown>, rawText);
-      return { ok: false, error: err };
-    }
-    gotAnyOkResponse = true;
-    const arr = extractHydraMembers(raw);
-    if (arr.length > 0) {
-      rawFirst = raw;
-      break;
+    let nextPath: string | null = path;
+    while (nextPath) {
+      const res = await ideasoftApiFetch(storeBase, accessToken, nextPath, categoryFetchInit, {
+        retryEmptyJsonCollection: true,
+      });
+      const rawText = await res.text();
+      let raw: RawJson = {};
+      try {
+        raw = rawText ? (JSON.parse(rawText) as RawJson) : {};
+      } catch {
+        return { ok: false, error: 'Ideasoft kategori yanıtı JSON değil' };
+      }
+      if (!res.ok) {
+        if (res.status === 404) break;
+        const err = parseIdeasoftHttpError(res.status, raw as Record<string, unknown>, rawText);
+        return { ok: false, error: err };
+      }
+      gotAnyOkResponse = true;
+      mergePage(raw);
+      nextPath = Array.isArray(raw) ? null : hydraNextPath(raw as Record<string, unknown>);
     }
   }
 
-  if (!rawFirst) {
+  if (byId.size === 0) {
     if (!gotAnyOkResponse) {
       return {
         ok: false,
@@ -699,84 +1284,175 @@ export async function ideasoftFetchCategories(
     return { ok: true, categories: [] };
   }
 
-  const collectPage = (raw: RawJson) => {
-    for (const m of extractHydraMembers(raw)) {
-      const c = parseIdeasoftCategoryItem(m);
-      if (c) all.push(c);
-    }
-  };
-
-  collectPage(rawFirst);
-
-  // Ideasoft plain-array yanıtında sayfalama yok; Hydra view sadece obje yanıtında olabilir
-  let nextPath = Array.isArray(rawFirst) ? null : hydraNextPath(rawFirst as Record<string, unknown>);
-  while (nextPath) {
-    const res = await ideasoftApiFetch(storeBase, accessToken, nextPath, categoryFetchInit, {
-      retryEmptyJsonCollection: true,
-    });
-    const rawText = await res.text();
-    let raw: RawJson = {};
-    try {
-      raw = rawText ? (JSON.parse(rawText) as RawJson) : {};
-    } catch {
-      break;
-    }
-    if (!res.ok) break;
-    collectPage(raw);
-    nextPath = Array.isArray(raw) ? null : hydraNextPath(raw as Record<string, unknown>);
-  }
-
-  // Ideasoft: kök kategoriler için hasChildren:1 ise alt kategorileri çek
-  // GET /categories/{id}/sub_categories veya /categories?parent={id}
-  const rootsWithChildren = all.filter(
-    (c) => c.parentId === null
-  );
-  const fetchedSubIds = new Set(all.map((c) => c.id));
-  const subPaths = [
+  const subPathFns = [
     (id: string) => `/categories/${id}/sub_categories`,
     (id: string) => `/categories?parent=${id}&pagination=false`,
     (id: string) => `/categories?parentId=${id}&pagination=false`,
   ];
 
-  for (const root of rootsWithChildren) {
-    if (fetchedSubIds.size > 500) break;
-    let fetchedSubs = false;
-    for (const pathFn of subPaths) {
-      if (fetchedSubs) break;
-      const subPath = pathFn(root.id);
-      const res = await ideasoftApiFetch(storeBase, accessToken, subPath, categoryFetchInit);
-      if (!res.ok) continue;
-      const txt = await res.text();
-      let rawSub: RawJson = {};
-      try { rawSub = txt ? (JSON.parse(txt) as RawJson) : {}; } catch { continue; }
-      const subMembers = extractHydraMembers(rawSub);
-      if (subMembers.length === 0) continue;
-      for (const m of subMembers) {
-        const c = parseIdeasoftCategoryItem(m);
-        if (c) {
-          if (!c.parentId) c.parentId = root.id;
-          all.push(c);
-          fetchedSubIds.add(c.id);
+  const fetchSubCategoriesForParent = async (parentId: string): Promise<IdeasoftCategory[]> => {
+    const batch: IdeasoftCategory[] = [];
+    for (const pathFn of subPathFns) {
+      batch.length = 0;
+      let subNext: string | null = pathFn(parentId);
+      while (subNext) {
+        const res = await ideasoftApiFetch(storeBase, accessToken, subNext, categoryFetchInit);
+        if (!res.ok) break;
+        const txt = await res.text();
+        let rawSub: RawJson = {};
+        try {
+          rawSub = txt ? (JSON.parse(txt) as RawJson) : {};
+        } catch {
+          break;
         }
+        for (const m of extractHydraMembers(rawSub)) {
+          const c = parseIdeasoftCategoryItem(m);
+          if (c) {
+            const withParent: IdeasoftCategory = !c.parentId ? { ...c, parentId: parentId } : c;
+            batch.push(withParent);
+          }
+        }
+        subNext = Array.isArray(rawSub) ? null : hydraNextPath(rawSub as Record<string, unknown>);
       }
-      fetchedSubs = true;
+      if (batch.length > 0) return [...batch];
+    }
+    return [];
+  };
+
+  /** Köklerden başlayarak her düzeyde alt kategorileri çek (yalnızca kök + bir seviye değil). */
+  const subFetchedParents = new Set<string>();
+  const queue: string[] = [];
+  for (const c of byId.values()) {
+    if (c.parentId === null) queue.push(c.id);
+  }
+  const maxSubFetches = 4000;
+  while (queue.length > 0 && subFetchedParents.size < maxSubFetches) {
+    const id = queue.shift()!;
+    if (subFetchedParents.has(id)) continue;
+    subFetchedParents.add(id);
+    const subs = await fetchSubCategoriesForParent(id);
+    for (const nc of subs) {
+      if (!byId.has(nc.id)) {
+        byId.set(nc.id, nc);
+        queue.push(nc.id);
+      }
     }
   }
 
-  const seen = new Map<string, IdeasoftCategory>();
-  for (const c of all) {
-    if (!seen.has(c.id)) seen.set(c.id, c);
-  }
-  return { ok: true, categories: [...seen.values()] };
+  return { ok: true, categories: [...byId.values()] };
 }
 
-export type IdeasoftCategoryDebugResult = {
-  path: string;
-  url: string;
-  status: number;
-  memberCount: number;
-  rawPreview: string;
+/** Admin API — mağaza markaları (düz liste) */
+export type IdeasoftBrand = {
+  id: string;
+  name: string;
+  slug?: string;
 };
+
+function parseIdeasoftBrandItem(item: unknown): IdeasoftBrand | null {
+  if (typeof item === 'string') {
+    const id = extractIdFromIri(item);
+    if (!id) return null;
+    return { id, name: id };
+  }
+  if (!item || typeof item !== 'object') return null;
+  const o = item as Record<string, unknown>;
+
+  if (o.status != null && Number(o.status) !== 1) return null;
+  if (o.deletedAt != null && o.deletedAt !== '' && o.deletedAt !== false) return null;
+  if (o.deleted === true || o.deleted === 1) return null;
+  if (o.is_deleted === true || o.is_deleted === 1 || o.is_deleted === '1') return null;
+
+  let idStr: string | null = null;
+  if (o.id != null && String(o.id).trim()) idStr = String(o.id).trim();
+  else if (typeof o['@id'] === 'string') idStr = extractIdFromIri(o['@id']);
+  if (!idStr) return null;
+
+  const nameRaw =
+    (typeof o.name === 'string' && o.name.trim()) ||
+    (typeof o.title === 'string' && o.title.trim()) ||
+    (typeof o.label === 'string' && o.label.trim()) ||
+    '';
+  const name = nameRaw || idStr;
+  const slugStr = typeof o.slug === 'string' && o.slug.trim() ? o.slug.trim() : undefined;
+
+  return { id: idStr, name, ...(slugStr ? { slug: slugStr } : {}) };
+}
+
+const IDEASOFT_BRAND_COLLECTION_PATHS = [
+  '/brands?pagination=false',
+  '/brands?itemsPerPage=250&page=1',
+  '/brands?itemsPerPage=100',
+  '/brands',
+  '/product_brands?pagination=false',
+  '/product_brands?itemsPerPage=250&page=1',
+  '/product_brands?itemsPerPage=100',
+  '/product-brands?pagination=false',
+  '/manufacturers?pagination=false',
+  '/manufacturers?itemsPerPage=250&page=1',
+  '/manufacturers',
+];
+
+const brandFetchInit: RequestInit = {
+  method: 'GET',
+  headers: { Accept: 'application/ld+json, application/json' },
+};
+
+/**
+ * Tüm markaları çeker (hydra sayfalama, birden fazla koleksiyon yolu birleştirilir).
+ */
+export async function ideasoftFetchBrands(
+  storeBase: string,
+  accessToken: string
+): Promise<{ ok: true; brands: IdeasoftBrand[] } | { ok: false; error: string }> {
+  type RawJson = Record<string, unknown> | unknown[];
+  const byId = new Map<string, IdeasoftBrand>();
+  let gotAnyOkResponse = false;
+
+  const mergePage = (raw: RawJson) => {
+    for (const m of extractHydraMembers(raw)) {
+      const b = parseIdeasoftBrandItem(m);
+      if (b) byId.set(b.id, b);
+    }
+  };
+
+  for (const path of IDEASOFT_BRAND_COLLECTION_PATHS) {
+    let nextPath: string | null = path;
+    while (nextPath) {
+      const res = await ideasoftApiFetch(storeBase, accessToken, nextPath, brandFetchInit, {
+        retryEmptyJsonCollection: true,
+      });
+      const rawText = await res.text();
+      let raw: RawJson = {};
+      try {
+        raw = rawText ? (JSON.parse(rawText) as RawJson) : {};
+      } catch {
+        return { ok: false, error: 'Ideasoft marka yanıtı JSON değil' };
+      }
+      if (!res.ok) {
+        if (res.status === 404) break;
+        const err = parseIdeasoftHttpError(res.status, raw as Record<string, unknown>, rawText);
+        return { ok: false, error: err };
+      }
+      gotAnyOkResponse = true;
+      mergePage(raw);
+      nextPath = Array.isArray(raw) ? null : hydraNextPath(raw as Record<string, unknown>);
+    }
+  }
+
+  if (byId.size === 0) {
+    if (!gotAnyOkResponse) {
+      return {
+        ok: false,
+        error:
+          'Ideasoft marka API yolu bulunamadı veya yanıt alınamadı. OAuth uygulamasında marka okuma iznini ve Ideasoft dokümantasyonundaki Brand koleksiyon yolunu kontrol edin.',
+      };
+    }
+    return { ok: true, brands: [] };
+  }
+
+  return { ok: true, brands: [...byId.values()] };
+}
 
 /** Türkçe dahil karakterleri URL uyumlu slug'a dönüştürür */
 function slugify(text: string): string {
@@ -790,6 +1466,127 @@ function slugify(text: string): string {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
 }
+
+/**
+ * Ideasoft'ta yeni marka oluşturur (POST /brands veya /product_brands).
+ */
+export async function ideasoftCreateBrand(
+  storeBase: string,
+  accessToken: string,
+  name: string
+): Promise<{ ok: true; id: string; name: string } | { ok: false; error: string }> {
+  const trimmedName = name.trim();
+  if (!trimmedName) return { ok: false, error: 'Marka adı gerekli.' };
+  const slug = slugify(trimmedName) || `marka-${Date.now()}`;
+
+  const postPaths = ['/brands', '/product_brands', '/manufacturers'];
+  const bodies: Record<string, unknown>[] = [
+    { name: trimmedName, slug, status: 1 },
+    { name: trimmedName, slug, status: 1, sortOrder: 0 },
+  ];
+
+  let lastErr = 'Ideasoft marka oluşturma başarısız';
+  for (const rel of postPaths) {
+    for (const body of bodies) {
+      const res = await ideasoftApiFetch(storeBase, accessToken, rel, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const rawText = await res.text();
+      let raw: Record<string, unknown> = {};
+      try {
+        raw = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+      } catch {
+        /* ignore */
+      }
+
+      if (res.ok) {
+        let id =
+          raw.id != null
+            ? String(raw.id)
+            : (raw as { data?: { id?: unknown } }).data?.id != null
+              ? String((raw as { data: { id: unknown } }).data.id)
+              : '';
+        if (!id) {
+          const loc = res.headers.get('Location') || '';
+          const m = loc.match(/\/(\d+)\/?$/);
+          if (m) id = m[1];
+        }
+        if (!id) return { ok: false, error: 'Ideasoft marka oluşturuldu ama ID döndürülmedi.' };
+        const createdName = typeof raw.name === 'string' ? raw.name : trimmedName;
+        return { ok: true, id, name: createdName };
+      }
+
+      lastErr = parseIdeasoftHttpError(res.status, raw, rawText);
+      if (res.status === 401 || res.status === 403) return { ok: false, error: lastErr };
+      if (res.status === 404) break;
+      if (res.status === 400 || res.status === 422) continue;
+      return { ok: false, error: lastErr };
+    }
+  }
+
+  return { ok: false, error: lastErr };
+}
+
+export type IdeasoftBrandDebugResult = {
+  path: string;
+  url: string;
+  status: number;
+  memberCount: number;
+  rawPreview: string;
+};
+
+export async function ideasoftDebugBrands(
+  storeBase: string,
+  accessToken: string
+): Promise<IdeasoftBrandDebugResult[]> {
+  const base = normalizeStoreBase(storeBase);
+  const results: IdeasoftBrandDebugResult[] = [];
+
+  for (const path of IDEASOFT_BRAND_COLLECTION_PATHS.slice(0, 8)) {
+    for (const prefix of IDEASOFT_RESOURCE_PREFIXES) {
+      const rel = path.startsWith('/') ? path : `/${path}`;
+      const url = `${base}/${prefix}${rel}`;
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/ld+json, application/json',
+          },
+        });
+        const text = await res.text();
+        let memberCount = 0;
+        try {
+          const j = JSON.parse(text) as Record<string, unknown>;
+          memberCount = extractHydraMembers(j).length;
+          const total = (j as { 'hydra:totalItems'?: number })['hydra:totalItems'];
+          results.push({
+            path: `/${prefix}${rel}`,
+            url,
+            status: res.status,
+            memberCount: memberCount || (typeof total === 'number' ? total : 0),
+            rawPreview: text.slice(0, 500),
+          });
+        } catch {
+          results.push({ path: `/${prefix}${rel}`, url, status: res.status, memberCount: 0, rawPreview: text.slice(0, 200) });
+        }
+      } catch (e) {
+        results.push({ path: `/${prefix}${rel}`, url, status: 0, memberCount: 0, rawPreview: String(e).slice(0, 200) });
+      }
+    }
+  }
+  return results;
+}
+
+export type IdeasoftCategoryDebugResult = {
+  path: string;
+  url: string;
+  status: number;
+  memberCount: number;
+  rawPreview: string;
+};
 
 /**
  * Ideasoft'ta yeni kategori oluşturur.

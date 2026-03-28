@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { FolderTree, Settings, Store } from 'lucide-react'
+import { FolderTree, Settings, Store, Tag, Upload } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -10,6 +10,20 @@ const sections = [
     description: 'Master kategorileri Ideasoft mağaza kategorileriyle eşleştirin',
     icon: FolderTree,
     path: '/ideasoft/categories',
+  },
+  {
+    id: 'ideasoft-markalar',
+    title: 'Marka eşleştirme',
+    description: 'Master markaları Ideasoft mağaza markalarıyla eşleştirin',
+    icon: Tag,
+    path: '/ideasoft/brands',
+  },
+  {
+    id: 'ideasoft-urun-aktarim',
+    title: 'Ürün aktarımı',
+    description: 'Ürünleri Ideasoft’a aktarın veya güncelleyin',
+    icon: Upload,
+    path: '/ideasoft/products',
   },
   {
     id: 'ideasoft-ayarlar',
@@ -29,7 +43,7 @@ export function IdeasoftPage() {
             <Store className="h-6 w-6 text-primary" />
             <CardTitle>Menü</CardTitle>
           </div>
-          <CardDescription>Kategoriler ve bağlantı ayarları</CardDescription>
+          <CardDescription>Kategori ve marka eşleştirme, bağlantı ayarları</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

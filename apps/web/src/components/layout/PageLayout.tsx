@@ -45,7 +45,7 @@ export function PageLayout({
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Sabit Header */}
-      <header className="shrink-0 flex items-start justify-between gap-4 p-4 border-b theme-page-bg">
+      <header className="shrink-0 flex flex-wrap items-start justify-between gap-4 p-4 border-b theme-page-bg">
         <div className="flex items-center gap-4 min-w-0">
           {logo && (
             <div className="shrink-0 w-9 h-9 flex items-center justify-center overflow-hidden rounded-lg bg-muted">
@@ -66,7 +66,7 @@ export function PageLayout({
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0 min-w-0 sm:ml-auto">
           {headerActions}
           {showRefresh && onRefresh && (
             <Tooltip>

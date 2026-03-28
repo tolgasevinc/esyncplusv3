@@ -295,12 +295,13 @@ export function SettingsIdeasoftPage() {
                   {oauthNavigating ? 'Kaydediliyor…' : status?.connected ? 'Yeniden bağlan' : 'Ideasoft ile bağlan'}
                 </Button>
                 {status?.connected && (
-                  <Button type="button" variant="outline" asChild>
-                    <Link to="/ideasoft/categories">
-                      <FolderTree className="h-4 w-4 mr-1" />
-                      Kategori eşleştirmeye git
-                    </Link>
-                  </Button>
+                  <Link
+                    to="/ideasoft/categories"
+                    className="inline-flex items-center rounded-md border border-input bg-background px-4 h-10 text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
+                  >
+                    <FolderTree className="h-4 w-4 mr-1" />
+                    Kategori eşleştirmeye git
+                  </Link>
                 )}
                 <p className="text-xs text-muted-foreground w-full">
                   Tıkladığınızda ayarlar önce sunucuya kaydedilir, ardından Ideasoft giriş sayfasına yönlendirilirsiniz.

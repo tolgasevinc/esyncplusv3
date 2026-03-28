@@ -104,6 +104,28 @@ export function getParasutSidebarIconSrc(menus: SidebarMenuItem[]): string | und
   return undefined
 }
 
+/**
+ * Sidebar’daki Ideasoft kök menü satırı ile aynı ikon kaynağı (PNG storage path veya data URL).
+ */
+export function getIdeasoftSidebarIconSrc(menus: SidebarMenuItem[]): string | undefined {
+  const rows = menus.filter(isSidebarMenuRow)
+  const root =
+    rows.find((m) => m.moduleId === 'ideasoft') ??
+    rows.find((m) => m.link?.trim() === '/ideasoft')
+  const item =
+    root ??
+    rows.find((m) => {
+      const l = m.label.toLowerCase()
+      return l.includes('ideasoft')
+    })
+  if (!item) return undefined
+  const path = item.iconPath?.trim()
+  if (path) return getImageDisplayUrl(path)
+  const data = item.iconDataUrl?.trim()
+  if (data) return data
+  return undefined
+}
+
 // ---------- API (sidebar_menu_items tablosu) ----------
 
 /** API'den sidebar menülerini çeker. */
