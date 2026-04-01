@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { FolderTree, Settings, Store, Tag, Upload } from 'lucide-react'
+import { Coins, FolderTree, Settings, Store, Tag, Upload } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageLayout } from '@/components/layout/PageLayout'
 
@@ -17,6 +17,13 @@ const sections = [
     description: 'Master markaları Ideasoft mağaza markalarıyla eşleştirin',
     icon: Tag,
     path: '/ideasoft/brands',
+  },
+  {
+    id: 'ideasoft-parabirimleri',
+    title: 'Para birimleri',
+    description: 'Master para birimlerini Ideasoft Currency kayıtlarıyla eşleştirin',
+    icon: Coins,
+    path: '/ideasoft/currencies',
   },
   {
     id: 'ideasoft-urun-aktarim',
@@ -43,7 +50,7 @@ export function IdeasoftPage() {
             <Store className="h-6 w-6 text-primary" />
             <CardTitle>Menü</CardTitle>
           </div>
-          <CardDescription>Kategori ve marka eşleştirme, bağlantı ayarları</CardDescription>
+          <CardDescription>Kategori, marka ve para birimi eşleştirme, bağlantı ayarları</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

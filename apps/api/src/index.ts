@@ -12,10 +12,16 @@ import {
   ideasoftUpdateCategory,
   ideasoftDebugBrands,
   ideasoftDebugCategories,
+  ideasoftDebugCurrencies,
   ideasoftFetchBrands,
+  ideasoftFetchCurrencies,
   ideasoftFetchCategories,
   ideasoftCreateBrand,
   ideasoftUpsertProduct,
+  ideasoftUploadProductImages,
+  ideasoftChangeProductCategory,
+  ideasoftPatchProductMarketingAndSeo,
+  ideasoftDataUrlBase64PayloadNonEmpty,
   loadIdeasoftSettings,
   normalizeStoreBase,
   parseReturnToQuery,
@@ -1354,8 +1360,7 @@ app.get('/api/products/:id', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const id = c.req.param('id');
-    const row = await c.env.DB.prepare(
-      `SELECT p.*, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id,
+    const productDetailSql = `SELECT p.*, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id,
        b.name as brand_name, b.code as brand_code, b.image as brand_image,
        grp.code as group_code, grp.name as group_name, grp.color as group_color,
        cat.code as category_code, cat.name as category_name, cat.color as category_color,
@@ -1364,7 +1369,7 @@ app.get('/api/products/:id', async (c) => {
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.color END as subcategory_color,
        t.name as type_name, t.color as type_color, u.name as unit_name, cur.name as currency_name, cur.symbol as currency_symbol,
        pig.name as product_item_group_name, pig.code as product_item_group_code, pig.color as product_item_group_color, pig.sort_order as product_item_group_sort_order,
-       pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
+       pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
        FROM products p
        LEFT JOIN product_item_groups pig ON p.product_item_group_id = pig.id AND pig.is_deleted = 0
        LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
@@ -1376,8 +1381,8 @@ app.get('/api/products/:id', async (c) => {
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
        LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
-       WHERE p.id = ? AND p.is_deleted = 0`
-    ).bind(id).first();
+       WHERE p.id = ? AND p.is_deleted = 0`;
+    const row = await d1FirstWithSeoKeywordsSelectFallback<Record<string, unknown>>(c.env.DB, productDetailSql, [id]);
     if (!row) return c.json({ error: 'Ürün bulunamadı' }, 404);
     const { results: pricesRows } = await c.env.DB.prepare(
       `SELECT price_type_id, price, currency_id, status FROM product_prices WHERE product_id = ? AND is_deleted = 0`
@@ -1404,7 +1409,7 @@ app.post('/api/products', async (c) => {
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
-      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string;
+      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string;
     }>();
     const name = (body.name || '').trim();
     if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
@@ -1452,12 +1457,13 @@ app.post('/api/products', async (c) => {
          ON CONFLICT(product_id, price_type_id) DO UPDATE SET price = excluded.price, currency_id = excluded.currency_id, updated_at = datetime('now')`
       ).bind(productId, body.ecommerce_price ?? 0, body.ecommerce_currency_id || null).run();
     }
-    if (productId && (body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined)) {
+    if (productId && (body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined || body.seo_keywords !== undefined)) {
       const ecomName = body.ecommerce_name !== undefined ? (String(body.ecommerce_name).trim() || null) : null;
       const mainDesc = body.main_description !== undefined ? (String(body.main_description).trim() || null) : null;
       const seoSlug = body.seo_slug !== undefined ? (String(body.seo_slug).trim() || null) : null;
       const seoTitle = body.seo_title !== undefined ? (String(body.seo_title).trim() || null) : null;
       const seoDesc = body.seo_description !== undefined ? (String(body.seo_description).trim() || null) : null;
+      const seoKeywords = body.seo_keywords !== undefined ? (String(body.seo_keywords).trim() || null) : null;
       const hasDesc = true;
       if (hasDesc) {
         const existingDesc = await c.env.DB.prepare(`SELECT id FROM product_descriptions WHERE product_id = ?`).bind(productId).first();
@@ -1469,14 +1475,22 @@ app.post('/api/products', async (c) => {
           if (body.seo_slug !== undefined) { updates.push('seo_slug = ?'); vals.push(seoSlug); }
           if (body.seo_title !== undefined) { updates.push('seo_title = ?'); vals.push(seoTitle); }
           if (body.seo_description !== undefined) { updates.push('seo_description = ?'); vals.push(seoDesc); }
+          if (body.seo_keywords !== undefined) { updates.push('seo_keywords = ?'); vals.push(seoKeywords); }
           if (updates.length > 0) {
             updates.push("updated_at = datetime('now')");
-            await c.env.DB.prepare(`UPDATE product_descriptions SET ${updates.join(', ')} WHERE product_id = ?`).bind(...vals, productId).run();
+            await updateProductDescriptionsWithSeoKeywordsFallback(c.env.DB, updates, vals, productId);
           }
         } else {
-          await c.env.DB.prepare(
-            `INSERT INTO product_descriptions (product_id, ecommerce_name, main_description, seo_slug, seo_title, seo_description) VALUES (?, ?, ?, ?, ?, ?)`
-          ).bind(productId, ecomName, mainDesc, seoSlug, seoTitle, seoDesc).run();
+          await insertProductDescriptionsRowWithSeoKeywordsFallback(
+            c.env.DB,
+            productId,
+            ecomName,
+            mainDesc,
+            seoSlug,
+            seoTitle,
+            seoDesc,
+            seoKeywords
+          );
         }
       }
     }
@@ -1500,7 +1514,7 @@ app.put('/api/products/:id', async (c) => {
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
-      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string;
+      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`).bind(id).first();
     if (!existing) return c.json({ error: 'Ürün bulunamadı' }, 404);
@@ -1524,17 +1538,18 @@ app.put('/api/products/:id', async (c) => {
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
     if (body.ecommerce_enabled !== undefined) { updates.push('ecommerce_enabled = ?'); values.push(body.ecommerce_enabled ? 1 : 0); }
-    if (updates.length === 0 && !(body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined)) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    if (updates.length === 0 && !(body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined || body.seo_keywords !== undefined)) return c.json({ error: 'Güncellenecek alan yok' }, 400);
     if (updates.length > 0) {
       updates.push("updated_at = datetime('now')");
       await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run();
     }
-    if (body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined) {
+    if (body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined || body.seo_keywords !== undefined) {
       const ecomName = body.ecommerce_name !== undefined ? (String(body.ecommerce_name).trim() || null) : null;
       const mainDesc = body.main_description !== undefined ? (String(body.main_description).trim() || null) : null;
       const seoSlug = body.seo_slug !== undefined ? (String(body.seo_slug).trim() || null) : null;
       const seoTitle = body.seo_title !== undefined ? (String(body.seo_title).trim() || null) : null;
       const seoDesc = body.seo_description !== undefined ? (String(body.seo_description).trim() || null) : null;
+      const seoKeywords = body.seo_keywords !== undefined ? (String(body.seo_keywords).trim() || null) : null;
       const existingDesc = await c.env.DB.prepare(`SELECT id FROM product_descriptions WHERE product_id = ? AND is_deleted = 0`).bind(id).first();
       if (existingDesc) {
         const descUpdates: string[] = [];
@@ -1544,14 +1559,22 @@ app.put('/api/products/:id', async (c) => {
         if (body.seo_slug !== undefined) { descUpdates.push('seo_slug = ?'); descVals.push(seoSlug); }
         if (body.seo_title !== undefined) { descUpdates.push('seo_title = ?'); descVals.push(seoTitle); }
         if (body.seo_description !== undefined) { descUpdates.push('seo_description = ?'); descVals.push(seoDesc); }
+        if (body.seo_keywords !== undefined) { descUpdates.push('seo_keywords = ?'); descVals.push(seoKeywords); }
         if (descUpdates.length > 0) {
           descUpdates.push("updated_at = datetime('now')");
-          await c.env.DB.prepare(`UPDATE product_descriptions SET ${descUpdates.join(', ')} WHERE product_id = ?`).bind(...descVals, id).run();
+          await updateProductDescriptionsWithSeoKeywordsFallback(c.env.DB, descUpdates, descVals, Number(id));
         }
       } else {
-        await c.env.DB.prepare(
-          `INSERT INTO product_descriptions (product_id, ecommerce_name, main_description, seo_slug, seo_title, seo_description) VALUES (?, ?, ?, ?, ?, ?)`
-        ).bind(id, ecomName, mainDesc, seoSlug, seoTitle, seoDesc).run();
+        await insertProductDescriptionsRowWithSeoKeywordsFallback(
+          c.env.DB,
+          Number(id),
+          ecomName,
+          mainDesc,
+          seoSlug,
+          seoTitle,
+          seoDesc,
+          seoKeywords
+        );
       }
     }
     if (body.prices && Array.isArray(body.prices) && body.prices.length > 0) {
@@ -1662,16 +1685,28 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const id = c.req.param('id');
     const body = await c.req.json<{
-      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string;
+      ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string;
       images?: string[]; uploaded_image_paths?: string[];
       update_price?: boolean; update_description?: boolean; update_images?: boolean;
     }>().catch(() => null);
-    const productRow = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.image, p.quantity, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
+    const ocProductSql = `SELECT p.id, p.name, p.sku, p.image, p.quantity, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
        FROM products p
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
-       WHERE p.id = ? AND p.is_deleted = 0`
-    ).bind(id).first<{ id: number; name: string; sku: string | null; image: string | null; quantity: number; ecommerce_enabled: number; ecommerce_name: string | null; main_description: string | null; seo_slug: string | null; seo_title: string | null; seo_description: string | null }>();
+       WHERE p.id = ? AND p.is_deleted = 0`;
+    const productRow = await d1FirstWithSeoKeywordsSelectFallback<{
+      id: number;
+      name: string;
+      sku: string | null;
+      image: string | null;
+      quantity: number;
+      ecommerce_enabled: number;
+      ecommerce_name: string | null;
+      main_description: string | null;
+      seo_slug: string | null;
+      seo_title: string | null;
+      seo_description: string | null;
+      seo_keywords: string | null;
+    }>(c.env.DB, ocProductSql, [id]);
     if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
     if (productRow.ecommerce_enabled === 0) return c.json({ error: 'Bu ürün e-ticarete kapalı. Önce ürün listesinde E-Ticaret anahtarını açın.' }, 400);
 
@@ -1685,6 +1720,7 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
     const seoSlug = body?.seo_slug !== undefined ? String(body.seo_slug ?? '').trim() : (productRow.seo_slug ?? '').trim();
     const seoTitle = body?.seo_title !== undefined ? String(body.seo_title ?? '').trim() : (productRow.seo_title ?? '').trim();
     const seoDescription = body?.seo_description !== undefined ? String(body.seo_description ?? '').trim() : (productRow.seo_description ?? '').trim();
+    const seoKeywords = body?.seo_keywords !== undefined ? String(body.seo_keywords ?? '').trim() : (productRow.seo_keywords ?? '').trim();
     const uploadedPaths = body?.uploaded_image_paths && Array.isArray(body.uploaded_image_paths)
       ? body.uploaded_image_paths.filter((x): x is string => typeof x === 'string' && (x.startsWith('catalog/') || x.startsWith('data/')))
       : null;
@@ -1751,7 +1787,7 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
         const ocDesc = mainDescription;
         const ocMetaTitle = seoTitle;
         const ocMetaDesc = seoDescription;
-        const ocMetaKeyword = seoSlug;
+        const ocMetaKeyword = seoKeywords || seoSlug;
 
         await conn.execute(
           `INSERT INTO ${tblProduct} (model, sku, quantity, stock_status_id, image, manufacturer_id, shipping, price, weight, weight_class_id, length_class_id, subtract, minimum, sort_order, status, viewed, date_added, date_modified, tax_class_id)
@@ -1780,7 +1816,7 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
       const ocDesc = mainDescription;
       const ocMetaTitle = seoTitle;
       const ocMetaDesc = seoDescription;
-      const ocMetaKeyword = seoSlug;
+      const ocMetaKeyword = seoKeywords || seoSlug;
 
       if (!isNewProduct) {
         if (updateDescription) {
@@ -1892,6 +1928,72 @@ async function ensureIdeasoftMarketplaceId(db: D1Database): Promise<number> {
 
 const IDEASOFT_CATEGORY_MAPPINGS_KEY = 'ideasoft_category_mappings';
 const IDEASOFT_BRAND_MAPPINGS_KEY = 'ideasoft_brand_mappings';
+const IDEASOFT_CURRENCY_MAPPINGS_KEY = 'ideasoft_currency_mappings';
+
+/**
+ * Eşleştirmede bazen yalnızca sayısal id gerekirken URL, /admin-api/categories/123 veya kopya-yapıştır kalıntısı gelir.
+ * Ideasoft Admin API kategori ilişkileri sayısal id ile çalışır.
+ */
+function normalizeIdeasoftCategoryMappingId(raw: string): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (/^\d+$/.test(s)) return s;
+  const fromPath = s.match(/\/categories\/(\d+)(?:\/|$|\?|#)/i);
+  if (fromPath) return fromPath[1];
+  const parts = s.split(/[/\\]/).map((p) => p.trim()).filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (/^\d+$/.test(parts[i])) return parts[i];
+  }
+  return s;
+}
+
+/** Master para birimi id → Ideasoft Currency id (URL veya düz sayı) */
+function normalizeIdeasoftCurrencyMappingId(raw: string): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (/^\d+$/.test(s)) return s;
+  const fromPath = s.match(/\/(?:currencies|product_currencies)\/(\d+)(?:\/|$|\?|#)/i);
+  if (fromPath) return fromPath[1];
+  const parts = s.split(/[/\\]/).map((p) => p.trim()).filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (/^\d+$/.test(parts[i])) return parts[i];
+  }
+  return s;
+}
+
+function resolveIdeasoftCurrencyIdFromMapping(
+  map: Record<string, string>,
+  masterCurrencyId: number | null
+): string | null {
+  if (masterCurrencyId == null || masterCurrencyId <= 0) return null;
+  const hit = (map[String(masterCurrencyId)] ?? '').trim();
+  if (!hit) return null;
+  const norm = normalizeIdeasoftCurrencyMappingId(hit);
+  return norm || null;
+}
+
+/** Seçilen kategori ve alt kategorilerdeki ürünleri listelemek için (product_categories.category_id üst bağlantısı) */
+async function collectCategorySubtreeIds(db: D1Database, rootId: number): Promise<number[]> {
+  const out = new Set<number>([rootId]);
+  let frontier: number[] = [rootId];
+  for (let depth = 0; depth < 48 && frontier.length > 0; depth++) {
+    const next: number[] = [];
+    for (const parentId of frontier) {
+      const { results } = await db
+        .prepare(`SELECT id FROM product_categories WHERE category_id = ? AND is_deleted = 0`)
+        .bind(parentId)
+        .all();
+      for (const r of results as { id: number }[]) {
+        if (!out.has(r.id)) {
+          out.add(r.id);
+          next.push(r.id);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return [...out];
+}
 
 async function loadIdeasoftJsonSettingMap(db: D1Database, key: string): Promise<Record<string, string>> {
   try {
@@ -1902,10 +2004,146 @@ async function loadIdeasoftJsonSettingMap(db: D1Database, key: string): Promise<
       .all();
     const raw = (results as { value?: string }[])[0]?.value;
     if (!raw?.trim()) return {};
-    const p = JSON.parse(raw) as Record<string, string>;
-    return typeof p === 'object' && p !== null ? p : {};
+    const p = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof p !== 'object' || p === null) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(p)) {
+      const s = String(v ?? '').trim();
+      if (s) out[String(k)] = s;
+    }
+    return out;
   } catch {
     return {};
+  }
+}
+
+/** Ürünün doğrudan category_id’si için eşleme yoksa üst (category_id) ve grup (group_id) zincirinde arar */
+async function resolveIdeasoftCategoryIdFromMapping(
+  db: D1Database,
+  catMap: Record<string, string>,
+  categoryId: number | null
+): Promise<string | null> {
+  if (categoryId == null || categoryId <= 0) return null;
+  const visited = new Set<number>();
+  let cur: number | null = categoryId;
+  for (let i = 0; i < 48 && cur != null && cur > 0; i++) {
+    if (visited.has(cur)) break;
+    visited.add(cur);
+    const hit = (catMap[String(cur)] ?? '').trim();
+    if (hit) {
+      const norm = normalizeIdeasoftCategoryMappingId(hit);
+      if (norm) return norm;
+    }
+    const row = await db
+      .prepare(
+        `SELECT category_id, group_id FROM product_categories WHERE id = ? AND is_deleted = 0`
+      )
+      .bind(cur)
+      .first<{ category_id: number | null; group_id: number | null }>();
+    if (!row) break;
+    if (row.category_id != null && row.category_id > 0) {
+      cur = row.category_id;
+      continue;
+    }
+    if (row.group_id != null && row.group_id > 0) {
+      cur = row.group_id;
+      continue;
+    }
+    break;
+  }
+  return null;
+}
+
+/** `0068_add_seo_keywords_to_product_descriptions` henüz uygulanmamış D1 ortamları */
+function d1ErrorIsMissingSeoKeywordsColumn(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err);
+  return /no such column:\s*seo_keywords/i.test(raw);
+}
+
+/** SELECT’te `pd.seo_keywords` → `NULL AS seo_keywords` (sonuç alanı aynı kalır). */
+function sqlSelectWithoutSeoKeywordsColumn(sql: string): string {
+  return sql.replace(/\bpd\.seo_keywords\b/g, 'NULL AS seo_keywords');
+}
+
+async function d1FirstWithSeoKeywordsSelectFallback<T>(
+  db: D1Database,
+  sql: string,
+  bindArgs: unknown[]
+): Promise<T | null> {
+  try {
+    return await db.prepare(sql).bind(...bindArgs).first<T>();
+  } catch (e: unknown) {
+    if (d1ErrorIsMissingSeoKeywordsColumn(e)) {
+      return await db.prepare(sqlSelectWithoutSeoKeywordsColumn(sql)).bind(...bindArgs).first<T>();
+    }
+    throw e;
+  }
+}
+
+async function d1AllWithSeoKeywordsSelectFallback<T>(
+  db: D1Database,
+  sql: string,
+  bindArgs: unknown[]
+): Promise<{ results: T[] | null }> {
+  try {
+    return await db.prepare(sql).bind(...bindArgs).all<T>();
+  } catch (e: unknown) {
+    if (d1ErrorIsMissingSeoKeywordsColumn(e)) {
+      return await db.prepare(sqlSelectWithoutSeoKeywordsColumn(sql)).bind(...bindArgs).all<T>();
+    }
+    throw e;
+  }
+}
+
+async function insertProductDescriptionsRowWithSeoKeywordsFallback(
+  db: D1Database,
+  productId: number,
+  ecomName: string | null,
+  mainDesc: string | null,
+  seoSlug: string | null,
+  seoTitle: string | null,
+  seoDesc: string | null,
+  seoKeywords: string | null
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO product_descriptions (product_id, ecommerce_name, main_description, seo_slug, seo_title, seo_description, seo_keywords) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(productId, ecomName, mainDesc, seoSlug, seoTitle, seoDesc, seoKeywords)
+      .run();
+  } catch (e: unknown) {
+    if (!d1ErrorIsMissingSeoKeywordsColumn(e)) throw e;
+    await db
+      .prepare(
+        `INSERT INTO product_descriptions (product_id, ecommerce_name, main_description, seo_slug, seo_title, seo_description) VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .bind(productId, ecomName, mainDesc, seoSlug, seoTitle, seoDesc)
+      .run();
+  }
+}
+
+async function updateProductDescriptionsWithSeoKeywordsFallback(
+  db: D1Database,
+  descUpdates: string[],
+  descVals: (string | null)[],
+  productId: number
+): Promise<void> {
+  try {
+    await db
+      .prepare(`UPDATE product_descriptions SET ${descUpdates.join(', ')} WHERE product_id = ?`)
+      .bind(...descVals, productId)
+      .run();
+  } catch (e: unknown) {
+    if (!d1ErrorIsMissingSeoKeywordsColumn(e)) throw e;
+    const idx = descUpdates.findIndex((u) => u.startsWith('seo_keywords'));
+    if (idx === -1) throw e;
+    const newU = descUpdates.filter((_, i) => i !== idx);
+    const newV = descVals.filter((_, i) => i !== idx);
+    await db
+      .prepare(`UPDATE product_descriptions SET ${newU.join(', ')} WHERE product_id = ?`)
+      .bind(...newV, productId)
+      .run();
   }
 }
 
@@ -1921,31 +2159,211 @@ type IdeasoftPushProductDbRow = {
   ecommerce_enabled: number;
   ecommerce_name: string | null;
   main_description: string | null;
+  seo_slug: string | null;
+  seo_title: string | null;
+  seo_description: string | null;
+  seo_keywords: string | null;
 };
 
 async function fetchProductRowForIdeasoft(db: D1Database, productId: number): Promise<IdeasoftPushProductDbRow | null> {
   const sqlWithEcommerce = `SELECT p.id, p.name, p.sku, p.quantity, p.category_id, p.brand_id, p.image,
        COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
-       pd.ecommerce_name, pd.main_description
+       pd.ecommerce_name, pd.main_description,
+       pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
        FROM products p
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`;
   const sqlLegacy = `SELECT p.id, p.name, p.sku, p.quantity, p.category_id, p.brand_id, p.image,
        1 as ecommerce_enabled,
-       pd.ecommerce_name, pd.main_description
+       pd.ecommerce_name, pd.main_description,
+       pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
        FROM products p
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`;
 
   try {
-    return await db.prepare(sqlWithEcommerce).bind(productId).first<IdeasoftPushProductDbRow>();
+    return await d1FirstWithSeoKeywordsSelectFallback<IdeasoftPushProductDbRow>(db, sqlWithEcommerce, [productId]);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such column:\s*ecommerce_enabled/i.test(msg)) {
-      return await db.prepare(sqlLegacy).bind(productId).first<IdeasoftPushProductDbRow>();
+      return await d1FirstWithSeoKeywordsSelectFallback<IdeasoftPushProductDbRow>(db, sqlLegacy, [productId]);
     }
     throw e;
   }
+}
+
+/** Ideasoft ürün gövdesi: SEO + dahili ad (slug vitrin adı / seo_slug ile `ideasoftUpsertProduct` içinde üretilir) */
+function ideasoftSeoFieldsFromProductRow(row: IdeasoftPushProductDbRow) {
+  return {
+    internalName: row.name,
+    seoSlug: row.seo_slug,
+    pageTitle: (row.seo_title ?? '').trim() || null,
+    metaDescription: (row.seo_description ?? '').trim() || null,
+    metaKeywords: (row.seo_keywords ?? '').trim() || null,
+    searchKeywords: (row.seo_keywords ?? '').trim() || null,
+  };
+}
+
+function ideasoftHasSeoContentInRow(row: IdeasoftPushProductDbRow): boolean {
+  const s = (v: string | null | undefined) => (v ?? '').trim().length > 0;
+  return s(row.seo_slug) || s(row.seo_title) || s(row.seo_description) || s(row.seo_keywords);
+}
+
+/** Ideasoft aktarım sonrası arayüzde tik / çarpı listesi için */
+function buildIdeasoftTransferReport(params: {
+  productCategoryId: number | null;
+  productBrandId: number | null;
+  categoryIdeasoftId: string | null;
+  brandIdeasoftId: string | null;
+  /** Master product_currencies.id (fiyat satırı); eşleme tablosu anahtarı */
+  masterCurrencyId: number | null;
+  currencyCode: string;
+  /** ideasoft_currency_mappings’ten gelen Ideasoft currency id (sayısal string) */
+  currencyIdeasoftId: string | null;
+  hasSeoInDb: boolean;
+  categoryWarning?: string;
+  brandWarning?: string;
+  imageCount: number;
+  imagesUploaded: number;
+  imageWarnings: string[];
+}): { steps: { id: string; label: string; ok: boolean; detail?: string }[] } {
+  const steps: { id: string; label: string; ok: boolean; detail?: string }[] = [];
+
+  steps.push({
+    id: 'core',
+    label: 'Ürün adı ve açıklama',
+    ok: true,
+    detail: 'Ideasoft ürün kaydına yazıldı',
+  });
+
+  if (params.hasSeoInDb) {
+    steps.push({
+      id: 'seo',
+      label: 'SEO içerikleri',
+      ok: true,
+      detail: 'Meta başlık / açıklama / anahtar kelime isteğe dahil',
+    });
+  } else {
+    steps.push({
+      id: 'seo',
+      label: 'SEO içerikleri',
+      ok: true,
+      detail: 'Kayıtta doldurulmuş SEO alanı yok',
+    });
+  }
+
+  const cid = params.productCategoryId;
+  const cMap = (params.categoryIdeasoftId ?? '').trim();
+  const cw = (params.categoryWarning ?? '').trim();
+  if (cid == null || cid <= 0) {
+    steps.push({
+      id: 'category',
+      label: 'Kategori',
+      ok: true,
+      detail: 'Üründe yerel kategori seçili değil',
+    });
+  } else if (!cMap) {
+    steps.push({
+      id: 'category',
+      label: 'Kategori',
+      ok: false,
+      detail: 'Ideasoft kategori eşlemesi tanımlı değil',
+    });
+  } else if (cw) {
+    steps.push({
+      id: 'category',
+      label: 'Kategori',
+      ok: false,
+      detail: cw,
+    });
+  } else {
+    steps.push({
+      id: 'category',
+      label: 'Kategori',
+      ok: true,
+      detail: `Ideasoft kategori: ${cMap}`,
+    });
+  }
+
+  const bid = params.productBrandId;
+  const bMap = (params.brandIdeasoftId ?? '').trim();
+  const bw = (params.brandWarning ?? '').trim();
+  if (bid == null || bid <= 0) {
+    steps.push({
+      id: 'brand',
+      label: 'Marka',
+      ok: true,
+      detail: 'Üründe yerel marka seçili değil',
+    });
+  } else if (!bMap) {
+    steps.push({
+      id: 'brand',
+      label: 'Marka',
+      ok: false,
+      detail: 'Ideasoft marka eşlemesi tanımlı değil',
+    });
+  } else if (bw) {
+    steps.push({
+      id: 'brand',
+      label: 'Marka',
+      ok: false,
+      detail: bw,
+    });
+  } else {
+    steps.push({
+      id: 'brand',
+      label: 'Marka',
+      ok: true,
+      detail: `Ideasoft marka: ${bMap}`,
+    });
+  }
+
+  const curIso = (params.currencyCode ?? 'TRY').trim().toUpperCase();
+  const curMap = (params.currencyIdeasoftId ?? '').trim();
+  const mid = params.masterCurrencyId;
+  if (curMap) {
+    steps.push({
+      id: 'currency',
+      label: 'Para birimi',
+      ok: true,
+      detail:
+        mid != null && mid > 0
+          ? `Master pb #${mid} → Ideasoft currency #${curMap} (${curIso})`
+          : `Ideasoft currency #${curMap} (${curIso})`,
+    });
+  } else {
+    steps.push({
+      id: 'currency',
+      label: 'Para birimi',
+      ok: true,
+      detail:
+        mid != null && mid > 0
+          ? `Eşleşme yok — ${curIso} kodu ile mağaza para birimi aranıyor (master pb #${mid})`
+          : `Eşleşme yok — ${curIso} kodu ile mağaza para birimi aranıyor`,
+    });
+  }
+
+  if (params.imageCount <= 0) {
+    steps.push({
+      id: 'images',
+      label: 'Görseller',
+      ok: true,
+      detail: 'Aktarılacak görsel yok',
+    });
+  } else {
+    const hasErr = params.imageWarnings.length > 0;
+    const allOk = params.imageCount > 0 && params.imagesUploaded >= params.imageCount && !hasErr;
+    steps.push({
+      id: 'images',
+      label: 'Görseller',
+      ok: allOk,
+      detail: allOk
+        ? `${params.imagesUploaded} görsel gönderildi`
+        : `${params.imagesUploaded}/${params.imageCount} görsel; ${params.imageWarnings.slice(0, 2).join(' · ') || 'bazı görsellerde hata'}`,
+    });
+  }
+
+  return { steps };
 }
 
 /** D1’de migration uygulanmamışsa (tablo yok) ham SQLITE metni yerine açıklayıcı mesaj */
@@ -1986,6 +2404,45 @@ async function getEcommercePriceAndCurrency(
   }
   if (!/^[A-Z]{3}$/.test(code)) code = 'TRY';
   return { price, currencyCode: code };
+}
+
+/** Genel fiyat (products.price) + ISO 4217 para kodu (products.currency_id → product_currencies) — Ideasoft aktarımı için */
+async function getGeneralPriceAndCurrency(
+  db: D1Database,
+  productId: number
+): Promise<{ price: number; currencyCode: string; currencyId: number | null }> {
+  const row = await db
+    .prepare(
+      `SELECT p.price, p.currency_id as master_currency_id, pc.code as currency_code
+       FROM products p
+       LEFT JOIN product_currencies pc ON pc.id = p.currency_id AND pc.is_deleted = 0 AND (pc.status = 1 OR pc.status IS NULL)
+       WHERE p.id = ? AND p.is_deleted = 0
+       LIMIT 1`
+    )
+    .bind(productId)
+    .first<{ price: number | null; master_currency_id: number | null; currency_code: string | null }>();
+
+  const price =
+    typeof row?.price === 'number' && !Number.isNaN(row.price) ? row.price : 0;
+  let currencyId: number | null =
+    typeof row?.master_currency_id === 'number' && row.master_currency_id > 0
+      ? row.master_currency_id
+      : null;
+  let code = (row?.currency_code ?? '').trim().toUpperCase();
+  if (!code) {
+    const def = await db
+      .prepare(
+        `SELECT id, code FROM product_currencies WHERE is_default = 1 AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+      )
+      .first<{ id: number; code: string }>();
+    code = (def?.code ?? 'TRY').trim().toUpperCase();
+    /** Join başarısız (silinmiş/pasif para birimi) veya kod boş — eşleştirme anahtarı için varsayılan satırı kullan */
+    if (def?.id != null && def.id > 0) {
+      currencyId = def.id;
+    }
+  }
+  if (!/^[A-Z]{3}$/.test(code)) code = 'TRY';
+  return { price, currencyCode: code, currencyId };
 }
 
 /** Ideasoft bağlantı durumu: token var mı, süresi dolmuş mu? */
@@ -2124,29 +2581,19 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
       update_description?: boolean;
     }>().catch(() => null);
 
-    const productRow = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.quantity, p.category_id, p.brand_id, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
-       pd.ecommerce_name, pd.main_description
-       FROM products p
-       LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
-       WHERE p.id = ? AND p.is_deleted = 0`
-    ).bind(id).first<{
-      id: number;
-      name: string;
-      sku: string | null;
-      quantity: number;
-      category_id: number | null;
-      brand_id: number | null;
-      ecommerce_enabled: number;
-      ecommerce_name: string | null;
-      main_description: string | null;
-    }>();
+    const productId = Number(id);
+    if (!Number.isFinite(productId) || productId <= 0) return c.json({ error: 'Geçersiz ürün id' }, 400);
+
+    const productRow = await fetchProductRowForIdeasoft(c.env.DB, productId);
     if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
     if (productRow.ecommerce_enabled === 0) {
       return c.json({ error: 'Bu ürün e-ticarete kapalı.' }, 400);
     }
 
-    const { price: productPrice, currencyCode } = await getEcommercePriceAndCurrency(c.env.DB, productRow.id);
+    const { price: productPrice, currencyCode, currencyId: masterCurrencyId } = await getGeneralPriceAndCurrency(
+      c.env.DB,
+      productRow.id
+    );
 
     const settings = await loadIdeasoftSettings(c.env.DB);
     const storeBase = normalizeStoreBase(settings.store_base_url || '');
@@ -2179,7 +2626,11 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
         ? String(body.main_description ?? '').trim()
         : (productRow.main_description ?? '').trim();
     const name = ecommerceName || productRow.name;
-    const desc = body?.update_description === false ? name : (mainDescription || name);
+    /** Uzun metin: e-ticaret açıklaması; güncelleme kapalıysa yalnızca kısa metin için vitrin adı (önceki davranış) */
+    const desc =
+      body?.update_description === false ? name : (mainDescription || name);
+
+    const seo = ideasoftSeoFieldsFromProductRow(productRow);
 
     const marketplaceId = await ensureIdeasoftMarketplaceId(c.env.DB);
     const mapRow = await c.env.DB.prepare(
@@ -2197,14 +2648,17 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
 
     const catMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CATEGORY_MAPPINGS_KEY);
     const brandMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_BRAND_MAPPINGS_KEY);
-    const categoryIdeasoftId =
-      productRow.category_id != null && productRow.category_id > 0
-        ? (catMap[String(productRow.category_id)] || '').trim() || null
-        : null;
+    const currencyMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CURRENCY_MAPPINGS_KEY);
+    const categoryIdeasoftId = await resolveIdeasoftCategoryIdFromMapping(
+      c.env.DB,
+      catMap,
+      productRow.category_id
+    );
     const brandIdeasoftId =
       productRow.brand_id != null && productRow.brand_id > 0
         ? (brandMap[String(productRow.brand_id)] || '').trim() || null
         : null;
+    const currencyIdeasoftId = resolveIdeasoftCurrencyIdFromMapping(currencyMap, masterCurrencyId);
 
     const up = await ideasoftUpsertProduct({
       storeBase,
@@ -2216,8 +2670,10 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
       price: productPrice,
       quantity: qty,
       currency: currencyCode,
+      currencyIdeasoftId,
       categoryIdeasoftId,
       brandIdeasoftId,
+      ...seo,
     });
 
     if (!up.ok) {
@@ -2232,6 +2688,33 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
     }
 
     const ideasoftId = up.id;
+    const requestOrigin = new URL(c.req.url).origin;
+    const imageBuild = await buildIdeasoftImageUploads(c.env.STORAGE, productRow.image, requestOrigin);
+    const imageUpload = imageBuild.images.length > 0
+      ? await ideasoftUploadProductImages({
+          storeBase,
+          accessToken: token,
+          productId: ideasoftId,
+          images: imageBuild.images,
+        })
+      : { uploaded: 0, errors: [] as string[] };
+    const imageWarnings = [...imageBuild.warnings, ...imageUpload.errors];
+    const transfer_report = buildIdeasoftTransferReport({
+      productCategoryId: productRow.category_id,
+      productBrandId: productRow.brand_id,
+      categoryIdeasoftId,
+      brandIdeasoftId,
+      masterCurrencyId,
+      currencyCode,
+      currencyIdeasoftId,
+      hasSeoInDb: ideasoftHasSeoContentInRow(productRow),
+      categoryWarning: up.categoryWarning,
+      brandWarning: up.brandWarning,
+      imageCount: imageBuild.images.length,
+      imagesUploaded: imageUpload.uploaded,
+      imageWarnings,
+    });
+
     if (mapRow?.id) {
       await c.env.DB.prepare(
         `UPDATE product_mappings SET marketplace_sku = ?, marketplace_model_code = ?, updated_at = datetime('now') WHERE id = ?`
@@ -2253,13 +2736,19 @@ app.post('/api/products/:id/publish/ideasoft', async (c) => {
       created: !remoteId,
       ideasoft_product_id: ideasoftId,
       ...(up.brandWarning ? { brand_warning: up.brandWarning } : {}),
+      ...(up.categoryWarning ? { category_warning: up.categoryWarning } : {}),
       updated: {
         name,
         description: !!desc,
         price: productPrice,
         currency: currencyCode,
+        master_currency_id: masterCurrencyId,
+        ideasoft_currency_id: currencyIdeasoftId,
         quantity: qty,
       },
+      images_uploaded: imageUpload.uploaded,
+      ...(imageWarnings.length > 0 ? { image_warnings: imageWarnings } : {}),
+      transfer_report,
     });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Yayınlama başarısız' }, 500);
@@ -2405,7 +2894,12 @@ app.put('/api/ideasoft/category-mappings', async (c) => {
     const mappings = body.mappings;
     if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
     const toSave = Object.fromEntries(
-      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+      Object.entries(mappings)
+        .filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+        .map(([k, v]) => {
+          const norm = normalizeIdeasoftCategoryMappingId(String(v));
+          return [String(k).trim(), norm || String(v).trim()];
+        })
     );
     const existing = await c.env.DB.prepare(
       `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
@@ -2486,6 +2980,21 @@ app.get('/api/ideasoft/debug/brands', async (c) => {
   }
 });
 
+app.get('/api/ideasoft/debug/currencies', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    if (!storeBase) return c.json({ error: 'Mağaza adresi ayarlı değil' }, 400);
+    const token = await getIdeasoftAccessToken(c.env);
+    if (!token) return c.json({ error: 'OAuth bağlantısı yok veya süresi doldu', hint: 'Ayarlar > IdeaSoft > Ideasoft ile bağlan' }, 401);
+    const results = await ideasoftDebugCurrencies(storeBase, token);
+    return c.json({ storeBase, results });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Tanı başarısız' }, 500);
+  }
+});
+
 app.get('/api/ideasoft/brand-mappings', async (c) => {
   try {
     if (!c.env.DB) return c.json({ mappings: {} });
@@ -2528,7 +3037,76 @@ app.put('/api/ideasoft/brand-mappings', async (c) => {
   }
 });
 
-/** Ideasoft ürün listesi (eşleştirme / aktarım ekranı) */
+/** Master product_currencies.id → Ideasoft Currency id (IDEASOFT_CURRENCY_MAPPINGS_KEY) */
+app.get('/api/ideasoft/currency-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_CURRENCY_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/currency-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings?: Record<string, string> }>().catch(() => ({}));
+    const mappings = body.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_CURRENCY_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_CURRENCY_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(`INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`)
+        .bind(IDEASOFT_CURRENCY_MAPPINGS_KEY, JSON.stringify(toSave))
+        .run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+app.get('/api/ideasoft/currencies', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    if (!storeBase) {
+      return c.json({ error: 'Ideasoft mağaza adresi ayarlı değil (Ayarlar > IdeaSoft).' }, 400);
+    }
+    const token = await getIdeasoftAccessToken(c.env);
+    if (!token) {
+      return c.json(
+        {
+          error:
+            'Ideasoft OAuth bağlantısı yok veya süresi doldu. Ayarlar > IdeaSoft üzerinden "Ideasoft ile bağlan" ile yetkilendirin.',
+        },
+        401
+      );
+    }
+    const result = await ideasoftFetchCurrencies(storeBase, token);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ data: result.currencies });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Para birimleri alınamadı' }, 500);
+  }
+});
+
+/** Ideasoft ürün listesi (eşleştirme / aktarım ekranı) — isteğe bağlı kategori (alt ağaç) ve marka filtresi */
 app.get('/api/ideasoft/products/overview', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -2537,35 +3115,65 @@ app.get('/api/ideasoft/products/overview', async (c) => {
     const offset = (page - 1) * limit;
     const mpId = await ensureIdeasoftMarketplaceId(c.env.DB);
 
-    const listSqlWithEcommerce = `SELECT p.id, p.name, p.sku, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
+    const catQ = c.req.query('category_id');
+    const brandQ = c.req.query('brand_id');
+    const categoryFilterId = catQ != null && String(catQ).trim() !== '' ? parseInt(String(catQ), 10) : NaN;
+    const brandFilterId = brandQ != null && String(brandQ).trim() !== '' ? parseInt(String(brandQ), 10) : NaN;
+
+    const filterBinds: number[] = [];
+    let extraWhere = '';
+    if (Number.isFinite(categoryFilterId) && categoryFilterId > 0) {
+      const ids = await collectCategorySubtreeIds(c.env.DB, categoryFilterId);
+      if (ids.length === 0) {
+        extraWhere += ' AND 1=0';
+      } else {
+        extraWhere += ` AND p.category_id IN (${ids.map(() => '?').join(',')})`;
+        filterBinds.push(...ids);
+      }
+    }
+    if (Number.isFinite(brandFilterId) && brandFilterId > 0) {
+      extraWhere += ' AND p.brand_id = ?';
+      filterBinds.push(brandFilterId);
+    }
+
+    const listSqlWithEcommerce = `SELECT p.id, p.name, p.sku, p.category_id, p.brand_id, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
        pm.marketplace_model_code as ideasoft_product_id
        FROM products p
        LEFT JOIN product_mappings pm ON pm.product_id = p.id AND pm.marketplace_id = ? AND pm.is_deleted = 0
-       WHERE p.is_deleted = 0
+       WHERE p.is_deleted = 0${extraWhere}
        ORDER BY p.id DESC
        LIMIT ? OFFSET ?`;
 
-    const listSqlLegacy = `SELECT p.id, p.name, p.sku, 1 as ecommerce_enabled,
+    const listSqlLegacy = `SELECT p.id, p.name, p.sku, p.category_id, p.brand_id, 1 as ecommerce_enabled,
        pm.marketplace_model_code as ideasoft_product_id
        FROM products p
        LEFT JOIN product_mappings pm ON pm.product_id = p.id AND pm.marketplace_id = ? AND pm.is_deleted = 0
-       WHERE p.is_deleted = 0
+       WHERE p.is_deleted = 0${extraWhere}
        ORDER BY p.id DESC
        LIMIT ? OFFSET ?`;
 
     let results: unknown;
     try {
-      ({ results } = await c.env.DB.prepare(listSqlWithEcommerce).bind(mpId, limit, offset).all());
+      ({ results } = await c.env.DB
+        .prepare(listSqlWithEcommerce)
+        .bind(mpId, ...filterBinds, limit, offset)
+        .all());
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/no such column:\s*ecommerce_enabled/i.test(msg)) {
-        ({ results } = await c.env.DB.prepare(listSqlLegacy).bind(mpId, limit, offset).all());
+        ({ results } = await c.env.DB
+          .prepare(listSqlLegacy)
+          .bind(mpId, ...filterBinds, limit, offset)
+          .all());
       } else {
         throw e;
       }
     }
 
-    const countRow = await c.env.DB.prepare(`SELECT COUNT(*) as c FROM products WHERE is_deleted = 0`).first<{ c: number }>();
+    const countRow = await c.env.DB
+      .prepare(`SELECT COUNT(*) as c FROM products p WHERE p.is_deleted = 0${extraWhere}`)
+      .bind(...filterBinds)
+      .first<{ c: number }>();
     const total = typeof countRow?.c === 'number' ? countRow.c : 0;
     return c.json({
       data: results ?? [],
@@ -2608,7 +3216,10 @@ app.post('/api/ideasoft/products/push-preview', async (c) => {
     const sku = (productRow.sku ?? '').trim();
     if (!sku) return c.json({ error: 'Ideasoft aktarımı için SKU zorunlu.' }, 400);
 
-    const { price: productPrice, currencyCode } = await getEcommercePriceAndCurrency(c.env.DB, productId);
+    const { price: productPrice, currencyCode, currencyId: masterCurrencyId } = await getGeneralPriceAndCurrency(
+      c.env.DB,
+      productId
+    );
 
     const marketplaceId = await ensureIdeasoftMarketplaceId(c.env.DB);
     const mapRow = await c.env.DB.prepare(
@@ -2623,14 +3234,17 @@ app.post('/api/ideasoft/products/push-preview', async (c) => {
 
     const catMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CATEGORY_MAPPINGS_KEY);
     const brandMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_BRAND_MAPPINGS_KEY);
-    const mappedCategoryId =
-      productRow.category_id != null && productRow.category_id > 0
-        ? (catMap[String(productRow.category_id)] || '').trim() || null
-        : null;
+    const currencyMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CURRENCY_MAPPINGS_KEY);
+    const mappedCategoryId = await resolveIdeasoftCategoryIdFromMapping(
+      c.env.DB,
+      catMap,
+      productRow.category_id
+    );
     const mappedBrandId =
       productRow.brand_id != null && productRow.brand_id > 0
         ? (brandMap[String(productRow.brand_id)] || '').trim() || null
         : null;
+    const mappedCurrencyIdeasoftId = resolveIdeasoftCurrencyIdFromMapping(currencyMap, masterCurrencyId);
 
     let ideasoftProductName: string | null = null;
     let ideasoftProductSku: string | null = null;
@@ -2651,6 +3265,9 @@ app.post('/api/ideasoft/products/push-preview', async (c) => {
       name: displayName,
       sku,
       list_price: String(productPrice),
+      currency: mappedCurrencyIdeasoftId
+        ? `${currencyCode} → Ideasoft #${mappedCurrencyIdeasoftId}`
+        : `${currencyCode} (ISO ile çözüm)`,
       quantity: String(productRow.quantity ?? 0),
       description: desc,
     };
@@ -2659,6 +3276,7 @@ app.post('/api/ideasoft/products/push-preview', async (c) => {
       { ideasoft: 'name', master: 'name' },
       { ideasoft: 'sku', master: 'sku' },
       { ideasoft: 'listPrice', master: 'list_price' },
+      { ideasoft: 'currency', master: 'currency' },
       { ideasoft: 'stockAmount', master: 'quantity' },
       { ideasoft: 'longDescription', master: 'description' },
     ];
@@ -2676,6 +3294,8 @@ app.post('/api/ideasoft/products/push-preview', async (c) => {
         : null,
       sku_used: sku,
       currency_code: currencyCode,
+      master_currency_id: masterCurrencyId,
+      mapped_currency_ideasoft_id: mappedCurrencyIdeasoftId,
       attributes_display,
       selected_fields,
       mapped_category_id: mappedCategoryId,
@@ -2724,7 +3344,10 @@ app.post('/api/ideasoft/products/push', async (c) => {
     const skuBase = (productRow.sku ?? '').trim();
     if (!skuBase) return c.json({ error: 'SKU zorunlu.' }, 400);
 
-    const { price: basePrice, currencyCode } = await getEcommercePriceAndCurrency(c.env.DB, productId);
+    const { price: basePrice, currencyCode, currencyId: masterCurrencyId } = await getGeneralPriceAndCurrency(
+      c.env.DB,
+      productId
+    );
     let productPrice = basePrice;
 
     const marketplaceId = await ensureIdeasoftMarketplaceId(c.env.DB);
@@ -2745,14 +3368,17 @@ app.post('/api/ideasoft/products/push', async (c) => {
 
     const catMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CATEGORY_MAPPINGS_KEY);
     const brandMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_BRAND_MAPPINGS_KEY);
-    const categoryIdeasoftId =
-      productRow.category_id != null && productRow.category_id > 0
-        ? (catMap[String(productRow.category_id)] || '').trim() || null
-        : null;
+    const currencyMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CURRENCY_MAPPINGS_KEY);
+    const categoryIdeasoftId = await resolveIdeasoftCategoryIdFromMapping(
+      c.env.DB,
+      catMap,
+      productRow.category_id
+    );
     const brandIdeasoftId =
       productRow.brand_id != null && productRow.brand_id > 0
         ? (brandMap[String(productRow.brand_id)] || '').trim() || null
         : null;
+    const currencyIdeasoftId = resolveIdeasoftCurrencyIdFromMapping(currencyMap, masterCurrencyId);
 
     const ov = body.attribute_overrides ?? {};
     let displayName = (productRow.ecommerce_name ?? '').trim() || productRow.name;
@@ -2773,6 +3399,8 @@ app.post('/api/ideasoft/products/push', async (c) => {
 
     if (!displayName) return c.json({ error: 'Ürün adı boş olamaz.' }, 400);
 
+    const seo = ideasoftSeoFieldsFromProductRow(productRow);
+
     const up = await ideasoftUpsertProduct({
       storeBase,
       accessToken: token,
@@ -2783,8 +3411,10 @@ app.post('/api/ideasoft/products/push', async (c) => {
       price: productPrice,
       quantity: qty,
       currency: currencyCode,
+      currencyIdeasoftId,
       categoryIdeasoftId,
       brandIdeasoftId,
+      ...seo,
     });
 
     if (!up.ok) {
@@ -2802,6 +3432,32 @@ app.post('/api/ideasoft/products/push', async (c) => {
     }
 
     const ideasoftId = up.id;
+    const requestOrigin = new URL(c.req.url).origin;
+    const imageBuild = await buildIdeasoftImageUploads(c.env.STORAGE, productRow.image, requestOrigin);
+    const imageUpload = imageBuild.images.length > 0
+      ? await ideasoftUploadProductImages({
+          storeBase,
+          accessToken: token,
+          productId: ideasoftId,
+          images: imageBuild.images,
+        })
+      : { uploaded: 0, errors: [] as string[] };
+    const imageWarnings = [...imageBuild.warnings, ...imageUpload.errors];
+    const transfer_report = buildIdeasoftTransferReport({
+      productCategoryId: productRow.category_id,
+      productBrandId: productRow.brand_id,
+      categoryIdeasoftId,
+      brandIdeasoftId,
+      masterCurrencyId,
+      currencyCode,
+      currencyIdeasoftId,
+      hasSeoInDb: ideasoftHasSeoContentInRow(productRow),
+      categoryWarning: up.categoryWarning,
+      brandWarning: up.brandWarning,
+      imageCount: imageBuild.images.length,
+      imagesUploaded: imageUpload.uploaded,
+      imageWarnings,
+    });
 
     if (mapRow?.id) {
       await c.env.DB.prepare(
@@ -2824,10 +3480,128 @@ app.post('/api/ideasoft/products/push', async (c) => {
       created: !remoteId,
       ideasoft_product_id: ideasoftId,
       ...(up.brandWarning ? { brand_warning: up.brandWarning } : {}),
+      ...(up.categoryWarning ? { category_warning: up.categoryWarning } : {}),
+      master_currency_id: masterCurrencyId,
+      ideasoft_currency_id: currencyIdeasoftId,
+      currency_code: currencyCode,
+      images_uploaded: imageUpload.uploaded,
+      ...(imageWarnings.length > 0 ? { image_warnings: imageWarnings } : {}),
+      transfer_report,
     });
   } catch (err: unknown) {
     const hint = d1SchemaErrorMessage(err);
     return c.json({ error: hint ?? (err instanceof Error ? err.message : 'Aktarım başarısız') }, 500);
+  }
+});
+
+/** Kayıtlı Ideasoft ürünü için yalnız görsel / SEO metinleri / kategori senkronu (tam aktarım sonrası) */
+app.post('/api/ideasoft/products/partial-sync', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req
+      .json<{ product_id?: number; part?: 'images' | 'seo' | 'category' }>()
+      .catch(() => ({}));
+    const productId = Number(body.product_id);
+    const part = body.part;
+    if (!Number.isFinite(productId) || productId <= 0) return c.json({ error: 'product_id gerekli' }, 400);
+    if (part !== 'images' && part !== 'seo' && part !== 'category') {
+      return c.json({ error: 'part: images | seo | category gerekli' }, 400);
+    }
+
+    const settings = await loadIdeasoftSettings(c.env.DB);
+    const storeBase = normalizeStoreBase(settings.store_base_url || '');
+    if (!storeBase) return c.json({ error: 'Ideasoft mağaza adresi ayarlı değil.' }, 400);
+    const token = await getIdeasoftAccessToken(c.env);
+    if (!token) {
+      return c.json(
+        {
+          error:
+            'Ideasoft OAuth bağlantısı yok veya süresi doldu. Ayarlar > IdeaSoft üzerinden "Ideasoft ile bağlan" ile yetkilendirin.',
+        },
+        401
+      );
+    }
+
+    const productRow = await fetchProductRowForIdeasoft(c.env.DB, productId);
+    if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
+    if (productRow.ecommerce_enabled === 0) return c.json({ error: 'Bu ürün e-ticarete kapalı.' }, 400);
+
+    const marketplaceId = await ensureIdeasoftMarketplaceId(c.env.DB);
+    const mapRow = await c.env.DB.prepare(
+      `SELECT marketplace_model_code FROM product_mappings WHERE product_id = ? AND marketplace_id = ? AND is_deleted = 0 LIMIT 1`
+    )
+      .bind(productId, marketplaceId)
+      .first<{ marketplace_model_code: string | null }>();
+    const ideasoftId = (mapRow?.marketplace_model_code ?? '').trim();
+    if (!ideasoftId) {
+      return c.json(
+        { error: 'Önce ürünü Ideasoft’a tam aktarın; kayıtlı Ideasoft ürün kimliği yok.' },
+        400
+      );
+    }
+
+    const requestOrigin = new URL(c.req.url).origin;
+
+    if (part === 'images') {
+      const imageBuild = await buildIdeasoftImageUploads(c.env.STORAGE, productRow.image, requestOrigin);
+      if (imageBuild.images.length === 0) {
+        return c.json({
+          ok: true,
+          message: 'Aktarılacak görsel yok.',
+          images_uploaded: 0,
+          ...(imageBuild.warnings.length > 0 ? { image_warnings: imageBuild.warnings } : {}),
+        });
+      }
+      const imageUpload = await ideasoftUploadProductImages({
+        storeBase,
+        accessToken: token,
+        productId: ideasoftId,
+        images: imageBuild.images,
+      });
+      const imageWarnings = [...imageBuild.warnings, ...imageUpload.errors];
+      return c.json({
+        ok: true,
+        message: `${imageUpload.uploaded} görsel gönderildi.`,
+        images_uploaded: imageUpload.uploaded,
+        ...(imageWarnings.length > 0 ? { image_warnings: imageWarnings } : {}),
+      });
+    }
+
+    if (part === 'seo') {
+      const seo = ideasoftSeoFieldsFromProductRow(productRow);
+      const displayName = (productRow.ecommerce_name ?? '').trim() || productRow.name;
+      const desc = (productRow.main_description ?? '').trim() || displayName;
+      const pageTitle = (seo.pageTitle ?? '').trim() || displayName;
+      await ideasoftPatchProductMarketingAndSeo(storeBase, token, ideasoftId, {
+        longDescription: desc,
+        pageTitle,
+        metaDescription: (seo.metaDescription ?? '').trim(),
+        metaKeywords: (seo.metaKeywords ?? '').trim(),
+        searchKeywords: (seo.searchKeywords ?? '').trim(),
+      });
+      return c.json({ ok: true, message: 'SEO ve vitrin metinleri Ideasoft’a yazıldı.' });
+    }
+
+    const catMap = await loadIdeasoftJsonSettingMap(c.env.DB, IDEASOFT_CATEGORY_MAPPINGS_KEY);
+    const categoryIdeasoftId = await resolveIdeasoftCategoryIdFromMapping(
+      c.env.DB,
+      catMap,
+      productRow.category_id
+    );
+    if (!categoryIdeasoftId) {
+      return c.json({ error: 'Ürün veya üst kategoriler için Ideasoft kategori eşlemesi tanımlı değil.' }, 400);
+    }
+    const ch = await ideasoftChangeProductCategory(storeBase, token, ideasoftId, categoryIdeasoftId, {});
+    if (!ch.ok) {
+      return c.json(
+        { error: ch.error, ideasoft_status: ch.status },
+        ch.status >= 400 && ch.status < 600 ? ch.status : 502
+      );
+    }
+    return c.json({ ok: true, message: 'Kategori Ideasoft ürününe güncellendi.' });
+  } catch (err: unknown) {
+    const hint = d1SchemaErrorMessage(err);
+    return c.json({ error: hint ?? (err instanceof Error ? err.message : 'Senkron hatası') }, 500);
   }
 });
 
@@ -7562,11 +8336,10 @@ app.post('/api/export/fetch', async (c) => {
     let data: unknown[] = [];
 
     if (dataSource === 'product') {
-      const { results } = await c.env.DB.prepare(
-        `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, p.currency_id,
+      const exportProductSql = `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, p.currency_id,
          p.price, p.quantity, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status,
          pp1.price as ecommerce_price, pp2.price as price_type_2, pp3.price as price_type_3, pp4.price as price_type_4, pp5.price as price_type_5,
-         pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description
+         pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
          FROM products p
          LEFT JOIN product_prices pp1 ON pp1.product_id = p.id AND pp1.price_type_id = 1 AND pp1.is_deleted = 0
          LEFT JOIN product_prices pp2 ON pp2.product_id = p.id AND pp2.price_type_id = 2 AND pp2.is_deleted = 0
@@ -7574,8 +8347,8 @@ app.post('/api/export/fetch', async (c) => {
          LEFT JOIN product_prices pp4 ON pp4.product_id = p.id AND pp4.price_type_id = 4 AND pp4.is_deleted = 0
          LEFT JOIN product_prices pp5 ON pp5.product_id = p.id AND pp5.price_type_id = 5 AND pp5.is_deleted = 0
          LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
-         WHERE p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1 ORDER BY p.sort_order, p.id LIMIT ?`
-      ).bind(limit).all();
+         WHERE p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1 ORDER BY p.sort_order, p.id LIMIT ?`;
+      const { results } = await d1AllWithSeoKeywordsSelectFallback<Record<string, unknown>>(c.env.DB, exportProductSql, [limit]);
       data = results ?? [];
     } else if (dataSource === 'customer') {
       const { results } = await c.env.DB.prepare(
@@ -8063,23 +8836,169 @@ function extractTextFromHtml(html: string, maxLen = 4000): string {
   return text;
 }
 
-/** ChatGPT ile e-ticaret metinleri oluştur. SKU ile otomatikkapimarketim.com ürün sayfasından referans alınır. */
-app.post('/api/ai/generate-ecommerce', async (c) => {
+/** Rakip / referans sayfalarından düz metin (max 3 URL) */
+async function fetchCompetitorPageTextsForAi(urls: string[], maxPerUrl = 3500): Promise<string> {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of urls.slice(0, 3)) {
+    let u = raw.trim();
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+    try {
+      const pageRes = await fetch(u, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; eSyncPlus/1.0)' },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!pageRes.ok) continue;
+      const html = await pageRes.text();
+      const t = extractTextFromHtml(html, maxPerUrl);
+      if (t) parts.push(`---\nKaynak: ${u}\n${t}\n`);
+    } catch {
+      /* atla */
+    }
+  }
+  return parts.join('\n');
+}
+
+async function getOpenAiApiKey(c: { env: { DB?: D1Database } }): Promise<string | null> {
+  if (!c.env.DB) return null;
+  const { results } = await c.env.DB.prepare(
+    `SELECT value FROM app_settings WHERE category = 'openai' AND "key" = 'api_key' AND is_deleted = 0 LIMIT 1`
+  ).all();
+  return ((results as { value: string | null }[])[0]?.value ?? '').trim() || null;
+}
+
+const SEO_META_DESCRIPTION_MAX_LEN = 160;
+
+/** Hedef kelime: seo_keywords içindeki virgül/noktalı virgülle ayrılmış ilk ifade; yoksa ürün adının ilk kelimesi */
+function extractPrimarySeoTargetKeyword(seoKeywords: string, productName: string): string {
+  const first = seoKeywords
+    .split(/[,;]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)[0];
+  if (first) return first;
+  const w = productName.trim().split(/\s+/).filter(Boolean)[0];
+  return w ?? '';
+}
+
+function turkishTextIncludes(haystack: string, needle: string): boolean {
+  const h = haystack.toLocaleLowerCase('tr-TR');
+  const n = needle.toLocaleLowerCase('tr-TR').trim();
+  if (!n) return true;
+  return h.includes(n);
+}
+
+/** Üretilen meta açıklamada hedef kelime yoksa doğal biçimde eklenir (max uzunluk korunur) */
+function ensureMetaDescriptionContainsTargetKeyword(
+  seoDescription: string,
+  seoKeywords: string,
+  productName: string
+): string {
+  const target = extractPrimarySeoTargetKeyword(seoKeywords, productName);
+  let out = seoDescription.trim();
+  if (!target) return out.slice(0, SEO_META_DESCRIPTION_MAX_LEN);
+  if (turkishTextIncludes(out, target)) return out.slice(0, SEO_META_DESCRIPTION_MAX_LEN);
+  if (!out) return target.slice(0, SEO_META_DESCRIPTION_MAX_LEN);
+  const connector = /[.!?…]$/.test(out) ? ' ' : '. ';
+  const tail = `${connector}${target}`;
+  if (out.length + tail.length <= SEO_META_DESCRIPTION_MAX_LEN) {
+    return (out + tail).slice(0, SEO_META_DESCRIPTION_MAX_LEN);
+  }
+  const prefixed = `${target}: ${out}`;
+  if (prefixed.length <= SEO_META_DESCRIPTION_MAX_LEN) return prefixed;
+  return prefixed.slice(0, SEO_META_DESCRIPTION_MAX_LEN);
+}
+
+/** Ürün adından SEO: slug, meta başlık, açıklama, anahtar kelimeler */
+app.post('/api/ai/generate-seo', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const body = await c.req.json<{ name?: string; brand_name?: string; category_path?: string; sku?: string }>().catch(() => null);
+    const body = await c.req.json<{ name?: string; brand_name?: string; category_path?: string }>().catch(() => null);
     const name = (body?.name ?? '').trim();
     if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
 
-    const { results } = await c.env.DB.prepare(
-      `SELECT value FROM app_settings WHERE category = 'openai' AND "key" = 'api_key' AND is_deleted = 0 LIMIT 1`
-    ).all();
-    const apiKey = (results as { value: string | null }[])[0]?.value?.trim();
+    const apiKey = await getOpenAiApiKey(c);
+    if (!apiKey) return c.json({ error: 'OpenAI API anahtarı tanımlı değil. Ayarlar > Entegrasyonlar sayfasından ekleyin.' }, 400);
+
+    const brandName = (body?.brand_name ?? '').trim();
+    const categoryPath = (body?.category_path ?? '').trim();
+    const userPrompt = `Ürün adı: ${name}${brandName ? `\nMarka: ${brandName}` : ''}${categoryPath ? `\nKategori yolu: ${categoryPath}` : ''}`;
+
+    const systemPrompt = `Sen Türkçe e-ticaret SEO uzmanısın. Yalnızca verilen ürün adından (ve varsa marka/kategori) SEO alanları üret.
+
+Yanıtını SADECE şu JSON formatında ver, başka metin yazma:
+{"seo_slug":"...","seo_title":"...","seo_description":"...","seo_keywords":"..."}
+
+Kurallar:
+- seo_slug: URL yolu parçası; küçük harf, rakam ve tire; ASCII (Türkçe karakter kullanma: ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c); örn: red-detayli-urun-adi
+- seo_title: meta title, arama sonuçları için, max 60 karakter, Türkçe
+- seo_keywords: virgülle ayrılmış 8-12 anahtar kelime, Türkçe. İlk sıradaki ifade "hedef kelime"dir (birincil anahtar kelime).
+- seo_description: meta description, max 160 karakter, tıklanmayı teşvik eden özet
+- ZORUNLU DOĞRULAMA (buna uygun üret): "Hedef kelime, ürün meta açıklaması içinde geçmelidir." Yani seo_keywords içinde virgülle ayrılmış İLK ifade, seo_description metninde tamamı veya anlamlı biçimde (kelime köküyle) geçmeli. Önce seo_keywords listesini yaz (hedef kelime en başta), sonra seo_description metnini bu hedefi içerecek şekilde kur; açıklama hedeften bağımsız yazılmasın.`;
+
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.55,
+      }),
+    });
+
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+    if (!res.ok) {
+      const errMsg = data?.error?.message ?? (await res.text()).slice(0, 200);
+      return c.json({ error: `OpenAI: ${errMsg}` }, 400);
+    }
+
+    const content = data?.choices?.[0]?.message?.content?.trim();
+    if (!content) return c.json({ error: 'OpenAI yanıt vermedi' }, 500);
+
+    let parsed: { seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string };
+    try {
+      const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      parsed = JSON.parse(cleaned) as typeof parsed;
+    } catch {
+      return c.json({ error: 'OpenAI yanıtı parse edilemedi' }, 500);
+    }
+
+    const rawKeywords = parsed.seo_keywords ?? '';
+    const rawDesc = parsed.seo_description ?? '';
+    const seo_description = ensureMetaDescriptionContainsTargetKeyword(rawDesc, rawKeywords, name);
+
+    return c.json({
+      seo_slug: parsed.seo_slug ?? '',
+      seo_title: parsed.seo_title ?? '',
+      seo_description,
+      seo_keywords: rawKeywords,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
+  }
+});
+
+/** E-ticaret adı + açıklama: mağaza ürün sayfası, SKU ve isteğe bağlı rakip URL analizi */
+app.post('/api/ai/generate-ecommerce', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req
+      .json<{ name?: string; brand_name?: string; category_path?: string; sku?: string; competitor_urls?: string[] }>()
+      .catch(() => null);
+    const name = (body?.name ?? '').trim();
+    if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
+
+    const apiKey = await getOpenAiApiKey(c);
     if (!apiKey) return c.json({ error: 'OpenAI API anahtarı tanımlı değil. Ayarlar > Entegrasyonlar sayfasından ekleyin.' }, 400);
 
     const brandName = (body?.brand_name ?? '').trim();
     const categoryPath = (body?.category_path ?? '').trim();
     const sku = (body?.sku ?? '').trim();
+    const competitorUrls = Array.isArray(body?.competitor_urls) ? body.competitor_urls.filter((u): u is string => typeof u === 'string' && u.trim() !== '') : [];
 
     let siteContent = '';
     const settings = await getOpencartMysqlSettings(c);
@@ -8114,34 +9033,47 @@ app.post('/api/ai/generate-ecommerce', async (c) => {
           }
         }
       } catch {
-        /* OpenCart veya fetch hatası – referans olmadan devam et */
+        /* OpenCart veya fetch hatası */
       }
+    }
+
+    let competitorContent = '';
+    if (competitorUrls.length > 0) {
+      competitorContent = await fetchCompetitorPageTextsForAi(competitorUrls);
     }
 
     const userPrompt = `Ürün: ${name}${brandName ? `, Marka: ${brandName}` : ''}${categoryPath ? `, Kategori: ${categoryPath}` : ''}${sku ? `, SKU: ${sku}` : ''}`;
 
-    let systemPrompt = `Sen bir e-ticaret metin yazarısın. Verilen ürün bilgilerine göre Türkçe e-ticaret metinleri oluştur.`;
+    let systemPrompt = `Sen bir e-ticaret metin yazarısın. Verilen ürün bilgilerine göre Türkçe yalnızca "e-ticaret ürün adı" ve "ürün açıklaması" üret. Rakip ve referans metinlerdeki güçlü ifadeleri özgün şekilde uyarlayabilirsin; birebir kopya yapma.`;
+
+    const refBlocks: string[] = [];
     if (siteContent) {
+      refBlocks.push(
+        `Bağlı mağazadaki (OpenCart) aynı SKU ile bulunan ürün sayfasından özet:\n---\n${siteContent}\n---`
+      );
+    }
+    if (competitorContent) {
+      refBlocks.push(`Kullanıcının verdiği rakip ürün sayfalarından çıkarılan metin:\n${competitorContent}`);
+    }
+    if (refBlocks.length > 0) {
       systemPrompt += `
 
-Mevcut otomatikkapimarketim.com sitesindeki aynı ürün sayfasından referans içerik:
----
-${siteContent}
----
+Aşağıdaki kaynakları rakip / referans analizi için kullan; ton ve fayda vaatlerini güçlendir, yanıltıcı iddia ekleme:
+${refBlocks.join('\n\n')}`;
+    } else {
+      systemPrompt += `
 
-Bu içeriği referans alarak daha iyi, satış odaklı metinler üret. Aynı bilgileri tekrarlamak yerine genişlet ve zenginleştir.`;
+Doğrudan rakip sayfası verilmedi; ürün adı ve kategoriye göre sektörde yaygın satış odaklı bir e-ticaret adı ve açıklama yaz.`;
     }
+
     systemPrompt += `
 
-Yanıtını SADECE aşağıdaki JSON formatında ver, başka hiçbir açıklama ekleme:
-{"ecommerce_name":"...","main_description":"...","seo_slug":"...","seo_title":"...","seo_description":"..."}
+Yanıtını SADECE şu JSON formatında ver:
+{"ecommerce_name":"...","main_description":"..."}
 
 Kurallar:
-- ecommerce_name: E-ticaret sitelerinde görünecek çekici ürün adı (max 100 karakter)
-- main_description: Ürün açıklaması, HTML etiketleri kullanabilirsin (p, ul, li, strong). 2-3 paragraf, satış odaklı
-- seo_slug: URL-safe, sadece küçük harf, tire ile kelimeler (örn: urun-adi-seo)
-- seo_title: Meta başlık, max 60 karakter
-- seo_description: Meta açıklama, max 160 karakter`;
+- ecommerce_name: E-ticaret vitrinlerinde görünecek çekici ürün adı (max 100 karakter); rakip örneklerindeki güçlü isimlendirme tarzından ilham al
+- main_description: Ürün açıklaması; HTML kullanabilirsin (p, ul, li, strong). 2-4 paragraf, satış ve fayda odaklı`;
 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -8168,7 +9100,7 @@ Kurallar:
     const content = data?.choices?.[0]?.message?.content?.trim();
     if (!content) return c.json({ error: 'OpenAI yanıt vermedi' }, 500);
 
-    let parsed: { ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string };
+    let parsed: { ecommerce_name?: string; main_description?: string };
     try {
       const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
       parsed = JSON.parse(cleaned) as typeof parsed;
@@ -8179,9 +9111,6 @@ Kurallar:
     return c.json({
       ecommerce_name: parsed.ecommerce_name ?? '',
       main_description: parsed.main_description ?? '',
-      seo_slug: parsed.seo_slug ?? '',
-      seo_title: parsed.seo_title ?? '',
-      seo_description: parsed.seo_description ?? '',
     });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
@@ -8424,6 +9353,7 @@ app.get('/api/app-settings', async (c) => {
         'ideasoft_oauth_pending',
         'ideasoft_category_mappings',
         'ideasoft_brand_mappings',
+        'ideasoft_currency_mappings',
       ]),
     };
     const hidden = hiddenKeysByCategory[category] ?? new Set<string>();
@@ -9334,19 +10264,110 @@ type ProductRowForParasutPush = {
 };
 
 function parseProductImageToFirstPath(img: unknown): string | null {
-  if (!img || typeof img !== 'string') return null;
+  return parseProductImageToAllPaths(img)[0] ?? null;
+}
+
+function parseProductImageToAllPaths(img: unknown): string[] {
+  if (!img || typeof img !== 'string') return [];
   const t = img.trim();
-  if (!t || t === '[]') return null;
+  if (!t || t === '[]') return [];
+  const out: string[] = [];
+  const pushPath = (v: unknown) => {
+    if (typeof v !== 'string') return;
+    const p = v.trim();
+    if (!p) return;
+    if (!out.includes(p)) out.push(p);
+  };
   try {
     const parsed = JSON.parse(t);
     if (Array.isArray(parsed)) {
-      const first = parsed.find((x: unknown): x is string => typeof x === 'string' && !!x.trim());
-      return first?.trim() ?? null;
+      for (const p of parsed) pushPath(p);
+      return out;
     }
-    return t;
   } catch {
-    return t;
+    // ignore and treat as raw string path below
   }
+  pushPath(t);
+  return out;
+}
+
+async function urlToDataUrl(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) return null;
+    const ct = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].trim() || 'image/jpeg';
+    const buf = await res.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      const slice = bytes.subarray(i, i + chunk);
+      binary += String.fromCharCode.apply(null, Array.from(slice));
+    }
+    return `data:${ct};base64,${btoa(binary)}`;
+  } catch {
+    return null;
+  }
+}
+
+function filenameFromImagePath(path: string, sortOrder: number): string {
+  const clean = path.split('?')[0].split('#')[0];
+  const decoded = (() => {
+    try { return decodeURIComponent(clean); } catch { return clean; }
+  })();
+  const leaf = decoded.split('/').filter(Boolean).pop() || '';
+  const safeLeaf = leaf.replace(/[^a-zA-Z0-9._-]/g, '-');
+  if (safeLeaf && /\.[a-zA-Z0-9]{2,5}$/.test(safeLeaf)) return safeLeaf;
+  if (safeLeaf) return `${safeLeaf}.jpg`;
+  return `product-image-${sortOrder}.jpg`;
+}
+
+async function buildIdeasoftImageUploads(
+  storage: R2Bucket | undefined,
+  rawImage: unknown,
+  publicApiBase: string,
+  opts?: { maxImages?: number; maxDataUrlChars?: number }
+): Promise<{ images: Array<{ dataUrl: string; sourceUrl?: string; filename: string; sortOrder: number }>; warnings: string[] }> {
+  const maxImages = Math.max(1, opts?.maxImages ?? 20);
+  const maxDataUrlChars = Math.max(100_000, opts?.maxDataUrlChars ?? 5_000_000);
+  const paths = parseProductImageToAllPaths(rawImage);
+  const warnings: string[] = [];
+  if (paths.length === 0) return { images: [], warnings };
+  if (paths.length > maxImages) {
+    warnings.push(`Görsel sayısı ${paths.length}; ilk ${maxImages} görsel aktarıldı.`);
+  }
+  const images: Array<{ dataUrl: string; filename: string; sortOrder: number }> = [];
+  const limited = paths.slice(0, maxImages);
+  for (let i = 0; i < limited.length; i++) {
+    const sortOrder = i + 1;
+    const p = limited[i];
+    const sourceUrl = p.startsWith('http://') || p.startsWith('https://')
+      ? p
+      : `${publicApiBase.replace(/\/+$/, '')}/storage/serve?key=${encodeURIComponent(p)}`;
+    const initial = await storagePathToDataUrl(storage, p);
+    const dataUrl = initial?.startsWith('http://') || initial?.startsWith('https://')
+      ? await urlToDataUrl(initial)
+      : initial;
+    if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+      warnings.push(`Görsel ${sortOrder} okunamadı: ${p}`);
+      continue;
+    }
+    if (!ideasoftDataUrlBase64PayloadNonEmpty(dataUrl)) {
+      warnings.push(`Görsel ${sortOrder} boş veya geçersiz dosya (0 bayt); atlandı.`);
+      continue;
+    }
+    if (dataUrl.length > maxDataUrlChars) {
+      warnings.push(`Görsel ${sortOrder} çok büyük olduğu için atlandı.`);
+      continue;
+    }
+    images.push({
+      dataUrl,
+      sourceUrl,
+      filename: filenameFromImagePath(p, sortOrder),
+      sortOrder,
+    });
+  }
+  return { images, warnings };
 }
 
 function isEmptyParasutVal(v: unknown): boolean {

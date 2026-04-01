@@ -6,6 +6,7 @@ import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, A
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { DecimalInput } from '@/components/DecimalInput'
 import { Label } from '@/components/ui/label'
 import {
@@ -41,10 +42,15 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { toastSuccess, toastError, toastWarning } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
+import {
+  IdeasoftTransferReportDialog,
+  type IdeasoftTransferReportStep,
+} from '@/components/IdeasoftTransferReportDialog'
 import { lookupFromSupplierSource, fetchMatchedSupplierCodesFromBrand } from '@/lib/supplierSource'
 import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/utils'
 import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
@@ -108,6 +114,7 @@ interface Product {
   subcategory_code?: string
   subcategory_name?: string
   subcategory_color?: string
+  seo_keywords?: string
   type_name?: string
   type_color?: string
   unit_name?: string
@@ -170,7 +177,7 @@ function sortParasutAttributeKeys(keys: string[]): string[] {
 const IDEASOFT_ATTR_LABELS: Record<string, string> = {
   name: 'Ürün adı',
   sku: 'SKU',
-  list_price: 'Liste fiyatı',
+  list_price: 'Genel fiyat',
   quantity: 'Stok miktarı',
   description: 'Açıklama',
 }
@@ -573,6 +580,7 @@ const emptyForm = {
   seo_slug: '',
   seo_title: '',
   seo_description: '',
+  seo_keywords: '',
 }
 
 interface PackageItem {
@@ -637,7 +645,9 @@ export function ProductsPage() {
   const [imageUploadImages, setImageUploadImages] = useState<string[]>([])
   const [imageUploadSaving, setImageUploadSaving] = useState(false)
   const [publishLoading, setPublishLoading] = useState<string | null>(null)
-  const [aiGenerateLoading, setAiGenerateLoading] = useState(false)
+  const [aiSeoLoading, setAiSeoLoading] = useState(false)
+  const [aiEcommerceLoading, setAiEcommerceLoading] = useState(false)
+  const [competitorUrlsText, setCompetitorUrlsText] = useState('')
   const [openCartPublishOpen, setOpenCartPublishOpen] = useState(false)
   const [openCartUpdateOptions, setOpenCartUpdateOptions] = useState({ update_price: true, update_description: true, update_images: true })
   const [parasutTransferOpen, setParasutTransferOpen] = useState(false)
@@ -673,6 +683,10 @@ export function ProductsPage() {
   const [ideasoftTransferLoading, setIdeasoftTransferLoading] = useState(false)
   const [ideasoftManualId, setIdeasoftManualId] = useState('')
   const [ideasoftForceCreate, setIdeasoftForceCreate] = useState(false)
+  const [ideasoftTransferReportOpen, setIdeasoftTransferReportOpen] = useState(false)
+  const [ideasoftTransferReportSteps, setIdeasoftTransferReportSteps] = useState<IdeasoftTransferReportStep[] | null>(
+    null
+  )
   const [filterCategorySearch, setFilterCategorySearch] = useState('')
   const [filterBrandSearch, setFilterBrandSearch] = useState('')
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
@@ -680,11 +694,12 @@ export function ProductsPage() {
   const [parasutIconSrc, setParasutIconSrc] = useState<string | undefined>()
   const [ideasoftIconSrc, setIdeasoftIconSrc] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | null>(null)
+  const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | 'ideasoft' | null>(null)
   const [bulkCategoryId, setBulkCategoryId] = useState<number | ''>('')
   const [bulkTypeId, setBulkTypeId] = useState<number | ''>('')
   const [bulkItemGroupId, setBulkItemGroupId] = useState<number | ''>('')
   const [bulkSaving, setBulkSaving] = useState(false)
+  const [bulkIdeasoftLoading, setBulkIdeasoftLoading] = useState(false)
   const imageUploadProductRef = useRef<Product | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterGroupId !== '' || filterTypeId !== '' || filterNoImage
@@ -950,10 +965,16 @@ export function ProductsPage() {
         message?: string
         created?: boolean
         brand_warning?: string
+        category_warning?: string
+        images_uploaded?: number
+        image_warnings?: string[]
+        transfer_report?: { steps?: IdeasoftTransferReportStep[] }
       }>(res)
       if (!res.ok) throw new Error(data.error || 'Aktarım başarısız')
-      if (data.brand_warning?.trim()) {
-        toastWarning('Ürün kaydedildi — marka', data.brand_warning.trim())
+      const reportSteps = data.transfer_report?.steps
+      if (Array.isArray(reportSteps) && reportSteps.length > 0) {
+        setIdeasoftTransferReportSteps(reportSteps)
+        setIdeasoftTransferReportOpen(true)
       }
       toastSuccess(
         'Tamam',
@@ -1417,6 +1438,7 @@ export function ProductsPage() {
     setEditingId(null)
     setModalTab('genel')
     const defCur = defaultCurrencyId ?? ''
+    setCompetitorUrlsText('')
     setForm({
       ...emptyForm,
       currency_id: defCur as number | '',
@@ -1437,6 +1459,7 @@ export function ProductsPage() {
     setEditingId(item.id)
     setModalTab(tab)
     setSupplierCodeMatch(null)
+    setCompetitorUrlsText('')
     const itemTypeCode = types.find((t) => t.id === item.type_id)?.code?.toUpperCase() ?? ''
     const itemIsPackage = itemTypeCode === 'PAK' || itemTypeCode === 'PAKET'
     const defCur = defaultCurrencyId ?? item.currency_id ?? ''
@@ -1493,6 +1516,7 @@ export function ProductsPage() {
         seo_slug: product?.seo_slug ?? '',
         seo_title: product?.seo_title ?? '',
         seo_description: product?.seo_description ?? '',
+        seo_keywords: product?.seo_keywords ?? '',
       })
       const json = await itemsRes.json()
       if (itemsRes.ok && json.data) {
@@ -1540,6 +1564,7 @@ export function ProductsPage() {
     setForm(emptyForm)
     setPackageItems([])
     setSupplierCodeMatch(null)
+    setCompetitorUrlsText('')
   }
 
   function openImageUploadModal(item: Product) {
@@ -1584,13 +1609,51 @@ export function ProductsPage() {
     }
   }, [])
 
+  async function handleGenerateSeo() {
+    const name = form.name?.trim()
+    if (!name) {
+      toastError('Ürün adı gerekli', 'Önce ürün adını girin.')
+      return
+    }
+    setAiSeoLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ai/generate-seo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
+          category_path: categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '',
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'İstek başarısız')
+      setForm((f) => ({
+        ...f,
+        seo_slug: json.seo_slug ?? '',
+        seo_title: json.seo_title ?? '',
+        seo_description: json.seo_description ?? '',
+        seo_keywords: json.seo_keywords ?? '',
+      }))
+      toastSuccess('SEO oluşturuldu', 'Bağlantı, meta ve anahtar kelimeler ürün adından üretildi.')
+    } catch (err) {
+      toastError('Oluşturulamadı', err instanceof Error ? err.message : 'SEO üretilemedi')
+    } finally {
+      setAiSeoLoading(false)
+    }
+  }
+
   async function handleGenerateEcommerce() {
     const name = form.name?.trim()
     if (!name) {
       toastError('Ürün adı gerekli', 'Önce ürün adını girin.')
       return
     }
-    setAiGenerateLoading(true)
+    const competitor_urls = competitorUrlsText
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    setAiEcommerceLoading(true)
     try {
       const res = await fetch(`${API_URL}/api/ai/generate-ecommerce`, {
         method: 'POST',
@@ -1600,6 +1663,7 @@ export function ProductsPage() {
           brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
           category_path: categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '',
           sku: form.sku ?? '',
+          ...(competitor_urls.length > 0 ? { competitor_urls } : {}),
         }),
       })
       const json = await res.json()
@@ -1608,15 +1672,12 @@ export function ProductsPage() {
         ...f,
         ecommerce_name: json.ecommerce_name ?? '',
         main_description: json.main_description ?? '',
-        seo_slug: json.seo_slug ?? '',
-        seo_title: json.seo_title ?? '',
-        seo_description: json.seo_description ?? '',
       }))
-      toastSuccess('Oluşturuldu', 'E-ticaret metinleri ChatGPT ile üretildi.')
+      toastSuccess('E-ticaret metinleri', 'Ad ve açıklama rakip / mağaza referanslarıyla üretildi.')
     } catch (err) {
       toastError('Oluşturulamadı', err instanceof Error ? err.message : 'Metinler üretilemedi')
     } finally {
-      setAiGenerateLoading(false)
+      setAiEcommerceLoading(false)
     }
   }
 
@@ -1638,8 +1699,18 @@ export function ProductsPage() {
             update_description: true,
           }),
         })
-        const json = await res.json()
+        const json = (await res.json()) as {
+          error?: string
+          message?: string
+          ideasoft_product_id?: string
+          transfer_report?: { steps?: IdeasoftTransferReportStep[] }
+        }
         if (!res.ok) throw new Error(json.error ?? 'Yayınlama başarısız')
+        const reportSteps = json.transfer_report?.steps
+        if (Array.isArray(reportSteps) && reportSteps.length > 0) {
+          setIdeasoftTransferReportSteps(reportSteps)
+          setIdeasoftTransferReportOpen(true)
+        }
         const msg = json.message ?? 'Ideasoft\'a yayınlandı'
         toastSuccess(msg, `Ideasoft ürün kimliği: ${json.ideasoft_product_id ?? '—'}`)
       } else if (platform === 'opencart') {
@@ -1683,6 +1754,7 @@ export function ProductsPage() {
             seo_slug: form.seo_slug ?? '',
             seo_title: form.seo_title ?? '',
             seo_description: form.seo_description ?? '',
+            seo_keywords: form.seo_keywords ?? '',
             images: form.images ?? [],
             ...(uploadedPaths.length > 0 && { uploaded_image_paths: uploadedPaths }),
             update_price: opts.update_price,
@@ -1876,8 +1948,53 @@ export function ProductsPage() {
     }
   }
 
+  const handleBulkIdeasoftTransfer = useCallback(async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    setBulkIdeasoftLoading(true)
+    let ok = 0
+    const errors: { id: number; msg: string }[] = []
+    for (const id of ids) {
+      try {
+        const res = await fetch(`${API_URL}/api/ideasoft/products/push`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: id, attribute_overrides: {} }),
+        })
+        const j = await parseJsonResponse<{ error?: string }>(res)
+        if (!res.ok) throw new Error(j.error || 'Aktarım başarısız')
+        ok++
+      } catch (e) {
+        errors.push({ id, msg: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    setBulkModal(null)
+    setSelectedIds(new Set())
+    void fetchData()
+    if (errors.length === 0) {
+      toastSuccess('Toplu Ideasoft aktarımı', `${ok} ürün Ideasoft mağazasına aktarıldı.`)
+    } else if (ok === 0) {
+      toastError(
+        'Aktarım başarısız',
+        errors
+          .slice(0, 5)
+          .map((e) => `#${e.id}: ${e.msg}`)
+          .join('\n') + (errors.length > 5 ? `\n… ve ${errors.length - 5} ürün daha` : '')
+      )
+    } else {
+      toastWarning(
+        `Ideasoft aktarımı kısmen tamamlandı (${ok}/${ids.length})`,
+        errors
+          .slice(0, 3)
+          .map((e) => `#${e.id}: ${e.msg}`)
+          .join('\n') + (errors.length > 3 ? `\n… ve ${errors.length - 3} hata daha` : '')
+      )
+    }
+    setBulkIdeasoftLoading(false)
+  }, [selectedIds, fetchData])
+
   return (
-    <PageLayout
+  <PageLayout
       title="Ürünler"
       description="Ürün listesini yönetin"
       backTo="/"
@@ -1976,6 +2093,11 @@ export function ProductsPage() {
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setBulkItemGroupId(''); setBulkModal('itemGroup') }}>
                   Ürün grubu değiştir
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => setBulkModal('ideasoft')}>
+                  <Store className="h-4 w-4 mr-2 shrink-0" aria-hidden />
+                  Ideasoft&apos;a aktar
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -2955,18 +3077,43 @@ export function ProductsPage() {
               )}
               <TabsContent value="e-ticaret" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={handleGenerateEcommerce}
-                      disabled={aiGenerateLoading || !form.name?.trim()}
+                      onClick={() => void handleGenerateSeo()}
+                      disabled={aiSeoLoading || !form.name?.trim()}
                       className="gap-2"
                     >
                       <Sparkles className="h-4 w-4" />
-                      {aiGenerateLoading ? 'Oluşturuluyor...' : 'ChatGPT ile Oluştur'}
+                      {aiSeoLoading ? 'SEO…' : 'SEO metinleri (ürün adı)'}
                     </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleGenerateEcommerce()}
+                      disabled={aiEcommerceLoading || !form.name?.trim()}
+                      className="gap-2"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      {aiEcommerceLoading ? 'Üretiliyor…' : 'E-ticaret adı ve açıklama (rakip analizi)'}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    SEO alanları yalnızca ürün adından üretilir. E-ticaret adı ve açıklama için aynı SKU ile mağaza ürün sayfası ve isteğe bağlı rakip URL’ler analiz edilir.
+                  </p>
+                  <div className="space-y-2">
+                    <Label htmlFor="competitor_urls">Rakip ürün sayfa adresleri (isteğe bağlı)</Label>
+                    <textarea
+                      id="competitor_urls"
+                      value={competitorUrlsText}
+                      onChange={(e) => setCompetitorUrlsText(e.target.value)}
+                      placeholder="Satır başına bir URL (ör. benzer ürünün Trendyol veya rakip mağaza sayfası)"
+                      rows={3}
+                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="ecommerce_name">E-Ticaret Adı</Label>
@@ -2988,8 +3135,8 @@ export function ProductsPage() {
                       className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[100px]"
                     />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="seo_slug">SEO Bağlantısı</Label>
+                  <div className="space-y-2 pt-2 border-t">
+                    <Label htmlFor="seo_slug">SEO bağlantısı (URL parçası)</Label>
                     <Input
                       id="seo_slug"
                       value={form.seo_slug ?? ''}
@@ -2998,7 +3145,7 @@ export function ProductsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="seo_title">Meta Başlığı</Label>
+                    <Label htmlFor="seo_title">Meta başlığı</Label>
                     <Input
                       id="seo_title"
                       value={form.seo_title ?? ''}
@@ -3007,7 +3154,7 @@ export function ProductsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="seo_description">Meta Açıklaması</Label>
+                    <Label htmlFor="seo_description">Meta açıklaması</Label>
                     <textarea
                       id="seo_description"
                       value={form.seo_description ?? ''}
@@ -3015,6 +3162,15 @@ export function ProductsPage() {
                       placeholder="Meta description (SEO)"
                       rows={2}
                       className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="seo_keywords">SEO anahtar kelimeleri</Label>
+                    <Input
+                      id="seo_keywords"
+                      value={form.seo_keywords ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, seo_keywords: e.target.value }))}
+                      placeholder="örnek: kırmızı kalem, ofis kırtasiye, …"
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-4 pt-2 border-t">
@@ -3348,6 +3504,34 @@ export function ProductsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={bulkModal === 'ideasoft'} onOpenChange={(o) => !o && !bulkIdeasoftLoading && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {ideasoftIconSrc ? (
+                <img src={ideasoftIconSrc} alt="" className="h-5 w-5 shrink-0 object-contain" />
+              ) : (
+                <Store className="h-5 w-5 shrink-0" aria-hidden />
+              )}
+              Toplu Ideasoft aktarımı
+            </DialogTitle>
+            <DialogDescription>
+              Seçili {selectedIds.size} ürün, kayıtlı verilerle sırayla Ideasoft mağazasına gönderilir (tek ürün aktarımıyla aynı
+              mantık). SKU ve e-ticarete açık ürünler gerekir; kategori/marka eşleştirmeleri Ayarlar / Ideasoft sayfalarından
+              yapılır.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" disabled={bulkIdeasoftLoading} onClick={() => setBulkModal(null)}>
+              İptal
+            </Button>
+            <Button type="button" disabled={bulkIdeasoftLoading} onClick={() => void handleBulkIdeasoftTransfer()}>
+              {bulkIdeasoftLoading ? 'Aktarılıyor…' : 'Aktarmayı başlat'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog
         open={parasutTransferOpen}
         onOpenChange={(o) => {
@@ -3468,143 +3652,166 @@ export function ProductsPage() {
           }
         }}
       >
-        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
+        <DialogContent className="flex h-[min(92vh,900px)] w-[min(100vw-1.5rem,56rem)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:rounded-lg">
+          <DialogHeader className="shrink-0 space-y-1 border-b px-4 py-3 text-left">
+            <DialogTitle className="flex items-center gap-2 text-base font-semibold">
               {ideasoftIconSrc ? (
-                <img src={ideasoftIconSrc} alt="" className="h-6 w-6 shrink-0 object-contain" />
+                <img src={ideasoftIconSrc} alt="" className="h-5 w-5 shrink-0 object-contain" />
               ) : (
-                <Store className="h-6 w-6 shrink-0" aria-hidden />
+                <Store className="h-5 w-5 shrink-0" aria-hidden />
               )}
               Ideasoft&apos;a aktar
             </DialogTitle>
-            <DialogDescription>
-              SKU ile kayıtlı veya mağazada bulunan Ideasoft ürünü güncellenir. Eşleşme yoksa{' '}
-              <strong>Aktar</strong> yeni ürün oluşturur.               Kategori ve marka,{' '}
-              <Link to="/ideasoft/categories" className="underline">
+            <DialogDescription className="text-xs leading-relaxed">
+              SKU / mağaza eşleşmesi güncellenir; yoksa yeni ürün. Kategori ve marka{' '}
+              <Link to="/ideasoft/categories" className="underline underline-offset-2">
                 kategori
-              </Link>{' '}
-              /{' '}
-              <Link to="/ideasoft/brands" className="underline">
+              </Link>
+              {' / '}
+              <Link to="/ideasoft/brands" className="underline underline-offset-2">
                 marka
               </Link>{' '}
-              eşleştirmelerinden gelir. Veriler kayıtlı üründen alınır; formdaki son değişiklikler için önce Kaydet.
+              eşleştirmeleri. Önce <strong>Kaydet</strong>.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
             {ideasoftPreviewLoading && (
-              <p className="text-sm text-muted-foreground text-center py-6">Önizleme yükleniyor…</p>
+              <p className="py-8 text-center text-xs text-muted-foreground">Önizleme yükleniyor…</p>
             )}
             {!ideasoftPreviewLoading && ideasoftPreviewError && (
-              <p className="text-sm text-destructive">{ideasoftPreviewError}</p>
+              <p className="text-xs text-destructive">{ideasoftPreviewError}</p>
             )}
             {!ideasoftPreviewLoading && ideasoftPreview && (
-              <>
-                <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm space-y-1">
-                  <div>
-                    <span className="text-muted-foreground">Eşleşme SKU: </span>
-                    <span className="font-mono">{ideasoftPreview.sku_used}</span>
-                  </div>
-                  {ideasoftPreview.currency_code && (
-                    <div>
-                      <span className="text-muted-foreground">Liste fiyatı para birimi: </span>
-                      <span className="font-mono">{ideasoftPreview.currency_code}</span>
-                    </div>
-                  )}
-                  {ideasoftPreview.ideasoft_product && (
-                    <div>
-                      <span className="text-muted-foreground">Ideasoft ürünü: </span>
-                      <span>{ideasoftPreview.ideasoft_product.name || '—'}</span>
-                      {ideasoftPreview.ideasoft_product.sku && (
-                        <span className="text-muted-foreground font-mono ml-1">({ideasoftPreview.ideasoft_product.sku})</span>
+              <div className="grid gap-3 md:grid-cols-12 md:gap-4">
+                <div className="space-y-2 md:col-span-5">
+                  <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2 text-xs">
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 [&_dt]:text-muted-foreground">
+                      <dt>SKU</dt>
+                      <dd className="font-mono text-foreground">{ideasoftPreview.sku_used}</dd>
+                      {ideasoftPreview.currency_code && (
+                        <>
+                          <dt>Para birimi</dt>
+                          <dd className="font-mono">{ideasoftPreview.currency_code}</dd>
+                        </>
                       )}
-                    </div>
-                  )}
-                  {(ideasoftPreview.mapped_category_id || ideasoftPreview.mapped_brand_id) && (
-                    <div className="text-xs text-muted-foreground pt-1 space-y-0.5">
+                      {ideasoftPreview.ideasoft_product && (
+                        <>
+                          <dt>Ideasoft</dt>
+                          <dd className="min-w-0 break-words">
+                            {ideasoftPreview.ideasoft_product.name || '—'}
+                            {ideasoftPreview.ideasoft_product.sku && (
+                              <span className="ml-1 font-mono text-muted-foreground">
+                                ({ideasoftPreview.ideasoft_product.sku})
+                              </span>
+                            )}
+                          </dd>
+                        </>
+                      )}
                       {ideasoftPreview.mapped_category_id && (
-                        <p>
-                          Kategori eşlemesi: <span className="font-mono text-foreground">{ideasoftPreview.mapped_category_id}</span>
-                        </p>
+                        <>
+                          <dt>Kategori</dt>
+                          <dd className="font-mono">{ideasoftPreview.mapped_category_id}</dd>
+                        </>
                       )}
                       {ideasoftPreview.mapped_brand_id && (
-                        <p>
-                          Marka eşlemesi: <span className="font-mono text-foreground">{ideasoftPreview.mapped_brand_id}</span>
-                        </p>
+                        <>
+                          <dt>Marka</dt>
+                          <dd className="font-mono">{ideasoftPreview.mapped_brand_id}</dd>
+                        </>
                       )}
+                    </dl>
+                  </div>
+                  {!ideasoftPreview.ideasoft_id && (
+                    <div className="space-y-1.5 rounded-md border border-emerald-600/25 bg-emerald-500/10 px-2.5 py-2">
+                      <p className="text-[11px] leading-snug text-emerald-900 dark:text-emerald-100">
+                        Eşleşme yoksa <strong>Aktar</strong> yeni ürün oluşturur. Mevcut ürünü güncellemek için ID girin.
+                      </p>
+                      <div className="space-y-1">
+                        <Label htmlFor="ideasoft-manual-id" className="text-xs">
+                          Ideasoft ürün ID (isteğe bağlı)
+                        </Label>
+                        <Input
+                          id="ideasoft-manual-id"
+                          value={ideasoftManualId}
+                          onChange={(e) => setIdeasoftManualId(e.target.value)}
+                          placeholder="Boş = yeni ürün"
+                          className="h-8 font-mono text-xs"
+                          autoComplete="off"
+                        />
+                      </div>
                     </div>
                   )}
-                </div>
-                {!ideasoftPreview.ideasoft_id && (
-                  <div className="space-y-2 rounded-md border border-emerald-600/30 bg-emerald-500/10 px-3 py-3">
-                    <p className="text-sm text-emerald-900 dark:text-emerald-100">
-                      Bu SKU ile kayıtlı Ideasoft ürünü bulunamadı. <strong>Aktar</strong> ile yeni ürün oluşturulur. Mevcut
-                      bir ürünü güncellemek için aşağıya Ideasoft ürün ID yazın.
+                  {ideasoftPreview.ideasoft_id && (
+                    <div className="space-y-1.5 rounded-md border border-border px-2.5 py-2">
+                      <label className="flex cursor-pointer items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={ideasoftForceCreate}
+                          onChange={(e) => setIdeasoftForceCreate(e.target.checked)}
+                          className="rounded border-input"
+                        />
+                        Yine de yeni ürün oluştur
+                      </label>
+                      <div className="space-y-1">
+                        <Label htmlFor="ideasoft-manual-id-2" className="text-xs">
+                          Başka ürün ID (isteğe bağlı)
+                        </Label>
+                        <Input
+                          id="ideasoft-manual-id-2"
+                          value={ideasoftManualId}
+                          onChange={(e) => setIdeasoftManualId(e.target.value)}
+                          placeholder="Boş = eşleşen güncellenir"
+                          className="h-8 font-mono text-xs"
+                          autoComplete="off"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {ideasoftPreview.has_photo && (
+                    <p className="text-[11px] leading-snug text-muted-foreground">
+                      Görseller sırayla Ideasoft&apos;a gönderilir (ilk görsel ana görsel).
                     </p>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="ideasoft-manual-id">Mevcut ürünü güncelle — Ideasoft ürün ID (isteğe bağlı)</Label>
-                      <Input
-                        id="ideasoft-manual-id"
-                        value={ideasoftManualId}
-                        onChange={(e) => setIdeasoftManualId(e.target.value)}
-                        placeholder="Boş bırakırsanız yeni ürün oluşturulur"
-                        className="font-mono text-sm"
-                        autoComplete="off"
-                      />
-                    </div>
-                  </div>
-                )}
-                {ideasoftPreview.ideasoft_id && (
-                  <div className="space-y-2 rounded-md border border-border px-3 py-2">
-                    <label className="flex items-center gap-2 cursor-pointer text-sm">
-                      <input
-                        type="checkbox"
-                        checked={ideasoftForceCreate}
-                        onChange={(e) => setIdeasoftForceCreate(e.target.checked)}
-                        className="rounded border-input"
-                      />
-                      <span>Yine de yeni ürün oluştur (otomatik eşleşmeyi yok say)</span>
-                    </label>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="ideasoft-manual-id-2">Başka ürüne bağla — Ideasoft ürün ID (isteğe bağlı)</Label>
-                      <Input
-                        id="ideasoft-manual-id-2"
-                        value={ideasoftManualId}
-                        onChange={(e) => setIdeasoftManualId(e.target.value)}
-                        placeholder="Boş = yukarıdaki eşleşen ürün güncellenir"
-                        className="font-mono text-sm"
-                        autoComplete="off"
-                      />
-                    </div>
-                  </div>
-                )}
-                {ideasoftPreview.has_photo && (
-                  <p className="text-sm text-muted-foreground">
-                    Ürün kaydında ana görsel tanımlı; Ideasoft görsel API&apos;si bu akışta kullanılmıyor — gerekirse
-                    mağaza panelinden ekleyin.
-                  </p>
-                )}
-                <div className="space-y-3 max-h-[42vh] overflow-y-auto pr-1">
-                  {sortIdeasoftAttributeKeys(Object.keys(ideasoftFieldEdits)).map((key) => (
-                    <div key={key} className="space-y-1.5">
-                      <Label htmlFor={`ideasoft-attr-${key}`}>
-                        {key === 'list_price' && ideasoftPreview.currency_code
-                          ? `${IDEASOFT_ATTR_LABELS[key] ?? key} (${ideasoftPreview.currency_code})`
-                          : IDEASOFT_ATTR_LABELS[key] ?? key}
-                      </Label>
-                      <Input
-                        id={`ideasoft-attr-${key}`}
-                        value={ideasoftFieldEdits[key] ?? ''}
-                        onChange={(e) => setIdeasoftFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
-                        className="font-mono text-sm"
-                      />
-                    </div>
-                  ))}
+                  )}
                 </div>
-              </>
+                <div className="md:col-span-7">
+                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Gönderilecek alanlar
+                  </p>
+                  <div className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2">
+                    {sortIdeasoftAttributeKeys(Object.keys(ideasoftFieldEdits)).map((key) => (
+                      <div
+                        key={key}
+                        className={cn('space-y-1', key === 'description' && 'sm:col-span-2')}
+                      >
+                        <Label htmlFor={`ideasoft-attr-${key}`} className="text-xs">
+                          {key === 'list_price' && ideasoftPreview.currency_code
+                            ? `${IDEASOFT_ATTR_LABELS[key] ?? key} (${ideasoftPreview.currency_code})`
+                            : IDEASOFT_ATTR_LABELS[key] ?? key}
+                        </Label>
+                        {key === 'description' ? (
+                          <Textarea
+                            id={`ideasoft-attr-${key}`}
+                            value={ideasoftFieldEdits[key] ?? ''}
+                            onChange={(e) => setIdeasoftFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                            className="min-h-[4.5rem] resize-y font-mono text-xs"
+                            rows={2}
+                          />
+                        ) : (
+                          <Input
+                            id={`ideasoft-attr-${key}`}
+                            value={ideasoftFieldEdits[key] ?? ''}
+                            onChange={(e) => setIdeasoftFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                            className="h-8 font-mono text-xs"
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 gap-2 border-t px-4 py-3">
             <Button
               type="button"
               variant="outline"
@@ -3629,6 +3836,15 @@ export function ProductsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <IdeasoftTransferReportDialog
+        open={ideasoftTransferReportOpen}
+        onOpenChange={(o) => {
+          setIdeasoftTransferReportOpen(o)
+          if (!o) setIdeasoftTransferReportSteps(null)
+        }}
+        steps={ideasoftTransferReportSteps}
+      />
 
       <Dialog open={openCartPublishOpen} onOpenChange={(o) => !o && setOpenCartPublishOpen(false)}>
         <DialogContent className="max-w-sm">

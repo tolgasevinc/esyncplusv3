@@ -1,4 +1,5 @@
 import { lazy, Suspense } from 'react'
+import { createPortal } from 'react-dom'
 import { Toaster } from 'sonner'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
@@ -58,6 +59,9 @@ const IdeasoftCategoriesPage = lazy(() =>
 const IdeasoftBrandsPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftBrandsPage').then((m) => ({ default: m.IdeasoftBrandsPage }))
 )
+const IdeasoftCurrenciesPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftCurrenciesPage').then((m) => ({ default: m.IdeasoftCurrenciesPage }))
+)
 const IdeasoftProductsTransferPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftProductsTransferPage').then((m) => ({ default: m.IdeasoftProductsTransferPage }))
 )
@@ -66,7 +70,16 @@ function App() {
   return (
     <>
       <ThemeLoader />
-      <Toaster richColors position="top-center" />
+      {createPortal(
+        <Toaster
+          richColors
+          position="top-center"
+          className="!z-[2147483647]"
+          style={{ zIndex: 2147483647 }}
+          toastOptions={{ style: { zIndex: 2147483647 } }}
+        />,
+        document.body
+      )}
       <AppLayout>
       <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
       <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground">Yükleniyor...</div>}>
@@ -79,6 +92,7 @@ function App() {
         <Route path="/ideasoft" element={<IdeasoftPage />} />
         <Route path="/ideasoft/categories" element={<IdeasoftCategoriesPage />} />
         <Route path="/ideasoft/brands" element={<IdeasoftBrandsPage />} />
+        <Route path="/ideasoft/currencies" element={<IdeasoftCurrenciesPage />} />
         <Route path="/ideasoft/products" element={<IdeasoftProductsTransferPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />

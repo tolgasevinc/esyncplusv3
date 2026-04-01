@@ -191,6 +191,12 @@ export function IdeasoftCategoriesPage() {
     [ideasoftById]
   )
 
+  /** Liste ve seçicide eşleşmeyi doğrulamak için Ideasoft kategori kimliğini parantez içinde gösterir */
+  const formatIdeasoftPathWithId = useCallback(
+    (c: IdeasoftCategory): string => `${buildDisplayPath(c)} (${String(c.id)})`,
+    [buildDisplayPath]
+  )
+
   const openPicker = useCallback((masterId: number, masterName?: string) => {
     setPickerForMasterId(masterId)
     setPickerOpen(true)
@@ -438,12 +444,12 @@ export function IdeasoftCategoriesPage() {
 
     const ideasoftColText = isMatched
       ? matchedIdeasoft
-        ? buildDisplayPath(matchedIdeasoft)
-        : String(ideasoftId ?? '')
+        ? formatIdeasoftPathWithId(matchedIdeasoft)
+        : `(${String(ideasoftId ?? '')})`
       : sel && ideasoftById.get(sel)
-        ? buildDisplayPath(ideasoftById.get(sel)!)
+        ? formatIdeasoftPathWithId(ideasoftById.get(sel)!)
         : sel
-          ? sel
+          ? `(${sel})`
           : null
 
     return (
@@ -686,7 +692,7 @@ export function IdeasoftCategoriesPage() {
                     .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
                     .map((c) => (
                       <option key={c.id} value={c.id}>
-                        {buildDisplayPath(c)}
+                        {formatIdeasoftPathWithId(c)}
                       </option>
                     ))}
                 </select>
@@ -716,7 +722,7 @@ export function IdeasoftCategoriesPage() {
                     .map((c) => {
                       const id = String(c.id)
                       const taken = matchedIdeasoftIds.has(id)
-                      const label = `${buildDisplayPath(c)}${taken ? ' (başka satırda eşleşmiş)' : ''}`
+                      const label = `${formatIdeasoftPathWithId(c)}${taken ? ' — başka satırda eşleşmiş' : ''}`
                       return (
                         <option key={id} value={id} disabled={taken}>
                           {label}
@@ -743,7 +749,7 @@ export function IdeasoftCategoriesPage() {
               <span className="font-medium text-foreground">Seçilen: </span>
               {(() => {
                 const pc = ideasoftById.get(selections[String(pickerForMasterId)]!)
-                return pc ? buildDisplayPath(pc) : 'Seçildi'
+                return pc ? formatIdeasoftPathWithId(pc) : 'Seçildi'
               })()}
             </div>
           )}
