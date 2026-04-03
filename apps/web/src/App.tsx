@@ -39,7 +39,6 @@ const SettingsGeneralPage = lazy(() => import('@/pages/settings/SettingsGeneralP
 const SettingsDatabasePage = lazy(() => import('@/pages/settings/SettingsDatabasePage').then((m) => ({ default: m.SettingsDatabasePage })))
 const SettingsStoragePage = lazy(() => import('@/pages/settings/SettingsStoragePage').then((m) => ({ default: m.SettingsStoragePage })))
 const SettingsIntegrationsPage = lazy(() => import('@/pages/settings/SettingsIntegrationsPage').then((m) => ({ default: m.SettingsIntegrationsPage })))
-const SettingsIdeasoftPage = lazy(() => import('@/pages/settings/SettingsIdeasoftPage').then((m) => ({ default: m.SettingsIdeasoftPage })))
 const SettingsCalculationsPage = lazy(() => import('@/pages/settings/SettingsCalculationsPage').then((m) => ({ default: m.SettingsCalculationsPage })))
 const SettingsAccessPage = lazy(() => import('@/pages/settings/SettingsAccessPage').then((m) => ({ default: m.SettingsAccessPage })))
 const SettingsSuppliersPage = lazy(() => import('@/pages/settings/SettingsSuppliersPage').then((m) => ({ default: m.SettingsSuppliersPage })))
@@ -53,17 +52,11 @@ const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPa
 const ParasutCategoriesPage = lazy(() => import('@/pages/parasut/ParasutCategoriesPage').then((m) => ({ default: m.ParasutCategoriesPage })))
 const ParasutBrandsPage = lazy(() => import('@/pages/parasut/ParasutBrandsPage').then((m) => ({ default: m.ParasutBrandsPage })))
 const IdeasoftPage = lazy(() => import('@/pages/ideasoft/IdeasoftPage').then((m) => ({ default: m.IdeasoftPage })))
-const IdeasoftCategoriesPage = lazy(() =>
-  import('@/pages/ideasoft/IdeasoftCategoriesPage').then((m) => ({ default: m.IdeasoftCategoriesPage }))
-)
-const IdeasoftBrandsPage = lazy(() =>
-  import('@/pages/ideasoft/IdeasoftBrandsPage').then((m) => ({ default: m.IdeasoftBrandsPage }))
-)
 const IdeasoftCurrenciesPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftCurrenciesPage').then((m) => ({ default: m.IdeasoftCurrenciesPage }))
 )
-const IdeasoftProductsTransferPage = lazy(() =>
-  import('@/pages/ideasoft/IdeasoftProductsTransferPage').then((m) => ({ default: m.IdeasoftProductsTransferPage }))
+const IdeasoftBrandsPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftBrandsPage').then((m) => ({ default: m.IdeasoftBrandsPage }))
 )
 const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
 function App() {
@@ -90,17 +83,14 @@ function App() {
         <Route path="/parasut/categories" element={<ParasutCategoriesPage />} />
         <Route path="/parasut/brands" element={<ParasutBrandsPage />} />
         <Route path="/ideasoft" element={<IdeasoftPage />} />
-        <Route path="/ideasoft/categories" element={<IdeasoftCategoriesPage />} />
-        <Route path="/ideasoft/brands" element={<IdeasoftBrandsPage />} />
-        <Route path="/ideasoft/currencies" element={<IdeasoftCurrenciesPage />} />
-        <Route path="/ideasoft/products" element={<IdeasoftProductsTransferPage />} />
+        <Route path="/ideasoft/para-birimleri" element={<IdeasoftCurrenciesPage />} />
+        <Route path="/ideasoft/markalar" element={<IdeasoftBrandsPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
         <Route path="/ayarlar/veritabani" element={<SettingsDatabasePage />} />
         <Route path="/ayarlar/depolama" element={<SettingsStoragePage />} />
         <Route path="/ayarlar/entegrasyonlar" element={<SettingsIntegrationsPage />} />
-        <Route path="/ayarlar/entegrasyonlar/ideasoft" element={<SettingsIdeasoftPage />} />
         <Route path="/ayarlar/hesaplamalar" element={<SettingsCalculationsPage />} />
         <Route path="/ayarlar/erisim" element={<SettingsAccessPage />} />
         <Route path="/ayarlar/tedarikciler" element={<SettingsSuppliersPage />} />

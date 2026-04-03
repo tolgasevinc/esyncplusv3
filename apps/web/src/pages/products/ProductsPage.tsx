@@ -1,12 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
-import { Link } from 'react-router-dom'
 import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers, Store } from 'lucide-react'
+import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
 import { DecimalInput } from '@/components/DecimalInput'
 import { Label } from '@/components/ui/label'
 import {
@@ -25,10 +24,15 @@ import { ProductImagesGrid } from '@/components/ProductImagesGrid'
 import { PackageContentsTab } from '@/components/PackageContentsTab'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { API_URL, parseJsonResponse } from '@/lib/api'
-import { getCategoryPath, buildHierarchy, type CategoryItem } from '@/components/CategorySelect'
+import {
+  getCategoryPath,
+  buildHierarchy,
+  formatCategoryPathDisplay,
+  splitCategoryPathForListColumn,
+  type CategoryItem,
+} from '@/components/CategorySelect'
 import {
   fetchSidebarMenus,
-  getIdeasoftSidebarIconSrc,
   getParasutSidebarIconSrc,
   getSidebarMenus,
   SIDEBAR_MENUS_UPDATED_EVENT,
@@ -42,15 +46,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { toastSuccess, toastError, toastWarning } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
-import {
-  IdeasoftTransferReportDialog,
-  type IdeasoftTransferReportStep,
-} from '@/components/IdeasoftTransferReportDialog'
 import { lookupFromSupplierSource, fetchMatchedSupplierCodesFromBrand } from '@/lib/supplierSource'
 import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/utils'
 import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
@@ -79,6 +78,29 @@ function DynamicBgFgButton({ bg, fg = '#fff', className, ...rest }: { bg: string
     }
   }, [bg, fg])
   return <button ref={refFn} className={cn('dynamic-bg-fg', className)} {...rest} />
+}
+
+/** Dinamik padding-left - style attribute yerine ref ile CSS değişkeni (Edge Tools / linter uyumlu) */
+function CategoryTreeDivPl({
+  paddingLeftPx,
+  className,
+  ...rest
+}: { paddingLeftPx: number } & ComponentPropsWithoutRef<'div'>) {
+  const refFn = useCallback((el: HTMLDivElement | null) => {
+    if (el) el.style.setProperty('--category-tree-pl', `${paddingLeftPx}px`)
+  }, [paddingLeftPx])
+  return <div ref={refFn} className={cn('category-tree-indent', className)} {...rest} />
+}
+
+function CategoryTreeButtonPl({
+  paddingLeftPx,
+  className,
+  ...rest
+}: { paddingLeftPx: number } & ComponentPropsWithoutRef<'button'>) {
+  const refFn = useCallback((el: HTMLButtonElement | null) => {
+    if (el) el.style.setProperty('--category-tree-pl', `${paddingLeftPx}px`)
+  }, [paddingLeftPx])
+  return <button ref={refFn} className={cn('category-tree-indent', className)} {...rest} />
 }
 
 interface Product {
@@ -169,24 +191,6 @@ const PARASUT_ATTR_SORT_ORDER = [
 function sortParasutAttributeKeys(keys: string[]): string[] {
   const rank = (k: string) => {
     const i = PARASUT_ATTR_SORT_ORDER.indexOf(k)
-    return i === -1 ? 999 : i
-  }
-  return [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
-}
-
-const IDEASOFT_ATTR_LABELS: Record<string, string> = {
-  name: 'Ürün adı',
-  sku: 'SKU',
-  list_price: 'Genel fiyat',
-  quantity: 'Stok miktarı',
-  description: 'Açıklama',
-}
-
-const IDEASOFT_ATTR_SORT_ORDER = ['name', 'sku', 'list_price', 'quantity', 'description']
-
-function sortIdeasoftAttributeKeys(keys: string[]): string[] {
-  const rank = (k: string) => {
-    const i = IDEASOFT_ATTR_SORT_ORDER.indexOf(k)
     return i === -1 ? 999 : i
   }
   return [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
@@ -283,13 +287,13 @@ function CategoryTreeTab({
     if (hasSubs) {
       return (
         <div key={`cat-${cat.id}`} className="space-y-0.5">
-          <div
+          <CategoryTreeDivPl
+            paddingLeftPx={12 + indent * 16}
             className={cn(
               'flex items-center gap-2 px-3 py-2 text-sm rounded-md cursor-pointer',
               indent === 0 ? 'bg-emerald-50 dark:bg-emerald-950/30' : 'bg-emerald-50/80 dark:bg-emerald-950/20',
               isSelected && 'ring-2 ring-primary ring-offset-2'
             )}
-            style={{ paddingLeft: `${12 + indent * 16}px` }}
           >
             <button
               type="button"
@@ -304,33 +308,33 @@ function CategoryTreeTab({
               className="flex-1 flex items-center gap-2 text-left min-w-0"
             >
               {cat.color ? (
-                <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: cat.color }} />
+                <DynamicBgSpan color={cat.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
               ) : (
                 <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-emerald-500" />
               )}
               <span className="break-words whitespace-normal">{group ? `${group.name} [${group.code}] > ` : ''}{cat.name} [{cat.code}]</span>
             </button>
-          </div>
+          </CategoryTreeDivPl>
           {isExpanded && (
             <div className="space-y-0.5">
               {[...filteredSubs].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)).map((sub) => (
-                <button
+                <CategoryTreeButtonPl
                   key={`sub-${sub.id}`}
+                  paddingLeftPx={28 + indent * 16}
                   type="button"
                   onClick={() => onChange(sub.id)}
                   className={cn(
                     'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-amber-50 dark:bg-amber-950/20 hover:opacity-90',
                     value === sub.id && 'ring-2 ring-primary ring-offset-2'
                   )}
-                  style={{ paddingLeft: `${28 + indent * 16}px` }}
                 >
                   {sub.color ? (
-                    <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: sub.color }} />
+                    <DynamicBgSpan color={sub.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
                   ) : (
                     <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-amber-500" />
                   )}
                   <span className="break-words whitespace-normal">{cat.name} [{cat.code}] › {sub.name} [{sub.code}]</span>
-                </button>
+                </CategoryTreeButtonPl>
               ))}
             </div>
           )}
@@ -339,8 +343,9 @@ function CategoryTreeTab({
     }
 
     return (
-      <button
+      <CategoryTreeButtonPl
         key={`cat-${cat.id}`}
+        paddingLeftPx={12 + indent * 16}
         type="button"
         onClick={() => onChange(cat.id)}
         className={cn(
@@ -349,15 +354,14 @@ function CategoryTreeTab({
           'hover:opacity-90',
           value === cat.id && 'ring-2 ring-primary ring-offset-2'
         )}
-        style={{ paddingLeft: `${12 + indent * 16}px` }}
       >
         {cat.color ? (
-          <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: cat.color }} />
+          <DynamicBgSpan color={cat.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
         ) : (
           <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-emerald-500" />
         )}
         <span className="break-words whitespace-normal">{group ? `${group.name} [${group.code}] > ` : ''}{cat.name} [{cat.code}]</span>
-      </button>
+      </CategoryTreeButtonPl>
     )
   }
 
@@ -397,7 +401,7 @@ function CategoryTreeTab({
               >
                 {isExpanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
                 {group.color ? (
-                  <span className="shrink-0 w-3.5 h-3.5 rounded border" style={{ backgroundColor: group.color }} />
+                  <DynamicBgSpan color={group.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
                 ) : (
                   <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500" />
                 )}
@@ -665,41 +669,17 @@ export function ProductsPage() {
   const [parasutTransferLoading, setParasutTransferLoading] = useState(false)
   /** SKU ile otomatik eşleşme yoksa Paraşüt panelindeki ürün kimliği */
   const [parasutManualId, setParasutManualId] = useState('')
-  const [ideasoftTransferOpen, setIdeasoftTransferOpen] = useState(false)
-  const [ideasoftPreviewLoading, setIdeasoftPreviewLoading] = useState(false)
-  const [ideasoftPreview, setIdeasoftPreview] = useState<{
-    ideasoft_id: string | null
-    ideasoft_product: { id?: string; name?: string; sku?: string } | null
-    sku_used: string
-    currency_code?: string
-    mapped_category_id: string | null
-    mapped_brand_id: string | null
-    attributes_display: Record<string, unknown>
-    has_photo: boolean
-    selected_fields: { ideasoft: string; master: string }[]
-  } | null>(null)
-  const [ideasoftPreviewError, setIdeasoftPreviewError] = useState<string | null>(null)
-  const [ideasoftFieldEdits, setIdeasoftFieldEdits] = useState<Record<string, string>>({})
-  const [ideasoftTransferLoading, setIdeasoftTransferLoading] = useState(false)
-  const [ideasoftManualId, setIdeasoftManualId] = useState('')
-  const [ideasoftForceCreate, setIdeasoftForceCreate] = useState(false)
-  const [ideasoftTransferReportOpen, setIdeasoftTransferReportOpen] = useState(false)
-  const [ideasoftTransferReportSteps, setIdeasoftTransferReportSteps] = useState<IdeasoftTransferReportStep[] | null>(
-    null
-  )
   const [filterCategorySearch, setFilterCategorySearch] = useState('')
   const [filterBrandSearch, setFilterBrandSearch] = useState('')
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
   const [matchedParasutSkus, setMatchedParasutSkus] = useState<Set<string>>(new Set())
   const [parasutIconSrc, setParasutIconSrc] = useState<string | undefined>()
-  const [ideasoftIconSrc, setIdeasoftIconSrc] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | 'ideasoft' | null>(null)
+  const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | null>(null)
   const [bulkCategoryId, setBulkCategoryId] = useState<number | ''>('')
   const [bulkTypeId, setBulkTypeId] = useState<number | ''>('')
   const [bulkItemGroupId, setBulkItemGroupId] = useState<number | ''>('')
   const [bulkSaving, setBulkSaving] = useState(false)
-  const [bulkIdeasoftLoading, setBulkIdeasoftLoading] = useState(false)
   const imageUploadProductRef = useRef<Product | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterGroupId !== '' || filterTypeId !== '' || filterNoImage
@@ -865,133 +845,6 @@ export function ProductsPage() {
       setParasutTransferLoading(false)
     }
   }, [editingId, parasutPreview, parasutFieldEdits, parasutManualId])
-
-  const openIdeasoftTransferModal = useCallback(async () => {
-    if (!editingId) return
-    setIdeasoftTransferOpen(true)
-    setIdeasoftPreview(null)
-    setIdeasoftPreviewError(null)
-    setIdeasoftFieldEdits({})
-    setIdeasoftManualId('')
-    setIdeasoftForceCreate(false)
-    setIdeasoftPreviewLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/products/push-preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ product_id: editingId }),
-      })
-      const data = await parseJsonResponse<{
-        error?: string
-        ideasoft_id?: string | null
-        ideasoft_product?: { id?: string; name?: string; sku?: string } | null
-        sku_used?: string
-        currency_code?: string
-        mapped_category_id?: string | null
-        mapped_brand_id?: string | null
-        attributes_display?: Record<string, unknown>
-        has_photo?: boolean
-        selected_fields?: { ideasoft: string; master: string }[]
-      }>(res)
-      if (!res.ok) throw new Error(data.error || 'Önizleme alınamadı')
-      const d = data
-      setIdeasoftPreview({
-        ideasoft_id: d.ideasoft_id != null && String(d.ideasoft_id).trim() !== '' ? String(d.ideasoft_id).trim() : null,
-        ideasoft_product: d.ideasoft_product ?? null,
-        sku_used: String(d.sku_used ?? ''),
-        currency_code: d.currency_code?.trim() ? d.currency_code.trim().toUpperCase() : undefined,
-        mapped_category_id: d.mapped_category_id ?? null,
-        mapped_brand_id: d.mapped_brand_id ?? null,
-        attributes_display: d.attributes_display ?? {},
-        has_photo: !!d.has_photo,
-        selected_fields: Array.isArray(d.selected_fields) ? d.selected_fields : [],
-      })
-      const disp = d.attributes_display ?? {}
-      const edits: Record<string, string> = {}
-      for (const [k, v] of Object.entries(disp)) {
-        if (v == null || v === '') edits[k] = ''
-        else if (typeof v === 'number') edits[k] = String(v)
-        else edits[k] = String(v)
-      }
-      setIdeasoftFieldEdits(edits)
-    } catch (e) {
-      setIdeasoftPreviewError(parasutFetchErrorMessage(e))
-    } finally {
-      setIdeasoftPreviewLoading(false)
-    }
-  }, [editingId])
-
-  const submitIdeasoftTransfer = useCallback(async () => {
-    if (!editingId || !ideasoftPreview) return
-    const manual = ideasoftManualId.trim()
-    const nameEd = ideasoftFieldEdits.name?.trim()
-    if (!nameEd) {
-      toastError('Hata', 'Ürün adı boş olamaz.')
-      return
-    }
-    const numericKeys = new Set(['list_price', 'quantity'])
-    const overrides: Record<string, unknown> = {}
-    for (const [k, raw] of Object.entries(ideasoftFieldEdits)) {
-      const s = raw.trim()
-      if (s === '') {
-        overrides[k] = ''
-        continue
-      }
-      if (numericKeys.has(k)) {
-        const n = parseFloat(s.replace(',', '.'))
-        if (Number.isNaN(n)) {
-          toastError('Hata', `"${IDEASOFT_ATTR_LABELS[k] ?? k}" için geçerli bir sayı girin.`)
-          return
-        }
-        overrides[k] = n
-      } else {
-        overrides[k] = s
-      }
-    }
-    setIdeasoftTransferLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/products/push`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          product_id: editingId,
-          ...(manual ? { ideasoft_product_id: manual } : {}),
-          ...(ideasoftForceCreate ? { create_new: true } : {}),
-          attribute_overrides: overrides,
-        }),
-      })
-      const data = await parseJsonResponse<{
-        error?: string
-        message?: string
-        created?: boolean
-        brand_warning?: string
-        category_warning?: string
-        images_uploaded?: number
-        image_warnings?: string[]
-        transfer_report?: { steps?: IdeasoftTransferReportStep[] }
-      }>(res)
-      if (!res.ok) throw new Error(data.error || 'Aktarım başarısız')
-      const reportSteps = data.transfer_report?.steps
-      if (Array.isArray(reportSteps) && reportSteps.length > 0) {
-        setIdeasoftTransferReportSteps(reportSteps)
-        setIdeasoftTransferReportOpen(true)
-      }
-      toastSuccess(
-        'Tamam',
-        (data as { message?: string }).message ||
-          (data.created ? 'Ideasoft’ta yeni ürün oluşturuldu.' : 'Ideasoft ürünü güncellendi.')
-      )
-      setIdeasoftTransferOpen(false)
-      setIdeasoftPreview(null)
-      setIdeasoftFieldEdits({})
-      setIdeasoftManualId('')
-      setIdeasoftForceCreate(false)
-    } catch (e) {
-      toastError('Hata', parasutFetchErrorMessage(e))
-    } finally {
-      setIdeasoftTransferLoading(false)
-    }
-  }, [editingId, ideasoftPreview, ideasoftFieldEdits, ideasoftManualId, ideasoftForceCreate])
 
   const categoryPath = useMemo(
     () => getCategoryPath(categories, form.category_id),
@@ -1331,12 +1184,10 @@ export function ProductsPage() {
     const applySidebarIcons = () => {
       const menus = getSidebarMenus()
       setParasutIconSrc(getParasutSidebarIconSrc(menus))
-      setIdeasoftIconSrc(getIdeasoftSidebarIconSrc(menus))
     }
     applySidebarIcons()
     fetchSidebarMenus().then((menus) => {
       setParasutIconSrc(getParasutSidebarIconSrc(menus))
-      setIdeasoftIconSrc(getIdeasoftSidebarIconSrc(menus))
     })
     window.addEventListener(SIDEBAR_MENUS_UPDATED_EVENT, applySidebarIcons)
     window.addEventListener('storage', applySidebarIcons)
@@ -1623,7 +1474,7 @@ export function ProductsPage() {
         body: JSON.stringify({
           name,
           brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
-          category_path: categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '',
+          category_path: categoryPath.length > 0 ? formatCategoryPathDisplay(categoryPath) : '',
         }),
       })
       const json = await res.json()
@@ -1661,7 +1512,7 @@ export function ProductsPage() {
         body: JSON.stringify({
           name,
           brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
-          category_path: categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '',
+          category_path: categoryPath.length > 0 ? formatCategoryPathDisplay(categoryPath) : '',
           sku: form.sku ?? '',
           ...(competitor_urls.length > 0 ? { competitor_urls } : {}),
         }),
@@ -1681,7 +1532,7 @@ export function ProductsPage() {
     }
   }
 
-  async function handlePublish(platform: 'opencart' | 'okm' | 'trendyol' | 'ideasoft', opencartOptions?: { update_price: boolean; update_description: boolean; update_images: boolean }) {
+  async function handlePublish(platform: 'opencart' | 'okm' | 'trendyol', opencartOptions?: { update_price: boolean; update_description: boolean; update_images: boolean }) {
     const productId = editingId
     if (!productId) {
       toastError('Önce kaydedin', 'Ürünü yayınlamak için önce kaydedin.')
@@ -1689,31 +1540,7 @@ export function ProductsPage() {
     }
     setPublishLoading(platform)
     try {
-      if (platform === 'ideasoft') {
-        const res = await fetch(`${API_URL}/api/products/${productId}/publish/ideasoft`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ecommerce_name: form.ecommerce_name ?? '',
-            main_description: form.main_description ?? '',
-            update_description: true,
-          }),
-        })
-        const json = (await res.json()) as {
-          error?: string
-          message?: string
-          ideasoft_product_id?: string
-          transfer_report?: { steps?: IdeasoftTransferReportStep[] }
-        }
-        if (!res.ok) throw new Error(json.error ?? 'Yayınlama başarısız')
-        const reportSteps = json.transfer_report?.steps
-        if (Array.isArray(reportSteps) && reportSteps.length > 0) {
-          setIdeasoftTransferReportSteps(reportSteps)
-          setIdeasoftTransferReportOpen(true)
-        }
-        const msg = json.message ?? 'Ideasoft\'a yayınlandı'
-        toastSuccess(msg, `Ideasoft ürün kimliği: ${json.ideasoft_product_id ?? '—'}`)
-      } else if (platform === 'opencart') {
+      if (platform === 'opencart') {
         const images = (form.images ?? []).filter((x): x is string => typeof x === 'string' && !!x.trim() && !x.startsWith('http'))
         let uploadedPaths: string[] = []
         if (images.length > 0) {
@@ -1948,51 +1775,6 @@ export function ProductsPage() {
     }
   }
 
-  const handleBulkIdeasoftTransfer = useCallback(async () => {
-    const ids = Array.from(selectedIds)
-    if (ids.length === 0) return
-    setBulkIdeasoftLoading(true)
-    let ok = 0
-    const errors: { id: number; msg: string }[] = []
-    for (const id of ids) {
-      try {
-        const res = await fetch(`${API_URL}/api/ideasoft/products/push`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ product_id: id, attribute_overrides: {} }),
-        })
-        const j = await parseJsonResponse<{ error?: string }>(res)
-        if (!res.ok) throw new Error(j.error || 'Aktarım başarısız')
-        ok++
-      } catch (e) {
-        errors.push({ id, msg: e instanceof Error ? e.message : String(e) })
-      }
-    }
-    setBulkModal(null)
-    setSelectedIds(new Set())
-    void fetchData()
-    if (errors.length === 0) {
-      toastSuccess('Toplu Ideasoft aktarımı', `${ok} ürün Ideasoft mağazasına aktarıldı.`)
-    } else if (ok === 0) {
-      toastError(
-        'Aktarım başarısız',
-        errors
-          .slice(0, 5)
-          .map((e) => `#${e.id}: ${e.msg}`)
-          .join('\n') + (errors.length > 5 ? `\n… ve ${errors.length - 5} ürün daha` : '')
-      )
-    } else {
-      toastWarning(
-        `Ideasoft aktarımı kısmen tamamlandı (${ok}/${ids.length})`,
-        errors
-          .slice(0, 3)
-          .map((e) => `#${e.id}: ${e.msg}`)
-          .join('\n') + (errors.length > 3 ? `\n… ve ${errors.length - 3} hata daha` : '')
-      )
-    }
-    setBulkIdeasoftLoading(false)
-  }, [selectedIds, fetchData])
-
   return (
   <PageLayout
       title="Ürünler"
@@ -2093,11 +1875,6 @@ export function ProductsPage() {
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setBulkItemGroupId(''); setBulkModal('itemGroup') }}>
                   Ürün grubu değiştir
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => setBulkModal('ideasoft')}>
-                  <Store className="h-4 w-4 mr-2 shrink-0" aria-hidden />
-                  Ideasoft&apos;a aktar
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -2613,26 +2390,87 @@ export function ProductsPage() {
                       <td className="p-3">
                         {(() => {
                           const pathFromHierarchy = getCategoryPath(categories, item.category_id ?? '')
-                          const fullPath =
+                          const split =
                             pathFromHierarchy.length > 0
-                              ? pathFromHierarchy.map((p) => p.name).join(' › ')
-                              : [
-                                  item.group_name || item.group_code,
-                                  item.category_name || item.category_code,
-                                  item.subcategory_name || item.subcategory_code,
-                                ]
-                                  .filter(Boolean)
-                                  .join(' › ')
-                          if (!fullPath) return <span className="text-muted-foreground">—</span>
+                              ? splitCategoryPathForListColumn(pathFromHierarchy)
+                              : null
+
+                          const fallbackTooltip = (() => {
+                            const seg = (name?: string, code?: string) => {
+                              const n = (name ?? '').trim()
+                              const co = (code ?? '').trim()
+                              if (n && co) return `${n} [${co}]`
+                              return n || co || ''
+                            }
+                            return [
+                              seg(item.group_name, item.group_code),
+                              seg(item.category_name, item.category_code),
+                              seg(item.subcategory_name, item.subcategory_code),
+                            ]
+                              .filter((s) => s.length > 0)
+                              .join(' › ')
+                          })()
+
+                          if (split) {
+                            const { groupCode, categoryCode, subLabel, tooltip } = split
+                            if (!groupCode && !categoryCode && !subLabel) {
+                              return <span className="text-muted-foreground">—</span>
+                            }
+                            return (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <div className="flex flex-wrap items-center gap-1.5 text-left min-w-0 max-w-[min(420px,100%)]">
+                                    {groupCode ? (
+                                      <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
+                                        {groupCode}
+                                      </Badge>
+                                    ) : null}
+                                    {categoryCode ? (
+                                      <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
+                                        {categoryCode}
+                                      </Badge>
+                                    ) : null}
+                                    {subLabel ? (
+                                      <span className="text-sm text-foreground break-words min-w-0 leading-snug">
+                                        {subLabel}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-md">
+                                  <p className="whitespace-normal break-words text-sm">{tooltip}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            )
+                          }
+
+                          const gc = (item.group_code ?? '').trim()
+                          const cc = (item.category_code ?? '').trim()
+                          const subn = (item.subcategory_name ?? '').trim()
+                          if (!gc && !cc && !subn) {
+                            return <span className="text-muted-foreground">—</span>
+                          }
                           return (
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <span className="block text-left text-sm break-words min-w-0 max-w-[220px]" title={fullPath}>
-                                  {fullPath}
-                                </span>
+                                <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-[min(420px,100%)]">
+                                  {gc ? (
+                                    <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
+                                      {gc}
+                                    </Badge>
+                                  ) : null}
+                                  {cc ? (
+                                    <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
+                                      {cc}
+                                    </Badge>
+                                  ) : null}
+                                  {subn ? (
+                                    <span className="text-sm text-foreground break-words min-w-0 leading-snug">{subn}</span>
+                                  ) : null}
+                                </div>
                               </TooltipTrigger>
-                              <TooltipContent className="max-w-sm">
-                                <p className="whitespace-normal break-words">{fullPath}</p>
+                              <TooltipContent className="max-w-md">
+                                <p className="whitespace-normal break-words text-sm">{fallbackTooltip || '—'}</p>
                               </TooltipContent>
                             </Tooltip>
                           )
@@ -2888,8 +2726,8 @@ export function ProductsPage() {
                   }}
                 />
                 {form.category_id && (
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    Seçili: {getCategoryPath(categories, form.category_id).map((p) => p.name).join(' › ')}
+                  <p className="mt-3 text-sm text-muted-foreground break-words">
+                    Seçili: {formatCategoryPathDisplay(getCategoryPath(categories, form.category_id))}
                   </p>
                 )}
               </TabsContent>
@@ -3189,8 +3027,8 @@ export function ProductsPage() {
                   </div>
                   <div className="space-y-2">
                     <Label>Kategoriler</Label>
-                    <div className="flex min-h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
-                      {categoryPath.length > 0 ? categoryPath.map((p) => p.name).join(' › ') : '—'}
+                    <div className="flex min-h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm break-words">
+                      {categoryPath.length > 0 ? formatCategoryPathDisplay(categoryPath) : '—'}
                     </div>
                   </div>
                   <div className="space-y-2">
@@ -3290,27 +3128,6 @@ export function ProductsPage() {
                       </TooltipTrigger>
                       <TooltipContent>Paraşüte aktar</TooltipContent>
                     </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-block">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            className="h-9 w-9 shrink-0"
-                            onClick={() => void openIdeasoftTransferModal()}
-                            aria-label="Ideasoft'a aktar"
-                          >
-                            {ideasoftIconSrc ? (
-                              <img src={ideasoftIconSrc} alt="" className="h-4 w-4 object-contain" />
-                            ) : (
-                              <Store className="h-4 w-4" aria-hidden />
-                            )}
-                          </Button>
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>Ideasoft&apos;a aktar</TooltipContent>
-                    </Tooltip>
                   </div>
                 )}
               </div>
@@ -3333,9 +3150,6 @@ export function ProductsPage() {
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem onClick={() => setOpenCartPublishOpen(true)} disabled={!!publishLoading}>
                         OpenCart
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handlePublish('ideasoft')} disabled={!!publishLoading}>
-                        IdeaSoft
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => handlePublish('okm')} disabled={!!publishLoading}>
                         OKM
@@ -3504,34 +3318,6 @@ export function ProductsPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={bulkModal === 'ideasoft'} onOpenChange={(o) => !o && !bulkIdeasoftLoading && setBulkModal(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              {ideasoftIconSrc ? (
-                <img src={ideasoftIconSrc} alt="" className="h-5 w-5 shrink-0 object-contain" />
-              ) : (
-                <Store className="h-5 w-5 shrink-0" aria-hidden />
-              )}
-              Toplu Ideasoft aktarımı
-            </DialogTitle>
-            <DialogDescription>
-              Seçili {selectedIds.size} ürün, kayıtlı verilerle sırayla Ideasoft mağazasına gönderilir (tek ürün aktarımıyla aynı
-              mantık). SKU ve e-ticarete açık ürünler gerekir; kategori/marka eşleştirmeleri Ayarlar / Ideasoft sayfalarından
-              yapılır.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button type="button" variant="outline" disabled={bulkIdeasoftLoading} onClick={() => setBulkModal(null)}>
-              İptal
-            </Button>
-            <Button type="button" disabled={bulkIdeasoftLoading} onClick={() => void handleBulkIdeasoftTransfer()}>
-              {bulkIdeasoftLoading ? 'Aktarılıyor…' : 'Aktarmayı başlat'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog
         open={parasutTransferOpen}
         onOpenChange={(o) => {
@@ -3638,213 +3424,6 @@ export function ProductsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <Dialog
-        open={ideasoftTransferOpen}
-        onOpenChange={(o) => {
-          if (!o) {
-            setIdeasoftTransferOpen(false)
-            setIdeasoftPreview(null)
-            setIdeasoftPreviewError(null)
-            setIdeasoftFieldEdits({})
-            setIdeasoftManualId('')
-            setIdeasoftForceCreate(false)
-          }
-        }}
-      >
-        <DialogContent className="flex h-[min(92vh,900px)] w-[min(100vw-1.5rem,56rem)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:rounded-lg">
-          <DialogHeader className="shrink-0 space-y-1 border-b px-4 py-3 text-left">
-            <DialogTitle className="flex items-center gap-2 text-base font-semibold">
-              {ideasoftIconSrc ? (
-                <img src={ideasoftIconSrc} alt="" className="h-5 w-5 shrink-0 object-contain" />
-              ) : (
-                <Store className="h-5 w-5 shrink-0" aria-hidden />
-              )}
-              Ideasoft&apos;a aktar
-            </DialogTitle>
-            <DialogDescription className="text-xs leading-relaxed">
-              SKU / mağaza eşleşmesi güncellenir; yoksa yeni ürün. Kategori ve marka{' '}
-              <Link to="/ideasoft/categories" className="underline underline-offset-2">
-                kategori
-              </Link>
-              {' / '}
-              <Link to="/ideasoft/brands" className="underline underline-offset-2">
-                marka
-              </Link>{' '}
-              eşleştirmeleri. Önce <strong>Kaydet</strong>.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-            {ideasoftPreviewLoading && (
-              <p className="py-8 text-center text-xs text-muted-foreground">Önizleme yükleniyor…</p>
-            )}
-            {!ideasoftPreviewLoading && ideasoftPreviewError && (
-              <p className="text-xs text-destructive">{ideasoftPreviewError}</p>
-            )}
-            {!ideasoftPreviewLoading && ideasoftPreview && (
-              <div className="grid gap-3 md:grid-cols-12 md:gap-4">
-                <div className="space-y-2 md:col-span-5">
-                  <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2 text-xs">
-                    <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 [&_dt]:text-muted-foreground">
-                      <dt>SKU</dt>
-                      <dd className="font-mono text-foreground">{ideasoftPreview.sku_used}</dd>
-                      {ideasoftPreview.currency_code && (
-                        <>
-                          <dt>Para birimi</dt>
-                          <dd className="font-mono">{ideasoftPreview.currency_code}</dd>
-                        </>
-                      )}
-                      {ideasoftPreview.ideasoft_product && (
-                        <>
-                          <dt>Ideasoft</dt>
-                          <dd className="min-w-0 break-words">
-                            {ideasoftPreview.ideasoft_product.name || '—'}
-                            {ideasoftPreview.ideasoft_product.sku && (
-                              <span className="ml-1 font-mono text-muted-foreground">
-                                ({ideasoftPreview.ideasoft_product.sku})
-                              </span>
-                            )}
-                          </dd>
-                        </>
-                      )}
-                      {ideasoftPreview.mapped_category_id && (
-                        <>
-                          <dt>Kategori</dt>
-                          <dd className="font-mono">{ideasoftPreview.mapped_category_id}</dd>
-                        </>
-                      )}
-                      {ideasoftPreview.mapped_brand_id && (
-                        <>
-                          <dt>Marka</dt>
-                          <dd className="font-mono">{ideasoftPreview.mapped_brand_id}</dd>
-                        </>
-                      )}
-                    </dl>
-                  </div>
-                  {!ideasoftPreview.ideasoft_id && (
-                    <div className="space-y-1.5 rounded-md border border-emerald-600/25 bg-emerald-500/10 px-2.5 py-2">
-                      <p className="text-[11px] leading-snug text-emerald-900 dark:text-emerald-100">
-                        Eşleşme yoksa <strong>Aktar</strong> yeni ürün oluşturur. Mevcut ürünü güncellemek için ID girin.
-                      </p>
-                      <div className="space-y-1">
-                        <Label htmlFor="ideasoft-manual-id" className="text-xs">
-                          Ideasoft ürün ID (isteğe bağlı)
-                        </Label>
-                        <Input
-                          id="ideasoft-manual-id"
-                          value={ideasoftManualId}
-                          onChange={(e) => setIdeasoftManualId(e.target.value)}
-                          placeholder="Boş = yeni ürün"
-                          className="h-8 font-mono text-xs"
-                          autoComplete="off"
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {ideasoftPreview.ideasoft_id && (
-                    <div className="space-y-1.5 rounded-md border border-border px-2.5 py-2">
-                      <label className="flex cursor-pointer items-center gap-2 text-xs">
-                        <input
-                          type="checkbox"
-                          checked={ideasoftForceCreate}
-                          onChange={(e) => setIdeasoftForceCreate(e.target.checked)}
-                          className="rounded border-input"
-                        />
-                        Yine de yeni ürün oluştur
-                      </label>
-                      <div className="space-y-1">
-                        <Label htmlFor="ideasoft-manual-id-2" className="text-xs">
-                          Başka ürün ID (isteğe bağlı)
-                        </Label>
-                        <Input
-                          id="ideasoft-manual-id-2"
-                          value={ideasoftManualId}
-                          onChange={(e) => setIdeasoftManualId(e.target.value)}
-                          placeholder="Boş = eşleşen güncellenir"
-                          className="h-8 font-mono text-xs"
-                          autoComplete="off"
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {ideasoftPreview.has_photo && (
-                    <p className="text-[11px] leading-snug text-muted-foreground">
-                      Görseller sırayla Ideasoft&apos;a gönderilir (ilk görsel ana görsel).
-                    </p>
-                  )}
-                </div>
-                <div className="md:col-span-7">
-                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Gönderilecek alanlar
-                  </p>
-                  <div className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2">
-                    {sortIdeasoftAttributeKeys(Object.keys(ideasoftFieldEdits)).map((key) => (
-                      <div
-                        key={key}
-                        className={cn('space-y-1', key === 'description' && 'sm:col-span-2')}
-                      >
-                        <Label htmlFor={`ideasoft-attr-${key}`} className="text-xs">
-                          {key === 'list_price' && ideasoftPreview.currency_code
-                            ? `${IDEASOFT_ATTR_LABELS[key] ?? key} (${ideasoftPreview.currency_code})`
-                            : IDEASOFT_ATTR_LABELS[key] ?? key}
-                        </Label>
-                        {key === 'description' ? (
-                          <Textarea
-                            id={`ideasoft-attr-${key}`}
-                            value={ideasoftFieldEdits[key] ?? ''}
-                            onChange={(e) => setIdeasoftFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
-                            className="min-h-[4.5rem] resize-y font-mono text-xs"
-                            rows={2}
-                          />
-                        ) : (
-                          <Input
-                            id={`ideasoft-attr-${key}`}
-                            value={ideasoftFieldEdits[key] ?? ''}
-                            onChange={(e) => setIdeasoftFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
-                            className="h-8 font-mono text-xs"
-                          />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-          <DialogFooter className="shrink-0 gap-2 border-t px-4 py-3">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                setIdeasoftTransferOpen(false)
-                setIdeasoftPreview(null)
-                setIdeasoftPreviewError(null)
-                setIdeasoftFieldEdits({})
-                setIdeasoftManualId('')
-                setIdeasoftForceCreate(false)
-              }}
-            >
-              İptal
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void submitIdeasoftTransfer()}
-              disabled={ideasoftPreviewLoading || ideasoftTransferLoading || !ideasoftPreview}
-            >
-              {ideasoftTransferLoading ? 'Aktarılıyor…' : 'Aktar'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <IdeasoftTransferReportDialog
-        open={ideasoftTransferReportOpen}
-        onOpenChange={(o) => {
-          setIdeasoftTransferReportOpen(o)
-          if (!o) setIdeasoftTransferReportSteps(null)
-        }}
-        steps={ideasoftTransferReportSteps}
-      />
 
       <Dialog open={openCartPublishOpen} onOpenChange={(o) => !o && setOpenCartPublishOpen(false)}>
         <DialogContent className="max-w-sm">

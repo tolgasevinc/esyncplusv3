@@ -178,3 +178,8 @@
   color: var(--dynamic-fg);
 }
 
+/* Kategori ağacı girintisi - JS ref ile --category-tree-pl atanır */
+.category-tree-indent {
+  padding-left: var(--category-tree-pl);
+}
+

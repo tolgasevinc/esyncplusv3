@@ -1,658 +1,701 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Link } from 'react-router-dom'
-import { Tag, RefreshCw, Link2, Bug, PlusCircle, ArrowLeft } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Tag, RefreshCw, Pencil, Plus, Trash2, AlertCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Dialog,
-  DialogClose,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
-  DialogFooter,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
-import { API_URL } from '@/lib/api'
+import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
+import { API_URL, parseJsonResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { usePersistedListState } from '@/hooks/usePersistedListState'
 
-interface MasterBrand {
-  id: number
+/** Store API Brand — Brand GET / POST / PUT yanıt gövdesi (döküman) */
+export interface IdeasoftBrand {
+  id?: number
   name: string
-  code?: string
-}
-
-interface IdeasoftBrandRow {
-  id: string
-  name?: string
   slug?: string
+  sortOrder: number
+  status: number
+  distributorCode?: string
+  distributor?: string
+  imageFile?: string
+  showcaseContent?: string
+  displayShowcaseContent: number
+  showcaseFooterContent?: string
+  displayShowcaseFooterContent: number
+  metaKeywords?: string
+  metaDescription?: string
+  canonicalUrl?: string
+  pageTitle?: string
+  attachment?: string
+  isSearchable?: number
+  createdAt?: string
+  updatedAt?: string
 }
 
-function ideasoftBrandLabel(b: IdeasoftBrandRow): string {
-  const raw = String(b.name ?? '').trim()
-  const id = String(b.id)
-  const looksLikeBareId = raw === id && /^\d+$/.test(raw)
-  if (raw && !looksLikeBareId) return raw
-  const s = b.slug?.trim()
-  if (s) return s.replace(/-/g, ' ')
-  return raw || id
+const DEFAULT_STATUS_FILTER = '1' as const
+
+const listDefaults = {
+  search: '',
+  page: 1,
+  pageSize: 20 as PageSizeValue,
+  fitLimit: 20,
+  statusFilter: DEFAULT_STATUS_FILTER as '' | '0' | '1',
+}
+
+function emptyBrand(): IdeasoftBrand {
+  return {
+    name: '',
+    slug: '',
+    sortOrder: 1,
+    status: 1,
+    distributorCode: '',
+    distributor: '',
+    imageFile: '',
+    showcaseContent: '',
+    displayShowcaseContent: 0,
+    showcaseFooterContent: '',
+    displayShowcaseFooterContent: 0,
+    metaKeywords: '',
+    metaDescription: '',
+    canonicalUrl: '',
+    pageTitle: '',
+    attachment: '',
+    isSearchable: 0,
+  }
+}
+
+function extractBrandsList(json: unknown): { items: IdeasoftBrand[]; total: number } {
+  if (Array.isArray(json)) {
+    return { items: json as IdeasoftBrand[], total: json.length }
+  }
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydraMember = o['hydra:member']
+    if (Array.isArray(hydraMember)) {
+      const total = typeof o['hydra:totalItems'] === 'number' ? o['hydra:totalItems'] : hydraMember.length
+      return { items: hydraMember as IdeasoftBrand[], total }
+    }
+    if (Array.isArray(o.data)) {
+      const total = typeof o.total === 'number' ? o.total : o.data.length
+      return { items: o.data as IdeasoftBrand[], total }
+    }
+  }
+  return { items: [], total: 0 }
+}
+
+function Badge01({ v, activeLabel }: { v: number; activeLabel: string }) {
+  const on = v === 1
+  return (
+    <span
+      className={cn(
+        'inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium',
+        on ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-muted text-muted-foreground'
+      )}
+    >
+      {on ? activeLabel : 'Hayır'}
+    </span>
+  )
+}
+
+function buildPayload(form: IdeasoftBrand, idForPut: number | null): Record<string, unknown> {
+  const o: Record<string, unknown> = {
+    name: (form.name ?? '').slice(0, 255),
+    slug: form.slug ? String(form.slug).slice(0, 255) : '',
+    sortOrder: Math.min(999, Math.max(1, Number(form.sortOrder) || 1)),
+    status: form.status === 1 ? 1 : 0,
+    distributorCode: form.distributorCode ? String(form.distributorCode).slice(0, 255) : '',
+    distributor: form.distributor ? String(form.distributor).slice(0, 255) : '',
+    imageFile: form.imageFile ? String(form.imageFile).slice(0, 255) : '',
+    showcaseContent: form.showcaseContent != null ? String(form.showcaseContent).slice(0, 65535) : '',
+    displayShowcaseContent: form.displayShowcaseContent === 1 ? 1 : 0,
+    showcaseFooterContent: form.showcaseFooterContent != null ? String(form.showcaseFooterContent).slice(0, 65535) : '',
+    displayShowcaseFooterContent: form.displayShowcaseFooterContent === 1 ? 1 : 0,
+    metaKeywords: form.metaKeywords != null ? String(form.metaKeywords).slice(0, 65535) : '',
+    metaDescription: form.metaDescription != null ? String(form.metaDescription).slice(0, 65535) : '',
+    canonicalUrl: form.canonicalUrl ? String(form.canonicalUrl).slice(0, 255) : '',
+    pageTitle: form.pageTitle ? String(form.pageTitle).slice(0, 255) : '',
+    isSearchable: form.isSearchable === 1 ? 1 : 0,
+  }
+  const att = (form.attachment ?? '').trim()
+  if (att) o.attachment = att
+  if (idForPut != null) o.id = idForPut
+  return o
 }
 
 export function IdeasoftBrandsPage() {
-  const [masterBrands, setMasterBrands] = useState<MasterBrand[]>([])
-  const [ideasoftBrands, setIdeasoftBrands] = useState<IdeasoftBrandRow[]>([])
-  const [mappings, setMappings] = useState<Record<string, string>>({})
-  const [masterLoading, setMasterLoading] = useState(true)
-  const [ideasoftLoading, setIdeasoftLoading] = useState(true)
-  const [mappingsLoading, setMappingsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [oauthReconnectHint, setOauthReconnectHint] = useState(false)
-  const [savingId, setSavingId] = useState<string | number | null>(null)
-  const [selections, setSelections] = useState<Record<string, string>>({})
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [pickerForMasterId, setPickerForMasterId] = useState<number | null>(null)
-  const [debugOpen, setDebugOpen] = useState(false)
-  const [debugData, setDebugData] = useState<{
-    storeBase?: string
-    results?: { path: string; url: string; status: number; memberCount: number; rawPreview: string }[]
-    error?: string
-  } | null>(null)
-  const [debugLoading, setDebugLoading] = useState(false)
+  const [listState, setListState] = usePersistedListState('ideasoft-brands-v1', listDefaults)
+  const { search, page, pageSize, fitLimit, statusFilter } = listState
+  const limit = pageSize === 'fit' ? fitLimit : Number(pageSize) || 20
 
-  const [createMode, setCreateMode] = useState(false)
-  const [createName, setCreateName] = useState('')
-  const [creating, setCreating] = useState(false)
+  const [items, setItems] = useState<IdeasoftBrand[]>([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [listError, setListError] = useState<string | null>(null)
 
-  const matchedIdeasoftIds = useMemo(() => new Set(Object.values(mappings)), [mappings])
+  const [editOpen, setEditOpen] = useState(false)
+  const [editId, setEditId] = useState<number | null>(null)
+  const [editLoading, setEditLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState<IdeasoftBrand>(emptyBrand())
 
-  const ideasoftById = useMemo(() => {
-    const m = new Map<string, IdeasoftBrandRow>()
-    ideasoftBrands.forEach((b) => m.set(String(b.id), b))
-    return m
-  }, [ideasoftBrands])
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<IdeasoftBrand | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
-  const openPicker = useCallback((masterId: number, masterName?: string) => {
-    setPickerForMasterId(masterId)
-    setPickerOpen(true)
-    setCreateMode(false)
-    setCreateName(masterName ?? '')
-  }, [])
+  const contentRef = useRef<HTMLDivElement>(null)
+  const hasFilter = search.length > 0 || statusFilter !== DEFAULT_STATUS_FILTER
 
-  const closePicker = useCallback(() => {
-    setPickerOpen(false)
-    setPickerForMasterId(null)
-    setCreateMode(false)
-    setCreateName('')
-  }, [])
-
-  const fetchMaster = useCallback(async () => {
-    setMasterLoading(true)
+  const fetchList = useCallback(async () => {
+    setLoading(true)
+    setListError(null)
     try {
-      const res = await fetch(`${API_URL}/api/product-brands?limit=9999`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Master markalar yüklenemedi')
-      setMasterBrands(
-        (data.data ?? []).map((x: { id: number; name: string; code?: string }) => ({
-          id: x.id,
-          name: x.name,
-          code: x.code,
-        }))
-      )
-    } catch {
-      setMasterBrands([])
-    } finally {
-      setMasterLoading(false)
-    }
-  }, [])
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(Math.min(100, Math.max(1, limit))),
+        sort: 'sortOrder',
+      })
+      const name = search.trim()
+      if (name) params.set('name', name)
+      if (statusFilter === '0' || statusFilter === '1') params.set('status', statusFilter)
 
-  const fetchIdeasoft = useCallback(async () => {
-    setIdeasoftLoading(true)
-    setError(null)
-    setOauthReconnectHint(false)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/brands`)
-      const data = await res.json()
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/brands?${params}`)
+      const data = await parseJsonResponse<unknown>(res)
       if (!res.ok) {
-        const msg = String(data.error || 'Ideasoft markaları yüklenemedi')
-        setOauthReconnectHint(res.status === 401 || /oauth|yetkilendir|bağlantı/i.test(msg))
-        throw new Error(msg)
-      }
-      const raw = (data.data ?? []) as { id: string; name: string; slug?: string }[]
-      setIdeasoftBrands(raw.map((x) => ({ id: String(x.id), name: x.name, slug: x.slug })))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Yüklenemedi')
-      setIdeasoftBrands([])
-    } finally {
-      setIdeasoftLoading(false)
-    }
-  }, [])
-
-  const fetchMappings = useCallback(async () => {
-    setMappingsLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/brand-mappings`)
-      const data = await res.json()
-      setMappings(data.mappings ?? {})
-    } catch {
-      setMappings({})
-    } finally {
-      setMappingsLoading(false)
-    }
-  }, [])
-
-  const saveMapping = useCallback(
-    async (masterId: number, ideasoftId: string) => {
-      const key = String(masterId)
-      setSavingId(masterId)
-      try {
-        const next = { ...mappings, [key]: ideasoftId }
-        const res = await fetch(`${API_URL}/api/ideasoft/brand-mappings`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mappings: next }),
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
-        setMappings(next)
-        setSelections((p) => ({ ...p, [key]: '' }))
-        closePicker()
-        toastSuccess('Başarılı', 'Marka eşleştirmesi kaydedildi.')
-      } catch (err) {
-        toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
-      } finally {
-        setSavingId(null)
-      }
-    },
-    [mappings, closePicker]
-  )
-
-  const handleMatch = useCallback(
-    async (masterId: number, ideasoftId: string) => {
-      if (!ideasoftId?.trim()) {
-        toastError('Hata', 'Ideasoft markası seçin.')
+        const err = (data as { error?: string }).error || 'Liste alınamadı'
+        setListError(err)
+        setItems([])
+        setTotal(0)
         return
       }
-      await saveMapping(masterId, ideasoftId)
-      void fetchIdeasoft()
-    },
-    [saveMapping, fetchIdeasoft]
-  )
-
-  const removeMapping = useCallback(
-    async (masterId: number) => {
-      const key = String(masterId)
-      const next = { ...mappings }
-      delete next[key]
-      setSavingId(masterId)
-      try {
-        const res = await fetch(`${API_URL}/api/ideasoft/brand-mappings`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mappings: next }),
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
-        setMappings(next)
-        toastSuccess('Başarılı', 'Eşleştirme kaldırıldı.')
-      } catch (err) {
-        toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
-      } finally {
-        setSavingId(null)
-      }
-    },
-    [mappings]
-  )
-
-  const fetchDebug = useCallback(async () => {
-    setDebugLoading(true)
-    setDebugOpen(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/debug/brands`)
-      const data = await res.json()
-      setDebugData(data as typeof debugData)
-    } catch (err) {
-      setDebugData({ error: err instanceof Error ? err.message : 'Tanı başarısız' })
+      const { items: rows, total: t } = extractBrandsList(data)
+      setItems(rows)
+      setTotal(t || rows.length)
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : 'Liste alınamadı')
+      setItems([])
+      setTotal(0)
     } finally {
-      setDebugLoading(false)
+      setLoading(false)
+    }
+  }, [page, limit, search, statusFilter])
+
+  useEffect(() => {
+    void fetchList()
+  }, [fetchList])
+
+  const openCreate = useCallback(() => {
+    setEditId(null)
+    setForm(emptyBrand())
+    setEditOpen(true)
+    setEditLoading(false)
+  }, [])
+
+  const openEdit = useCallback(async (id: number) => {
+    setEditId(id)
+    setEditOpen(true)
+    setEditLoading(true)
+    setForm(emptyBrand())
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/brands/${id}`)
+      const data = await parseJsonResponse<IdeasoftBrand & { error?: string }>(res)
+      if (!res.ok) throw new Error((data as { error?: string }).error || 'Kayıt yüklenemedi')
+      setForm({
+        ...emptyBrand(),
+        ...data,
+        sortOrder: data.sortOrder ?? 1,
+        status: data.status === 0 ? 0 : 1,
+        displayShowcaseContent: data.displayShowcaseContent === 1 ? 1 : 0,
+        displayShowcaseFooterContent: data.displayShowcaseFooterContent === 1 ? 1 : 0,
+        isSearchable: data.isSearchable === 1 ? 1 : 0,
+      })
+    } catch (e) {
+      toastError('Hata', e instanceof Error ? e.message : 'Yüklenemedi')
+      setEditOpen(false)
+      setEditId(null)
+    } finally {
+      setEditLoading(false)
     }
   }, [])
 
-  const handleCreateBrand = useCallback(async () => {
-    if (!createName.trim() || !pickerForMasterId) return
-    setCreating(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/brands`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: createName.trim() }),
-      })
-      const data = await res.json() as { id?: string; name?: string; error?: string }
-      if (!res.ok) throw new Error(data.error || 'Oluşturulamadı')
-
-      const newId = String(data.id!)
-      const newName = data.name || createName.trim()
-
-      setIdeasoftBrands((prev) => [...prev, { id: newId, name: newName }])
-
-      const key = String(pickerForMasterId)
-      const next = { ...mappings, [key]: newId }
-      const mapRes = await fetch(`${API_URL}/api/ideasoft/brand-mappings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mappings: next }),
-      })
-      const mapData = await mapRes.json() as { error?: string }
-      if (!mapRes.ok) throw new Error(mapData.error || 'Eşleştirme kaydedilemedi')
-      setMappings(next)
-
-      toastSuccess('Başarılı', `"${newName}" Ideasoft'ta oluşturuldu ve eşleştirildi.`)
-      closePicker()
-    } catch (err) {
-      toastError('Hata', err instanceof Error ? err.message : 'İşlem başarısız')
-    } finally {
-      setCreating(false)
+  const saveEdit = useCallback(async () => {
+    const name = (form.name ?? '').trim()
+    if (!name) {
+      toastError('Eksik bilgi', 'Marka adı (name) zorunludur.')
+      return
     }
-  }, [createName, pickerForMasterId, mappings, closePicker])
+    setSaving(true)
+    try {
+      if (editId == null) {
+        const payload = buildPayload(form, null)
+        const res = await fetch(`${API_URL}/api/ideasoft/store-api/brands`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        const data = await parseJsonResponse<{ error?: string }>(res)
+        if (!res.ok) throw new Error(data.error || 'Oluşturulamadı')
+        toastSuccess('Oluşturuldu', 'Marka eklendi.')
+      } else {
+        const payload = buildPayload(form, editId)
+        const res = await fetch(`${API_URL}/api/ideasoft/store-api/brands/${editId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        const data = await parseJsonResponse<{ error?: string }>(res)
+        if (!res.ok) throw new Error(data.error || 'Güncellenemedi')
+        toastSuccess('Güncellendi', 'Marka kaydedildi.')
+      }
+      setEditOpen(false)
+      setEditId(null)
+      void fetchList()
+    } catch (e) {
+      toastError('Hata', e instanceof Error ? e.message : 'Kaydedilemedi')
+    } finally {
+      setSaving(false)
+    }
+  }, [editId, form, fetchList])
 
-  useEffect(() => {
-    fetchMaster()
-  }, [fetchMaster])
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget?.id) return
+    setDeleting(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/brands/${deleteTarget.id}`, {
+        method: 'DELETE',
+      })
+      if (res.status === 204) {
+        toastSuccess('Silindi', 'Marka silindi.')
+        setDeleteOpen(false)
+        setDeleteTarget(null)
+        void fetchList()
+        return
+      }
+      const data = await parseJsonResponse<{ error?: string }>(res).catch(() => ({}))
+      if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`)
+      toastSuccess('Silindi', 'Marka silindi.')
+      setDeleteOpen(false)
+      setDeleteTarget(null)
+      void fetchList()
+    } catch (e) {
+      toastError('Hata', e instanceof Error ? e.message : 'Silinemedi')
+    } finally {
+      setDeleting(false)
+    }
+  }, [deleteTarget, fetchList])
 
-  useEffect(() => {
-    fetchIdeasoft()
-  }, [fetchIdeasoft])
-
-  useEffect(() => {
-    fetchMappings()
-  }, [fetchMappings])
-
-  const isLoading = masterLoading || ideasoftLoading || mappingsLoading
-
-  const sortedIdeasoft = useMemo(
-    () =>
-      [...ideasoftBrands].sort((a, b) =>
-        ideasoftBrandLabel(a).localeCompare(ideasoftBrandLabel(b), 'tr')
-      ),
-    [ideasoftBrands]
+  const fmtDate = useMemo(
+    () => (s?: string) => {
+      if (!s) return '—'
+      try {
+        const d = new Date(s)
+        if (Number.isNaN(d.getTime())) return s
+        return d.toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' })
+      } catch {
+        return s
+      }
+    },
+    []
   )
 
   return (
     <PageLayout
-      title="Ideasoft Markalar"
-      description="Master markaları Ideasoft mağaza markalarıyla eşleştirin"
+      title="Markalar"
+      description="IdeaSoft mağaza Store API — Brand LIST / GET / POST / PUT / DELETE"
       backTo="/ideasoft"
-      contentOverflow="auto"
-      headerActions={
-        <div className="flex flex-wrap items-center gap-2 justify-end max-w-[min(100%,42rem)]">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              fetchMaster()
-              fetchIdeasoft()
-              fetchMappings()
-            }}
-            disabled={isLoading}
-          >
-            <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
-            Yenile
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => (debugOpen ? setDebugOpen(false) : fetchDebug())}
-            disabled={debugLoading}
-            title="Ideasoft API tanı — ham yanıtları göster"
-          >
-            <Bug className="h-4 w-4 mr-1" />
-            {debugLoading ? 'Sorgulanıyor…' : 'Tanı'}
-          </Button>
-        </div>
-      }
+      contentRef={contentRef}
+      contentOverflow="hidden"
     >
-      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        <CardHeader className="pb-3 shrink-0">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Tag className="h-5 w-5" />
-            Marka eşleştirme
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0 flex-1 min-h-0 flex flex-col overflow-hidden">
-          {error && (
-            <div className="flex flex-col gap-2 p-4 text-destructive bg-destructive/10 mx-4 rounded-lg shrink-0 sm:flex-row sm:items-center sm:justify-between">
-              <span>{error}</span>
-              {oauthReconnectHint && (
-                <Link
-                  to="/ayarlar/entegrasyonlar/ideasoft"
-                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-destructive/40 bg-background px-3 h-9 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
-                >
-                  IdeaSoft ayarlarına git
-                </Link>
-              )}
+      <Card className="flex flex-1 min-h-0 flex-col overflow-hidden">
+        <CardHeader className="shrink-0 space-y-4 pb-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Tag className="h-5 w-5 text-primary" />
+              Mağaza markaları
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                placeholder="Marka adı (name)…"
+                value={search}
+                onChange={(e) => setListState({ search: e.target.value, page: 1 })}
+                className="h-9 w-48"
+              />
+              <select
+                aria-label="Durum filtresi"
+                title="Durum filtresi (status)"
+                value={statusFilter}
+                onChange={(e) =>
+                  setListState({ statusFilter: e.target.value as '' | '0' | '1', page: 1 })
+                }
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">Tüm durumlar</option>
+                <option value="1">Aktif</option>
+                <option value="0">Pasif</option>
+              </select>
+              <Button type="button" variant="default" size="sm" className="gap-1.5" onClick={openCreate}>
+                <Plus className="h-4 w-4" />
+                Yeni (POST)
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => void fetchList()}>
+                <RefreshCw className="h-4 w-4" />
+                Yenile
+              </Button>
+            </div>
+          </div>
+          {listError && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>{listError}</span>
             </div>
           )}
-
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            {isLoading ? (
-              <div className="p-8 text-center text-muted-foreground">Yükleniyor...</div>
-            ) : masterBrands.length === 0 ? (
-              <div className="p-8 text-center text-muted-foreground">
-                Master marka bulunamadı. Önce parametrelerden markalar ekleyin.
-              </div>
-            ) : (
-              <div className="border-t">
-                {!ideasoftLoading && ideasoftBrands.length === 0 && !error && (
-                  <div className="px-4 py-3 text-sm text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/30 border-b space-y-1.5">
-                    <p className="font-medium">Ideasoft marka listesi boş geldi.</p>
-                    <p>
-                      Olası nedenler: OAuth uygulamasında marka okuma izni yok; mağazada marka tanımlı değil; API yolu bu
-                      mağazada farklı.
-                    </p>
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs border-amber-400"
-                        onClick={() => fetchDebug()}
-                      >
-                        <Bug className="h-3 w-3 mr-1" />
-                        Ham Ideasoft yanıtını göster (Tanı)
-                      </Button>
-                      <Link
-                        to="/ayarlar/entegrasyonlar/ideasoft"
-                        className="inline-flex items-center h-7 px-3 text-xs rounded-md border border-amber-400 bg-background hover:bg-accent"
-                      >
-                        OAuth ayarları
-                      </Link>
-                    </div>
-                  </div>
+        </CardHeader>
+        <CardContent className="flex min-h-0 flex-1 flex-col p-0 pt-0">
+          <div ref={contentRef} className="min-h-0 flex-1 overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 z-10 border-b bg-muted/95 backdrop-blur">
+                <tr className="text-left">
+                  <th className="whitespace-nowrap p-2 font-medium">ID</th>
+                  <th className="min-w-[120px] p-2 font-medium">Ad (name)</th>
+                  <th className="whitespace-nowrap p-2 font-medium">Slug</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-center">Sıra</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-center">Durum</th>
+                  <th className="whitespace-nowrap p-2 font-medium">Ted. kodu</th>
+                  <th className="min-w-[100px] p-2 font-medium">Tedarikçi</th>
+                  <th className="whitespace-nowrap p-2 font-medium">Görsel dosya</th>
+                  <th className="whitespace-nowrap p-2 font-medium">Güncelleme</th>
+                  <th className="whitespace-nowrap p-2 font-medium w-28 text-right">İşlem</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={10} className="p-8 text-center text-muted-foreground">
+                      Yükleniyor…
+                    </td>
+                  </tr>
+                ) : items.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="p-8 text-center text-muted-foreground">
+                      Kayıt yok veya bağlantı kurulamadı.
+                    </td>
+                  </tr>
+                ) : (
+                  items.map((row) => (
+                    <tr key={row.id ?? row.name} className="border-b border-border/60 hover:bg-muted/30">
+                      <td className="p-2 font-mono text-xs">{row.id ?? '—'}</td>
+                      <td className="p-2">{row.name}</td>
+                      <td className="p-2 text-muted-foreground">{row.slug ?? '—'}</td>
+                      <td className="p-2 text-center font-mono text-xs">{row.sortOrder ?? '—'}</td>
+                      <td className="p-2 text-center">
+                        <Badge01 v={row.status === 1 ? 1 : 0} activeLabel="Aktif" />
+                      </td>
+                      <td className="p-2 font-mono text-xs">{row.distributorCode ?? '—'}</td>
+                      <td className="p-2 max-w-[140px] truncate" title={row.distributor}>
+                        {row.distributor ?? '—'}
+                      </td>
+                      <td className="p-2 text-xs max-w-[100px] truncate" title={row.imageFile}>
+                        {row.imageFile ?? '—'}
+                      </td>
+                      <td className="p-2 text-xs text-muted-foreground whitespace-nowrap">{fmtDate(row.updatedAt)}</td>
+                      <td className="p-2 text-right">
+                        <div className="flex justify-end gap-0.5">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                disabled={row.id == null}
+                                onClick={() => row.id != null && void openEdit(row.id)}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Düzenle (PUT)</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-destructive hover:text-destructive"
+                                disabled={row.id == null}
+                                onClick={() => {
+                                  if (row.id == null) return
+                                  setDeleteTarget(row)
+                                  setDeleteOpen(true)
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Sil (DELETE)</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
                 )}
-                <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,12rem)] gap-3 sm:gap-4 border-b bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground">
-                  <div>Master marka</div>
-                  <div>Ideasoft eşleşmesi</div>
-                  <div className="sm:text-right">Durum</div>
-                </div>
-                {masterBrands.map((brand) => {
-                  const key = String(brand.id)
-                  const ideasoftId = mappings[key]
-                  const isMatched = !!ideasoftId
-                  const matched = ideasoftId ? ideasoftById.get(ideasoftId) : null
-                  const sel = selections[key]
-                  const ideasoftColText = isMatched
-                    ? matched
-                      ? ideasoftBrandLabel(matched)
-                      : String(ideasoftId ?? '')
-                    : sel && ideasoftById.get(sel)
-                      ? ideasoftBrandLabel(ideasoftById.get(sel)!)
-                      : sel
-                        ? sel
-                        : null
-
-                  return (
-                    <div
-                      key={brand.id}
-                      className={cn(
-                        'grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,12rem)] gap-3 sm:gap-4 items-start sm:items-center border-b px-4 py-2.5 text-sm',
-                        isMatched ? 'bg-emerald-50/50 dark:bg-emerald-950/20' : 'hover:bg-muted/30'
-                      )}
-                    >
-                      <div className="min-w-0 flex items-center gap-2">
-                        <span className="font-medium truncate">{brand.name}</span>
-                        {brand.code && (
-                          <span className="text-xs text-muted-foreground shrink-0">[{brand.code}]</span>
-                        )}
-                      </div>
-                      <div className="min-w-0 sm:pl-0 pl-0">
-                        {ideasoftColText ? (
-                          <p className="text-foreground break-words leading-snug">{ideasoftColText}</p>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2 sm:justify-end sm:pl-0">
-                        {isMatched ? (
-                          <>
-                            <Badge className="border-transparent bg-emerald-600/15 text-emerald-900 dark:bg-emerald-500/20 dark:text-emerald-100">
-                              Eşleşti
-                            </Badge>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs shrink-0"
-                              onClick={() => removeMapping(brand.id)}
-                              disabled={savingId === brand.id}
-                            >
-                              Kaldır
-                            </Button>
-                          </>
-                        ) : (
-                          <>
-                            {savingId === brand.id ? (
-                              <Badge variant="secondary">Kaydediliyor…</Badge>
-                            ) : sel ? (
-                              <Badge variant="secondary">Kayda hazır</Badge>
-                            ) : (
-                              <Badge variant="outline" className="font-normal text-muted-foreground">
-                                Eşleşmedi
-                              </Badge>
-                            )}
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs shrink-0"
-                              onClick={() => openPicker(brand.id, brand.name)}
-                              disabled={ideasoftLoading}
-                            >
-                              Marka seç
-                            </Button>
-                            <Button
-                              variant="default"
-                              size="sm"
-                              className="h-7 px-2 text-xs shrink-0"
-                              onClick={() => sel && handleMatch(brand.id, sel)}
-                              disabled={savingId === brand.id || !sel}
-                            >
-                              {savingId === brand.id ? (
-                                '…'
-                              ) : (
-                                <>
-                                  <Link2 className="h-3.5 w-3 mr-1" />
-                                  Eşleştir
-                                </>
-                              )}
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
+          <TablePaginationFooter
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            fitLimit={fitLimit}
+            onPageChange={(p) => setListState({ page: p })}
+            onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
+            onFitLimitChange={(v) => setListState({ fitLimit: v })}
+            tableContainerRef={contentRef}
+            hasFilter={hasFilter}
+          />
         </CardContent>
       </Card>
 
-      <Dialog open={pickerOpen} onOpenChange={(open) => !open && closePicker()}>
-        <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
+      <Dialog
+        open={editOpen}
+        onOpenChange={(o) => {
+          if (!o && !saving) {
+            setEditOpen(false)
+            setEditId(null)
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{createMode ? "Ideasoft'ta yeni marka oluştur" : 'Ideasoft markası seç'}</DialogTitle>
-            <DialogDescription className="sr-only">
-              {createMode
-                ? 'Ideasoft mağazasında yeni marka oluşturup otomatik eşleştirin.'
-                : 'Master marka ile eşleştirmek için Ideasoft mağaza markalarından birini seçin.'}
-            </DialogDescription>
+            <DialogTitle>{editId == null ? 'Yeni marka (POST)' : 'Markayı düzenle (PUT)'}</DialogTitle>
           </DialogHeader>
-
-          {createMode ? (
-            <div className="flex flex-col gap-4 py-2">
-              <div className="grid gap-1.5">
-                <Label htmlFor="create-brand-name">Marka adı</Label>
-                <Input
-                  id="create-brand-name"
-                  value={createName}
-                  onChange={(e) => setCreateName(e.target.value)}
-                  placeholder="Marka adı"
-                  onKeyDown={(e) => e.key === 'Enter' && !creating && void handleCreateBrand()}
-                />
-                <p className="text-xs text-muted-foreground">Master marka adından dolduruldu; dilediğiniz gibi düzenleyin.</p>
-              </div>
-            </div>
+          {editLoading ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">Yükleniyor…</p>
           ) : (
-            <div className="flex flex-col gap-2 py-2">
-              <div className="grid gap-1.5">
-                <Label htmlFor="ideasoft-brand-select">Ideasoft markası</Label>
-                <select
-                  id="ideasoft-brand-select"
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={ideasoftLoading || ideasoftBrands.length === 0}
-                  value={pickerForMasterId ? (selections[String(pickerForMasterId)] ?? '') : ''}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    if (pickerForMasterId) {
-                      setSelections((p) => ({ ...p, [String(pickerForMasterId)]: v }))
-                    }
-                  }}
-                >
-                  <option value="">— Marka seçin —</option>
-                  {sortedIdeasoft.map((b) => {
-                    const id = String(b.id)
-                    const taken = matchedIdeasoftIds.has(id)
-                    const label = `${ideasoftBrandLabel(b)}${taken ? ' (başka satırda eşleşmiş)' : ''}`
-                    return (
-                      <option key={id} value={id} disabled={taken}>
-                        {label}
-                      </option>
-                    )
-                  })}
-                </select>
-                {ideasoftLoading && (
-                  <p className="text-xs text-muted-foreground">Ideasoft markaları yükleniyor…</p>
-                )}
-                {!ideasoftLoading && ideasoftBrands.length === 0 && (
-                  <p className="text-sm text-muted-foreground">
-                    Ideasoft markası bulunamadı. &quot;Yeni marka oluştur&quot; ile ekleyebilir veya OAuth bağlantısını
-                    kontrol edebilirsiniz.
-                  </p>
-                )}
+            <div className="grid gap-4 py-2">
+              {editId != null && (
+                <div className="grid gap-2">
+                  <Label>id</Label>
+                  <Input value={String(editId)} disabled className="font-mono" />
+                </div>
+              )}
+              <div className="grid gap-2">
+                <Label htmlFor="br-name">name * (≤255)</Label>
+                <Input
+                  id="br-name"
+                  value={form.name}
+                  maxLength={255}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                />
               </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-slug">slug (≤255)</Label>
+                <Input
+                  id="br-slug"
+                  value={form.slug ?? ''}
+                  maxLength={255}
+                  onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="br-sort">sortOrder * (1–999)</Label>
+                  <Input
+                    id="br-sort"
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={form.sortOrder}
+                    onChange={(e) => setForm((f) => ({ ...f, sortOrder: Number(e.target.value) || 1 }))}
+                  />
+                </div>
+                <div className="flex items-end gap-2 pb-2">
+                  <Switch
+                    id="br-status"
+                    checked={form.status === 1}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="br-status" className="cursor-pointer">
+                    status (aktif)
+                  </Label>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="br-dc">distributorCode (≤255)</Label>
+                  <Input
+                    id="br-dc"
+                    value={form.distributorCode ?? ''}
+                    maxLength={255}
+                    onChange={(e) => setForm((f) => ({ ...f, distributorCode: e.target.value }))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="br-dist">distributor (≤255)</Label>
+                  <Input
+                    id="br-dist"
+                    value={form.distributor ?? ''}
+                    maxLength={255}
+                    onChange={(e) => setForm((f) => ({ ...f, distributor: e.target.value }))}
+                  />
+                </div>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-img">imageFile (≤255)</Label>
+                <Input
+                  id="br-img"
+                  value={form.imageFile ?? ''}
+                  maxLength={255}
+                  onChange={(e) => setForm((f) => ({ ...f, imageFile: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-sc">showcaseContent (≤65535)</Label>
+                <Textarea
+                  id="br-sc"
+                  value={form.showcaseContent ?? ''}
+                  maxLength={65535}
+                  rows={3}
+                  onChange={(e) => setForm((f) => ({ ...f, showcaseContent: e.target.value }))}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="br-dsc"
+                  checked={form.displayShowcaseContent === 1}
+                  onCheckedChange={(v) => setForm((f) => ({ ...f, displayShowcaseContent: v ? 1 : 0 }))}
+                />
+                <Label htmlFor="br-dsc" className="cursor-pointer">
+                  displayShowcaseContent *
+                </Label>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-sfc">showcaseFooterContent (≤65535)</Label>
+                <Textarea
+                  id="br-sfc"
+                  value={form.showcaseFooterContent ?? ''}
+                  maxLength={65535}
+                  rows={3}
+                  onChange={(e) => setForm((f) => ({ ...f, showcaseFooterContent: e.target.value }))}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="br-dsfc"
+                  checked={form.displayShowcaseFooterContent === 1}
+                  onCheckedChange={(v) => setForm((f) => ({ ...f, displayShowcaseFooterContent: v ? 1 : 0 }))}
+                />
+                <Label htmlFor="br-dsfc" className="cursor-pointer">
+                  displayShowcaseFooterContent *
+                </Label>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-mk">metaKeywords (≤65535)</Label>
+                <Textarea
+                  id="br-mk"
+                  value={form.metaKeywords ?? ''}
+                  maxLength={65535}
+                  rows={2}
+                  onChange={(e) => setForm((f) => ({ ...f, metaKeywords: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-md">metaDescription (≤65535)</Label>
+                <Textarea
+                  id="br-md"
+                  value={form.metaDescription ?? ''}
+                  maxLength={65535}
+                  rows={2}
+                  onChange={(e) => setForm((f) => ({ ...f, metaDescription: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-can">canonicalUrl (≤255, ^[a-z0-9-/]+$)</Label>
+                <Input
+                  id="br-can"
+                  value={form.canonicalUrl ?? ''}
+                  maxLength={255}
+                  onChange={(e) => setForm((f) => ({ ...f, canonicalUrl: e.target.value }))}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-pt">pageTitle (≤255)</Label>
+                <Input
+                  id="br-pt"
+                  value={form.pageTitle ?? ''}
+                  maxLength={255}
+                  onChange={(e) => setForm((f) => ({ ...f, pageTitle: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="br-att">attachment (data:image/…;base64,)</Label>
+                <Textarea
+                  id="br-att"
+                  value={form.attachment ?? ''}
+                  rows={2}
+                  placeholder="data:image/jpeg;base64,..."
+                  className="font-mono text-xs"
+                  onChange={(e) => setForm((f) => ({ ...f, attachment: e.target.value }))}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="br-search"
+                  checked={form.isSearchable === 1}
+                  onCheckedChange={(v) => setForm((f) => ({ ...f, isSearchable: v ? 1 : 0 }))}
+                />
+                <Label htmlFor="br-search" className="cursor-pointer">
+                  isSearchable
+                </Label>
+              </div>
+              {(form.createdAt || form.updatedAt) && (
+                <p className="text-xs text-muted-foreground border-t pt-2">
+                  {form.createdAt && <span>createdAt: {form.createdAt} </span>}
+                  {form.updatedAt && <span>updatedAt: {form.updatedAt}</span>}
+                </p>
+              )}
             </div>
           )}
-
-          {!createMode && pickerForMasterId && selections[String(pickerForMasterId)] && (
-            <div className="border-t px-4 py-2 text-sm text-muted-foreground truncate">
-              <span className="font-medium text-foreground">Seçilen: </span>
-              {(() => {
-                const b = ideasoftById.get(selections[String(pickerForMasterId)]!)
-                return b ? ideasoftBrandLabel(b) : 'Seçildi'
-              })()}
-            </div>
-          )}
-
-          <DialogFooter className={cn('gap-2', createMode && 'flex-col sm:flex-row')}>
-            {createMode ? (
-              <>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="mr-auto"
-                  onClick={() => setCreateMode(false)}
-                  disabled={creating}
-                >
-                  <ArrowLeft className="h-4 w-4 mr-1" />
-                  Geri
-                </Button>
-                <Button variant="outline" onClick={closePicker} disabled={creating}>
-                  İptal
-                </Button>
-                <Button type="button" onClick={() => void handleCreateBrand()} disabled={!createName.trim() || creating}>
-                  {creating ? 'Oluşturuluyor…' : 'Oluştur ve eşleştir'}
-                </Button>
-              </>
-            ) : (
-              pickerForMasterId && (
-                <>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mr-auto shrink-0"
-                    onClick={() => setCreateMode(true)}
-                  >
-                    <PlusCircle className="h-4 w-4 mr-1" />
-                    Yeni marka oluştur
-                  </Button>
-                  <Button variant="outline" onClick={closePicker}>
-                    İptal
-                  </Button>
-                  <DialogClose asChild>
-                    <Button
-                      type="button"
-                      onClick={() => {
-                        const s = selections[String(pickerForMasterId)]
-                        if (s) void handleMatch(pickerForMasterId, s)
-                      }}
-                      disabled={!selections[String(pickerForMasterId)] || savingId === pickerForMasterId}
-                    >
-                      {savingId === pickerForMasterId ? '…' : 'Eşleştir'}
-                    </Button>
-                  </DialogClose>
-                </>
-              )
-            )}
+          <DialogFooter className="gap-2">
+            <Button type="button" variant="outline" disabled={saving} onClick={() => setEditOpen(false)}>
+              İptal
+            </Button>
+            <Button type="button" disabled={saving || editLoading} onClick={() => void saveEdit()}>
+              {saving ? 'Kaydediliyor…' : editId == null ? 'Oluştur' : 'Kaydet'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <p className="text-xs text-muted-foreground mt-4 px-1 shrink-0">
-        Master markalar düz listedir. OAuth (Ayarlar → IdeaSoft) gerekir. &quot;Marka seç&quot; ile Ideasoft markası
-        seçip &quot;Eşleştir&quot; ile kaydedin veya mağazada yeni marka oluşturun.
-      </p>
-
-      {debugOpen && (
-        <div className="mt-4 rounded-lg border bg-muted/40 p-4 text-xs font-mono space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="font-semibold text-sm not-italic font-sans">Ideasoft API Tanı (Markalar)</span>
-            <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => setDebugOpen(false)}>
-              Kapat
-            </Button>
-          </div>
-          {debugData?.error && <p className="text-destructive">{debugData.error}</p>}
-          {debugData?.storeBase && (
-            <p className="text-muted-foreground">
-              Mağaza: <span className="text-foreground">{debugData.storeBase}</span>
-            </p>
-          )}
-          {debugData?.results?.map((r, i) => (
-            <div key={i} className="border rounded p-2 space-y-1 bg-background">
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    'px-1.5 py-0.5 rounded text-[10px] font-semibold',
-                    r.status === 200 && r.memberCount > 0
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : r.status === 200
-                        ? 'bg-amber-100 text-amber-800'
-                        : r.status === 404
-                          ? 'bg-muted text-muted-foreground'
-                          : 'bg-destructive/15 text-destructive'
-                  )}
-                >
-                  {r.status}
-                </span>
-                <span className="truncate">{r.path}</span>
-                <span className="text-muted-foreground shrink-0">üye: {r.memberCount}</span>
-              </div>
-              <pre className="whitespace-pre-wrap break-all text-[10px] max-h-32 overflow-y-auto">{r.rawPreview}</pre>
-            </div>
-          ))}
-        </div>
-      )}
+      <ConfirmDeleteDialog
+        open={deleteOpen}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null)
+          setDeleteOpen(o)
+        }}
+        title="Markayı sil (DELETE)"
+        description={
+          deleteTarget
+            ? `"${deleteTarget.name}" (id: ${deleteTarget.id}) kalıcı olarak silinecek. Store API 204 dönebilir.`
+            : ''
+        }
+        onConfirm={confirmDelete}
+        loading={deleting}
+      />
     </PageLayout>
   )
 }

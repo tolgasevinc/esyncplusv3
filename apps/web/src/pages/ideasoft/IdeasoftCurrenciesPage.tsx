@@ -1,563 +1,469 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Link } from 'react-router-dom'
-import { Coins, RefreshCw, Link2, Bug } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Coins, RefreshCw, Pencil, AlertCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
-  DialogClose,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
-  DialogFooter,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
-import { API_URL } from '@/lib/api'
+import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { API_URL, parseJsonResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
+import { usePersistedListState } from '@/hooks/usePersistedListState'
+import { DecimalInput } from '@/components/DecimalInput'
 
-interface MasterCurrency {
+/** Store API Currency (GET/PUT gövdesi) */
+export interface IdeasoftCurrency {
   id: number
-  name: string
-  code: string
-  symbol?: string | null
+  label: string
+  buyingPrice: number
+  sellingPrice: number
+  abbr: string
+  updatedAt?: string
+  status: number
+  permissionStatus: number
+  isPrimary: number
+  isEffective: number
+  isExtra: number
 }
 
-interface IdeasoftCurrencyRow {
-  id: string
-  name?: string
-  code?: string
+/** Liste varsayılanı: yalnızca aktif kayıtlar (Store API status=1) */
+const DEFAULT_STATUS_FILTER = '1' as const
+
+const listDefaults = {
+  search: '',
+  page: 1,
+  pageSize: 20 as PageSizeValue,
+  fitLimit: 20,
+  statusFilter: DEFAULT_STATUS_FILTER as '' | '0' | '1',
 }
 
-function ideasoftCurrencyLabel(c: IdeasoftCurrencyRow): string {
-  const raw = String(c.name ?? '').trim()
-  const id = String(c.id)
-  const code = String(c.code ?? '').trim()
-  const base = code ? `${code}${raw && raw !== code ? ` — ${raw}` : ''}` : raw || id
-  return `${base} (${id})`
+function extractCurrenciesList(json: unknown): { items: IdeasoftCurrency[]; total: number } {
+  if (Array.isArray(json)) {
+    return { items: json as IdeasoftCurrency[], total: json.length }
+  }
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydraMember = o['hydra:member']
+    if (Array.isArray(hydraMember)) {
+      const total = typeof o['hydra:totalItems'] === 'number' ? o['hydra:totalItems'] : hydraMember.length
+      return { items: hydraMember as IdeasoftCurrency[], total }
+    }
+    if (Array.isArray(o.data)) {
+      const total = typeof o.total === 'number' ? o.total : o.data.length
+      return { items: o.data as IdeasoftCurrency[], total }
+    }
+  }
+  return { items: [], total: 0 }
+}
+
+function Badge01({ v, activeLabel }: { v: number; activeLabel: string }) {
+  const on = v === 1
+  return (
+    <span
+      className={cn(
+        'inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium',
+        on ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-muted text-muted-foreground'
+      )}
+    >
+      {on ? activeLabel : 'Hayır'}
+    </span>
+  )
 }
 
 export function IdeasoftCurrenciesPage() {
-  const [masterCurrencies, setMasterCurrencies] = useState<MasterCurrency[]>([])
-  const [ideasoftCurrencies, setIdeasoftCurrencies] = useState<IdeasoftCurrencyRow[]>([])
-  const [mappings, setMappings] = useState<Record<string, string>>({})
-  const [masterLoading, setMasterLoading] = useState(true)
-  const [ideasoftLoading, setIdeasoftLoading] = useState(true)
-  const [mappingsLoading, setMappingsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [oauthReconnectHint, setOauthReconnectHint] = useState(false)
-  const [savingId, setSavingId] = useState<string | number | null>(null)
-  const [selections, setSelections] = useState<Record<string, string>>({})
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [pickerForMasterId, setPickerForMasterId] = useState<number | null>(null)
-  const [debugOpen, setDebugOpen] = useState(false)
-  const [debugData, setDebugData] = useState<{
-    storeBase?: string
-    results?: { path: string; url: string; status: number; memberCount: number; rawPreview: string }[]
-    error?: string
-  } | null>(null)
-  const [debugLoading, setDebugLoading] = useState(false)
+  const [listState, setListState] = usePersistedListState('ideasoft-currencies-v2', listDefaults)
+  const { search, page, pageSize, fitLimit, statusFilter } = listState
+  const limit = pageSize === 'fit' ? fitLimit : Number(pageSize) || 20
 
-  const matchedIdeasoftIds = useMemo(() => new Set(Object.values(mappings)), [mappings])
+  const [items, setItems] = useState<IdeasoftCurrency[]>([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [listError, setListError] = useState<string | null>(null)
 
-  const ideasoftById = useMemo(() => {
-    const m = new Map<string, IdeasoftCurrencyRow>()
-    ideasoftCurrencies.forEach((c) => m.set(String(c.id), c))
-    return m
-  }, [ideasoftCurrencies])
+  const [editOpen, setEditOpen] = useState(false)
+  const [editId, setEditId] = useState<number | null>(null)
+  const [editLoading, setEditLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState<Partial<IdeasoftCurrency>>({})
 
-  const openPicker = useCallback((masterId: number) => {
-    setPickerForMasterId(masterId)
-    setPickerOpen(true)
-  }, [])
+  const contentRef = useRef<HTMLDivElement>(null)
+  const hasFilter = search.length > 0 || statusFilter !== DEFAULT_STATUS_FILTER
 
-  const closePicker = useCallback(() => {
-    setPickerOpen(false)
-    setPickerForMasterId(null)
-  }, [])
-
-  const fetchMaster = useCallback(async () => {
-    setMasterLoading(true)
+  const fetchList = useCallback(async () => {
+    setLoading(true)
+    setListError(null)
     try {
-      const res = await fetch(`${API_URL}/api/product-currencies?limit=9999`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Master para birimleri yüklenemedi')
-      setMasterCurrencies(
-        (data.data ?? []).map(
-          (x: { id: number; name: string; code: string; symbol?: string | null }) => ({
-            id: x.id,
-            name: x.name,
-            code: x.code,
-            symbol: x.symbol,
-          })
-        )
-      )
-    } catch {
-      setMasterCurrencies([])
-    } finally {
-      setMasterLoading(false)
-    }
-  }, [])
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(Math.min(100, Math.max(1, limit))),
+        sort: 'id',
+      })
+      const q = search.trim()
+      if (q) params.set('q', q)
+      if (statusFilter === '0' || statusFilter === '1') params.set('status', statusFilter)
 
-  const fetchIdeasoft = useCallback(async () => {
-    setIdeasoftLoading(true)
-    setError(null)
-    setOauthReconnectHint(false)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/currencies`)
-      const data = await res.json()
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies?${params}`)
+      const data = await parseJsonResponse<unknown>(res)
       if (!res.ok) {
-        const msg = String(data.error || 'Ideasoft para birimleri yüklenemedi')
-        setOauthReconnectHint(res.status === 401 || /oauth|yetkilendir|bağlantı/i.test(msg))
-        throw new Error(msg)
-      }
-      const raw = (data.data ?? []) as { id: string; name: string; code?: string }[]
-      setIdeasoftCurrencies(raw.map((x) => ({ id: String(x.id), name: x.name, code: x.code })))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Yüklenemedi')
-      setIdeasoftCurrencies([])
-    } finally {
-      setIdeasoftLoading(false)
-    }
-  }, [])
-
-  const fetchMappings = useCallback(async () => {
-    setMappingsLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`)
-      const data = await res.json()
-      setMappings(data.mappings ?? {})
-    } catch {
-      setMappings({})
-    } finally {
-      setMappingsLoading(false)
-    }
-  }, [])
-
-  const saveMapping = useCallback(
-    async (masterId: number, ideasoftId: string) => {
-      const key = String(masterId)
-      setSavingId(masterId)
-      try {
-        const next = { ...mappings, [key]: ideasoftId }
-        const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mappings: next }),
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
-        setMappings(next)
-        setSelections((p) => ({ ...p, [key]: '' }))
-        closePicker()
-        toastSuccess('Başarılı', 'Para birimi eşleştirmesi kaydedildi.')
-      } catch (err) {
-        toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
-      } finally {
-        setSavingId(null)
-      }
-    },
-    [mappings, closePicker]
-  )
-
-  const handleMatch = useCallback(
-    async (masterId: number, ideasoftId: string) => {
-      if (!ideasoftId?.trim()) {
-        toastError('Hata', 'Ideasoft para birimi seçin.')
+        const err = (data as { error?: string }).error || 'Liste alınamadı'
+        setListError(err)
+        setItems([])
+        setTotal(0)
         return
       }
-      await saveMapping(masterId, ideasoftId)
-      void fetchIdeasoft()
-    },
-    [saveMapping, fetchIdeasoft]
-  )
-
-  const removeMapping = useCallback(
-    async (masterId: number) => {
-      const key = String(masterId)
-      const next = { ...mappings }
-      delete next[key]
-      setSavingId(masterId)
-      try {
-        const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mappings: next }),
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
-        setMappings(next)
-        toastSuccess('Başarılı', 'Eşleştirme kaldırıldı.')
-      } catch (err) {
-        toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
-      } finally {
-        setSavingId(null)
-      }
-    },
-    [mappings]
-  )
-
-  const fetchDebug = useCallback(async () => {
-    setDebugLoading(true)
-    setDebugOpen(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ideasoft/debug/currencies`)
-      const data = await res.json()
-      setDebugData(data as typeof debugData)
-    } catch (err) {
-      setDebugData({ error: err instanceof Error ? err.message : 'Tanı başarısız' })
+      const { items: rows, total: t } = extractCurrenciesList(data)
+      setItems(rows)
+      setTotal(t || rows.length)
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : 'Liste alınamadı')
+      setItems([])
+      setTotal(0)
     } finally {
-      setDebugLoading(false)
+      setLoading(false)
+    }
+  }, [page, limit, search, statusFilter])
+
+  useEffect(() => {
+    void fetchList()
+  }, [fetchList])
+
+  const openEdit = useCallback(async (id: number) => {
+    setEditId(id)
+    setEditOpen(true)
+    setEditLoading(true)
+    setForm({})
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${id}`)
+      const data = await parseJsonResponse<IdeasoftCurrency & { error?: string }>(res)
+      if (!res.ok) throw new Error((data as { error?: string }).error || 'Kayıt yüklenemedi')
+      setForm(data)
+    } catch (e) {
+      toastError('Hata', e instanceof Error ? e.message : 'Yüklenemedi')
+      setEditOpen(false)
+      setEditId(null)
+    } finally {
+      setEditLoading(false)
     }
   }, [])
 
-  useEffect(() => {
-    fetchMaster()
-  }, [fetchMaster])
+  const saveEdit = useCallback(async () => {
+    if (editId == null) return
+    setSaving(true)
+    try {
+      const payload: IdeasoftCurrency = {
+        id: form.id ?? editId,
+        label: (form.label ?? '').slice(0, 50),
+        buyingPrice: Number(form.buyingPrice ?? 0),
+        sellingPrice: Number(form.sellingPrice ?? 0),
+        abbr: (form.abbr ?? '').slice(0, 5),
+        updatedAt: form.updatedAt,
+        status: form.status === 1 ? 1 : 0,
+        permissionStatus: form.permissionStatus === 1 ? 1 : 0,
+        isPrimary: form.isPrimary === 1 ? 1 : 0,
+        isEffective: form.isEffective === 1 ? 1 : 0,
+        isExtra: form.isExtra === 1 ? 1 : 0,
+      }
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${editId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Güncellenemedi')
+      toastSuccess('Güncellendi', 'Para birimi mağazada kaydedildi.')
+      setEditOpen(false)
+      setEditId(null)
+      void fetchList()
+    } catch (e) {
+      toastError('Hata', e instanceof Error ? e.message : 'Kaydedilemedi')
+    } finally {
+      setSaving(false)
+    }
+  }, [editId, form, fetchList])
 
-  useEffect(() => {
-    fetchIdeasoft()
-  }, [fetchIdeasoft])
-
-  useEffect(() => {
-    fetchMappings()
-  }, [fetchMappings])
-
-  const isLoading = masterLoading || ideasoftLoading || mappingsLoading
-
-  const sortedIdeasoft = useMemo(
-    () =>
-      [...ideasoftCurrencies].sort((a, b) =>
-        ideasoftCurrencyLabel(a).localeCompare(ideasoftCurrencyLabel(b), 'tr')
-      ),
-    [ideasoftCurrencies]
+  const fmtDate = useMemo(
+    () => (s?: string) => {
+      if (!s) return '—'
+      try {
+        const d = new Date(s)
+        if (Number.isNaN(d.getTime())) return s
+        return d.toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' })
+      } catch {
+        return s
+      }
+    },
+    []
   )
 
   return (
     <PageLayout
-      title="Ideasoft Para birimleri"
-      description="Master para birimlerini Ideasoft mağaza para birimleriyle eşleştirin (Admin API Currency GET/LIST)"
+      title="Para birimleri"
+      description="IdeaSoft mağaza Store API — döviz listesi ve güncelleme"
       backTo="/ideasoft"
-      contentOverflow="auto"
-      headerActions={
-        <div className="flex flex-wrap items-center gap-2 justify-end max-w-[min(100%,42rem)]">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              fetchMaster()
-              fetchIdeasoft()
-              fetchMappings()
-            }}
-            disabled={isLoading}
-          >
-            <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
-            Yenile
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => (debugOpen ? setDebugOpen(false) : fetchDebug())}
-            disabled={debugLoading}
-            title="Ideasoft API tanı — ham yanıtları göster"
-          >
-            <Bug className="h-4 w-4 mr-1" />
-            {debugLoading ? 'Sorgulanıyor…' : 'Tanı'}
-          </Button>
-        </div>
-      }
+      contentRef={contentRef}
+      contentOverflow="hidden"
     >
-      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        <CardHeader className="pb-3 shrink-0">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Coins className="h-5 w-5" />
-            Para birimi eşleştirme
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0 flex-1 min-h-0 flex flex-col overflow-hidden">
-          {error && (
-            <div className="flex flex-col gap-2 p-4 text-destructive bg-destructive/10 mx-4 rounded-lg shrink-0 sm:flex-row sm:items-center sm:justify-between">
-              <span>{error}</span>
-              {oauthReconnectHint && (
-                <Link
-                  to="/ayarlar/entegrasyonlar/ideasoft"
-                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-destructive/40 bg-background px-3 h-9 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
-                >
-                  IdeaSoft ayarlarına git
-                </Link>
-              )}
+      <Card className="flex flex-1 min-h-0 flex-col overflow-hidden">
+        <CardHeader className="shrink-0 space-y-4 pb-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Coins className="h-5 w-5 text-primary" />
+              Mağaza para birimleri
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                placeholder="Ara (q)…"
+                value={search}
+                onChange={(e) => setListState({ search: e.target.value, page: 1 })}
+                className="h-9 w-48"
+              />
+              <select
+                aria-label="Durum filtresi"
+                title="Durum filtresi"
+                value={statusFilter}
+                onChange={(e) =>
+                  setListState({ statusFilter: e.target.value as '' | '0' | '1', page: 1 })
+                }
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">Tüm durumlar</option>
+                <option value="1">Aktif</option>
+                <option value="0">Pasif</option>
+              </select>
+              <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => void fetchList()}>
+                <RefreshCw className="h-4 w-4" />
+                Yenile
+              </Button>
+            </div>
+          </div>
+          {listError && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>{listError}</span>
             </div>
           )}
-
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            {isLoading ? (
-              <div className="p-8 text-center text-muted-foreground">Yükleniyor...</div>
-            ) : masterCurrencies.length === 0 ? (
-              <div className="p-8 text-center text-muted-foreground">
-                Master para birimi bulunamadı. Önce parametrelerden para birimleri ekleyin.
-              </div>
-            ) : (
-              <div className="border-t">
-                {!ideasoftLoading && ideasoftCurrencies.length === 0 && !error && (
-                  <div className="px-4 py-3 text-sm text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/30 border-b space-y-1.5">
-                    <p className="font-medium">Ideasoft para birimi listesi boş geldi.</p>
-                    <p>
-                      OAuth izinleri, mağaza API yolu veya boş liste olabilir. Tanı ile ham yanıtı kontrol edin.
-                    </p>
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs border-amber-400"
-                        onClick={() => fetchDebug()}
-                      >
-                        <Bug className="h-3 w-3 mr-1" />
-                        Ham Ideasoft yanıtını göster (Tanı)
-                      </Button>
-                      <Link
-                        to="/ayarlar/entegrasyonlar/ideasoft"
-                        className="inline-flex items-center h-7 px-3 text-xs rounded-md border border-amber-400 bg-background hover:bg-accent"
-                      >
-                        OAuth ayarları
-                      </Link>
-                    </div>
-                  </div>
+        </CardHeader>
+        <CardContent className="flex min-h-0 flex-1 flex-col p-0 pt-0">
+          <div ref={contentRef} className="min-h-0 flex-1 overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 z-10 border-b bg-muted/95 backdrop-blur">
+                <tr className="text-left">
+                  <th className="whitespace-nowrap p-2 font-medium">ID</th>
+                  <th className="whitespace-nowrap p-2 font-medium">Kısaltma</th>
+                  <th className="min-w-[140px] p-2 font-medium">Etiket</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-right">Alış</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-right">Satış</th>
+                  <th className="whitespace-nowrap p-2 font-medium">Güncelleme</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-center">Durum</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-center">İzin</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-center">Birincil</th>
+                  <th className="whitespace-nowrap p-2 font-medium text-center">Efektif</th>
+                  <th className="whitespace-nowrap p-2 font-medium w-24 text-right">İşlem</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
+                      Yükleniyor…
+                    </td>
+                  </tr>
+                ) : items.length === 0 ? (
+                  <tr>
+                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
+                      Kayıt yok veya bağlantı kurulamadı.
+                    </td>
+                  </tr>
+                ) : (
+                  items.map((row) => (
+                    <tr key={row.id} className="border-b border-border/60 hover:bg-muted/30">
+                      <td className="p-2 font-mono text-xs">{row.id}</td>
+                      <td className="p-2 font-mono">{row.abbr}</td>
+                      <td className="p-2">{row.label}</td>
+                      <td className="p-2 text-right font-mono text-xs">{row.buyingPrice}</td>
+                      <td className="p-2 text-right font-mono text-xs">{row.sellingPrice}</td>
+                      <td className="p-2 text-xs text-muted-foreground whitespace-nowrap">{fmtDate(row.updatedAt)}</td>
+                      <td className="p-2 text-center">
+                        <Badge01 v={row.status} activeLabel="Aktif" />
+                      </td>
+                      <td className="p-2 text-center">
+                        <Badge01 v={row.permissionStatus} activeLabel="Açık" />
+                      </td>
+                      <td className="p-2 text-center">
+                        <Badge01 v={row.isPrimary} activeLabel="Evet" />
+                      </td>
+                      <td className="p-2 text-center">
+                        <Badge01 v={row.isEffective} activeLabel="Evet" />
+                      </td>
+                      <td className="p-2 text-right">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => void openEdit(row.id)}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Düzenle (PUT)</TooltipContent>
+                        </Tooltip>
+                      </td>
+                    </tr>
+                  ))
                 )}
-                <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,12rem)] gap-3 sm:gap-4 border-b bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground">
-                  <div>Master para birimi</div>
-                  <div>Ideasoft eşleşmesi</div>
-                  <div className="sm:text-right">Durum</div>
-                </div>
-                {masterCurrencies.map((cur) => {
-                  const key = String(cur.id)
-                  const ideasoftId = mappings[key]
-                  const isMatched = !!ideasoftId
-                  const matched = ideasoftId ? ideasoftById.get(ideasoftId) : null
-                  const sel = selections[key]
-                  const ideasoftColText = isMatched
-                    ? matched
-                      ? ideasoftCurrencyLabel(matched)
-                      : String(ideasoftId ?? '')
-                    : sel && ideasoftById.get(sel)
-                      ? ideasoftCurrencyLabel(ideasoftById.get(sel)!)
-                      : sel
-                        ? sel
-                        : null
-
-                  return (
-                    <div
-                      key={cur.id}
-                      className={cn(
-                        'grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,12rem)] gap-3 sm:gap-4 items-start sm:items-center border-b px-4 py-2.5 text-sm',
-                        isMatched ? 'bg-emerald-50/50 dark:bg-emerald-950/20' : 'hover:bg-muted/30'
-                      )}
-                    >
-                      <div className="min-w-0 flex items-center gap-2">
-                        <span className="font-medium truncate">{cur.name}</span>
-                        <span className="text-xs text-muted-foreground shrink-0">
-                          ({cur.code}
-                          {cur.symbol ? ` ${cur.symbol}` : ''})
-                        </span>
-                      </div>
-                      <div className="min-w-0 sm:pl-0 pl-0">
-                        {ideasoftColText ? (
-                          <p className="text-foreground break-words leading-snug">{ideasoftColText}</p>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2 sm:justify-end sm:pl-0">
-                        {isMatched ? (
-                          <>
-                            <Badge className="border-transparent bg-emerald-600/15 text-emerald-900 dark:bg-emerald-500/20 dark:text-emerald-100">
-                              Eşleşti
-                            </Badge>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs shrink-0"
-                              onClick={() => removeMapping(cur.id)}
-                              disabled={savingId === cur.id}
-                            >
-                              Kaldır
-                            </Button>
-                          </>
-                        ) : (
-                          <>
-                            {savingId === cur.id ? (
-                              <Badge variant="secondary">Kaydediliyor…</Badge>
-                            ) : sel ? (
-                              <Badge variant="secondary">Kayda hazır</Badge>
-                            ) : (
-                              <Badge variant="outline" className="font-normal text-muted-foreground">
-                                Eşleşmedi
-                              </Badge>
-                            )}
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs shrink-0"
-                              onClick={() => openPicker(cur.id)}
-                              disabled={ideasoftLoading}
-                            >
-                              Para birimi seç
-                            </Button>
-                            <Button
-                              variant="default"
-                              size="sm"
-                              className="h-7 px-2 text-xs shrink-0"
-                              onClick={() => sel && handleMatch(cur.id, sel)}
-                              disabled={savingId === cur.id || !sel}
-                            >
-                              {savingId === cur.id ? (
-                                '…'
-                              ) : (
-                                <>
-                                  <Link2 className="h-3.5 w-3 mr-1" />
-                                  Eşleştir
-                                </>
-                              )}
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
+          <TablePaginationFooter
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            fitLimit={fitLimit}
+            onPageChange={(p) => setListState({ page: p })}
+            onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
+            onFitLimitChange={(v) => setListState({ fitLimit: v })}
+            tableContainerRef={contentRef}
+            hasFilter={hasFilter}
+          />
         </CardContent>
       </Card>
 
-      <Dialog open={pickerOpen} onOpenChange={(open) => !open && closePicker()}>
-        <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
+      <Dialog
+        open={editOpen}
+        onOpenChange={(o) => {
+          if (!o && !saving) {
+            setEditOpen(false)
+            setEditId(null)
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Ideasoft para birimi seç</DialogTitle>
-            <DialogDescription className="sr-only">
-              Master para birimi ile eşleştirmek için Ideasoft mağaza para birimlerinden birini seçin.
-            </DialogDescription>
+            <DialogTitle>Para birimini düzenle</DialogTitle>
           </DialogHeader>
-
-          <div className="flex flex-col gap-2 py-2">
-            <div className="grid gap-1.5">
-              <Label htmlFor="ideasoft-currency-select">Ideasoft para birimi</Label>
-              <select
-                id="ideasoft-currency-select"
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={ideasoftLoading || ideasoftCurrencies.length === 0}
-                value={pickerForMasterId ? (selections[String(pickerForMasterId)] ?? '') : ''}
-                onChange={(e) => {
-                  const v = e.target.value
-                  if (pickerForMasterId) {
-                    setSelections((p) => ({ ...p, [String(pickerForMasterId)]: v }))
-                  }
-                }}
-              >
-                <option value="">— Para birimi seçin —</option>
-                {sortedIdeasoft.map((c) => {
-                  const id = String(c.id)
-                  const taken = matchedIdeasoftIds.has(id)
-                  const label = `${ideasoftCurrencyLabel(c)}${taken ? ' (başka satırda eşleşmiş)' : ''}`
-                  return (
-                    <option key={id} value={id} disabled={taken}>
-                      {label}
-                    </option>
-                  )
-                })}
-              </select>
-              {ideasoftLoading && (
-                <p className="text-xs text-muted-foreground">Ideasoft para birimleri yükleniyor…</p>
+          {editLoading ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">Yükleniyor…</p>
+          ) : (
+            <div className="grid gap-4 py-2">
+              <div className="grid gap-2">
+                <Label>ID</Label>
+                <Input value={String(form.id ?? '')} disabled className="font-mono" />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="cur-label">Etiket (≤50)</Label>
+                <Input
+                  id="cur-label"
+                  value={form.label ?? ''}
+                  maxLength={50}
+                  onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="cur-abbr">Kısaltma (≤5)</Label>
+                <Input
+                  id="cur-abbr"
+                  value={form.abbr ?? ''}
+                  maxLength={5}
+                  onChange={(e) => setForm((f) => ({ ...f, abbr: e.target.value }))}
+                  className="font-mono"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-2">
+                  <Label>Alış fiyatı</Label>
+                  <DecimalInput
+                    value={form.buyingPrice ?? 0}
+                    onChange={(n) => setForm((f) => ({ ...f, buyingPrice: n ?? 0 }))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Satış fiyatı</Label>
+                  <DecimalInput
+                    value={form.sellingPrice ?? 0}
+                    onChange={(n) => setForm((f) => ({ ...f, sellingPrice: n ?? 0 }))}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-x-6 gap-y-3 border-t pt-3">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="cur-status"
+                    checked={form.status === 1}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="cur-status" className="cursor-pointer">
+                    Kur aktif
+                  </Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="cur-perm"
+                    checked={form.permissionStatus === 1}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, permissionStatus: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="cur-perm" className="cursor-pointer">
+                    Kullanım izni
+                  </Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="cur-primary"
+                    checked={form.isPrimary === 1}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, isPrimary: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="cur-primary" className="cursor-pointer">
+                    Birincil kur
+                  </Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="cur-eff"
+                    checked={form.isEffective === 1}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, isEffective: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="cur-eff" className="cursor-pointer">
+                    Efektif kur
+                  </Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="cur-extra"
+                    checked={form.isExtra === 1}
+                    onCheckedChange={(v) => setForm((f) => ({ ...f, isExtra: v ? 1 : 0 }))}
+                  />
+                  <Label htmlFor="cur-extra" className="cursor-pointer">
+                    Ekstra
+                  </Label>
+                </div>
+              </div>
+              {form.updatedAt && (
+                <p className="text-xs text-muted-foreground">Son güncelleme (sunucu): {form.updatedAt}</p>
               )}
-              {!ideasoftLoading && ideasoftCurrencies.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  Ideasoft para birimi bulunamadı. OAuth bağlantısını veya mağaza ayarlarını kontrol edin.
-                </p>
-              )}
-            </div>
-          </div>
-
-          {pickerForMasterId && selections[String(pickerForMasterId)] && (
-            <div className="border-t px-4 py-2 text-sm text-muted-foreground truncate">
-              <span className="font-medium text-foreground">Seçilen: </span>
-              {(() => {
-                const c = ideasoftById.get(selections[String(pickerForMasterId)]!)
-                return c ? ideasoftCurrencyLabel(c) : 'Seçildi'
-              })()}
             </div>
           )}
-
           <DialogFooter className="gap-2">
-            {pickerForMasterId && (
-              <>
-                <Button variant="outline" onClick={closePicker}>
-                  İptal
-                </Button>
-                <DialogClose asChild>
-                  <Button
-                    type="button"
-                    onClick={() => {
-                      const s = selections[String(pickerForMasterId)]
-                      if (s) void handleMatch(pickerForMasterId, s)
-                    }}
-                    disabled={!selections[String(pickerForMasterId)] || savingId === pickerForMasterId}
-                  >
-                    {savingId === pickerForMasterId ? '…' : 'Eşleştir'}
-                  </Button>
-                </DialogClose>
-              </>
-            )}
+            <Button type="button" variant="outline" disabled={saving} onClick={() => setEditOpen(false)}>
+              İptal
+            </Button>
+            <Button type="button" disabled={saving || editLoading} onClick={() => void saveEdit()}>
+              {saving ? 'Kaydediliyor…' : 'Kaydet'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <p className="text-xs text-muted-foreground mt-4 px-1 shrink-0">
-        Aktarımda ürünün master para birimi için bu eşleme varsa önce Ideasoft’taki bu kayıt kullanılır; yoksa ISO kod
-        (TRY, USD vb.) ile koleksiyondan çözülür. OAuth (Ayarlar → IdeaSoft) gerekir.
-      </p>
-
-      {debugOpen && (
-        <div className="mt-4 rounded-lg border bg-muted/40 p-4 text-xs font-mono space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="font-semibold text-sm not-italic font-sans">Ideasoft API Tanı (Para birimleri)</span>
-            <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => setDebugOpen(false)}>
-              Kapat
-            </Button>
-          </div>
-          {debugData?.error && <p className="text-destructive">{debugData.error}</p>}
-          {debugData?.storeBase && (
-            <p className="text-muted-foreground">
-              Mağaza: <span className="text-foreground">{debugData.storeBase}</span>
-            </p>
-          )}
-          {debugData?.results?.map((r, i) => (
-            <div key={i} className="border rounded p-2 space-y-1 bg-background">
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    'px-1.5 py-0.5 rounded text-[10px] font-semibold',
-                    r.status === 200 && r.memberCount > 0
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : r.status === 200
-                        ? 'bg-amber-100 text-amber-800'
-                        : r.status === 404
-                          ? 'bg-muted text-muted-foreground'
-                          : 'bg-destructive/15 text-destructive'
-                  )}
-                >
-                  {r.status}
-                </span>
-                <span className="truncate">{r.path}</span>
-                <span className="text-muted-foreground shrink-0">üye: {r.memberCount}</span>
-              </div>
-              <pre className="whitespace-pre-wrap break-all text-[10px] max-h-32 overflow-y-auto">{r.rawPreview}</pre>
-            </div>
-          ))}
-        </div>
-      )}
     </PageLayout>
   )
 }

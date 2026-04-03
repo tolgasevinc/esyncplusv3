@@ -345,8 +345,8 @@ export function HomePage() {
               to="/opencart"
             />
             <IntegrationCard
-              name="Ideasoft"
-              description="Mağaza & kategori eşleştirme"
+              name="IdeaSoft"
+              description="Mağaza & katalog"
               icon={<FolderTree className="h-5 w-5" />}
               to="/ideasoft"
             />

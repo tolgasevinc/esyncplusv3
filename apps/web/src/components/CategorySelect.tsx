@@ -153,12 +153,86 @@ export function buildHierarchyWithSelectableGroups(categories: CategoryItem[]): 
   )
 }
 
-/** Seçili kategori için path döndürür (kod oluşturucu için) */
+/**
+ * Seçili kategori için kökten yaprağa tam yol (grup + category_id üzerinden üstler).
+ * `buildHierarchy` yalnızca 3 seviye üretir; ürün kaydı daha derin `category_id` zincirinde olabilir.
+ */
 export function getCategoryPath(categories: CategoryItem[], categoryId: number | ''): CategoryPathItem[] {
   if (!categoryId) return []
-  const hierarchy = buildHierarchy(categories)
-  const item = hierarchy.find((h) => h.id === categoryId)
-  return item?.path ?? []
+  const id = typeof categoryId === 'number' ? categoryId : parseInt(String(categoryId), 10)
+  if (Number.isNaN(id) || id <= 0) return []
+
+  const byId = new Map<number, CategoryItem>()
+  for (const c of categories) {
+    byId.set(c.id, c)
+  }
+
+  const leaf = byId.get(id)
+  if (!leaf) return []
+
+  const chain: CategoryItem[] = []
+  let cur: CategoryItem | undefined = leaf
+  const seen = new Set<number>()
+  while (cur) {
+    if (seen.has(cur.id)) break
+    seen.add(cur.id)
+    chain.unshift(cur)
+    const pid: number | null | undefined = cur.category_id
+    cur = pid && pid > 0 ? byId.get(pid) : undefined
+  }
+
+  const first = chain[0]
+  if (first?.group_id && first.group_id > 0) {
+    const grp = byId.get(first.group_id)
+    if (grp && grp.id !== first.id) {
+      chain.unshift(grp)
+    }
+  }
+
+  return chain.map((c) => ({
+    name: c.name,
+    code: (c.code ?? '').trim(),
+  }))
+}
+
+/** Liste / özet: her kademede ad + kod */
+export function formatCategoryPathDisplay(path: CategoryPathItem[]): string {
+  return path
+    .map((p) => (p.code ? `${p.name} [${p.code}]` : p.name))
+    .join(' › ')
+}
+
+/**
+ * Ürün listesi kategori sütunu: grup + ana kategori yalnızca kod rozetleri; yanında alt kategori(ler)in adı.
+ * `path.length >= 2` iken ilk iki kademe kod badge; `path.slice(2)` adları ` › ` ile.
+ */
+export function splitCategoryPathForListColumn(path: CategoryPathItem[]): {
+  groupCode: string | null
+  categoryCode: string | null
+  subLabel: string | null
+  tooltip: string
+} | null {
+  if (path.length === 0) return null
+  const tooltip = formatCategoryPathDisplay(path)
+  if (path.length === 1) {
+    return {
+      groupCode: null,
+      categoryCode: null,
+      subLabel: path[0].name,
+      tooltip,
+    }
+  }
+  const groupCode = (path[0].code ?? '').trim() || null
+  const categoryCode = (path[1].code ?? '').trim() || null
+  const subLabel =
+    path.length > 2
+      ? path
+          .slice(2)
+          .map((p) => p.name)
+          .filter(Boolean)
+          .join(' › ')
+      : null
+  return { groupCode, categoryCode, subLabel, tooltip }
 }
 
 /** Path'i kademeli badge olarak render et */

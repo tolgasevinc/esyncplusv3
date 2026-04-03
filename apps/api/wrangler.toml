@@ -3,7 +3,6 @@ main = "src/index.ts"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Ideasoft ürün aktarımı: tek çağrıda çok sayıda fetch (para birimi listesi + deneme gövdeleri).
 # Ücretsiz Workers varsayılanı ~50 alt istek; aşımını önlemek için (bkz. developers.cloudflare.com/workers/wrangler/configuration/#limits)
 [limits]
 subrequests = 120
