@@ -49,6 +49,7 @@ export function Sidebar() {
       '/parasut/products',
       '/ideasoft/para-birimleri',
       '/ideasoft/markalar',
+      '/ideasoft/kategoriler',
     ]
     if (collapsePaths.includes(location.pathname)) {
       setCollapsed(true)

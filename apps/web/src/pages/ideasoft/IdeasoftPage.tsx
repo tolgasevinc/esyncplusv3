@@ -12,7 +12,7 @@ const primarySections = [
 
 const secondarySections: { id: string; title: string; icon: LucideIcon; to?: string }[] = [
   { id: 'markalar', title: 'Markalar', icon: Tag, to: '/ideasoft/markalar' },
-  { id: 'kategoriler', title: 'Kategoriler', icon: FolderTree },
+  { id: 'kategoriler', title: 'Kategoriler', icon: FolderTree, to: '/ideasoft/kategoriler' },
   { id: 'para-birimleri', title: 'Para birimleri', icon: DollarSign, to: '/ideasoft/para-birimleri' },
 ]
 
