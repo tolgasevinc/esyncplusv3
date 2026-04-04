@@ -1,0 +1,19 @@
+/* Son rozet: kullanıcı rengi --category-select-path-bg ile verilir */
+.category-select-path-badge-last {
+  color: #fff;
+  background-color: var(--category-select-path-bg);
+}
+
+.category-select-color-swatch {
+  background-color: var(--category-select-swatch-bg);
+}
+
+/* Açılır liste konumu: rect değerleri CSS değişkenleriyle */
+.category-select-dropdown-portal {
+  min-width: 520px;
+  max-height: 320px;
+  overflow-y: auto;
+  top: var(--category-select-portal-top);
+  left: var(--category-select-portal-left);
+  width: var(--category-select-portal-width);
+}

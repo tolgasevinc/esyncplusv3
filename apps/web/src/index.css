@@ -139,8 +139,22 @@
   border-color: var(--theme-btn-save, hsl(var(--primary))) !important;
 }
 .btn-theme-save:hover {
-  background-color: var(--theme-btn-save-hover, color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)) !important;
-  border-color: var(--theme-btn-save-hover, color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)) !important;
+  background-color: var(--theme-btn-save-hover, hsl(var(--primary))) !important;
+  border-color: var(--theme-btn-save-hover, hsl(var(--primary))) !important;
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  .btn-theme-save:hover {
+    background-color: var(
+        --theme-btn-save-hover,
+        color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)
+      )
+      !important;
+    border-color: var(
+        --theme-btn-save-hover,
+        color-mix(in srgb, var(--theme-btn-save, hsl(var(--primary))) 90%, black)
+      )
+      !important;
+  }
 }
 .btn-theme-close {
   background-color: transparent !important;
@@ -156,8 +170,22 @@
   border-color: var(--theme-btn-update, hsl(var(--primary))) !important;
 }
 .btn-theme-update:hover {
-  background-color: var(--theme-btn-update-hover, color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)) !important;
-  border-color: var(--theme-btn-update-hover, color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)) !important;
+  background-color: var(--theme-btn-update-hover, hsl(var(--primary))) !important;
+  border-color: var(--theme-btn-update-hover, hsl(var(--primary))) !important;
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  .btn-theme-update:hover {
+    background-color: var(
+        --theme-btn-update-hover,
+        color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)
+      )
+      !important;
+    border-color: var(
+        --theme-btn-update-hover,
+        color-mix(in srgb, var(--theme-btn-update, hsl(var(--primary))) 90%, black)
+      )
+      !important;
+  }
 }
 .btn-theme-delete {
   background-color: var(--theme-btn-delete, hsl(var(--destructive))) !important;
@@ -165,8 +193,22 @@
   border-color: var(--theme-btn-delete, hsl(var(--destructive))) !important;
 }
 .btn-theme-delete:hover {
-  background-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
-  border-color: var(--theme-btn-delete-hover, color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)) !important;
+  background-color: var(--theme-btn-delete-hover, hsl(var(--destructive))) !important;
+  border-color: var(--theme-btn-delete-hover, hsl(var(--destructive))) !important;
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  .btn-theme-delete:hover {
+    background-color: var(
+        --theme-btn-delete-hover,
+        color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)
+      )
+      !important;
+    border-color: var(
+        --theme-btn-delete-hover,
+        color-mix(in srgb, var(--theme-btn-delete, hsl(var(--destructive))) 90%, black)
+      )
+      !important;
+  }
 }
 
 /* Dinamik renk utility - JS tarafında --dynamic-bg, --dynamic-fg CSS değişkeni atanır */

@@ -2,10 +2,28 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { createConnection } from 'mysql2/promise';
 import {
+  exchangeIdeasoftAuthorizationCode,
   getIdeasoftStoreAuth,
-  ideasoftStoreApiRequest,
+  ideasoftDoAdminRequestWithRefresh,
+  ideasoftDoStoreRequestWithRefresh,
+  ideasoftProxyErrorParts,
   loadIdeasoftIntegrationSettings,
 } from './ideasoft-store-api';
+
+/** Upstream Response.status → Hono c.json için uygun literal (dar union) */
+function ideasoftProxyErrStatus(res: Response): 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 502 | 503 {
+  const s = res.status >= 400 && res.status < 600 ? res.status : 502;
+  if ([400, 401, 403, 404, 409, 422, 429, 500, 502, 503].includes(s)) {
+    return s as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 502 | 503;
+  }
+  return 502;
+}
+
+function ideasoftProxyOkJsonStatus(res: Response): 200 | 201 | 204 {
+  const s = res.status;
+  if (s === 200 || s === 201 || s === 204) return s;
+  return 200;
+}
 
 /** Türkçe karakterleri arama için ASCII karşılıklarına çevirir. toLowerCase öncesi replace ile İ/ı sorunu önlenir. */
 function normalizeForSearch(s: string): string {
@@ -7718,6 +7736,7 @@ app.get('/api/app-settings', async (c) => {
         'IDEASOFT_ACCESS_TOKEN',
         'IDEASOFT_REFRESH_TOKEN',
         'IDEASOFT_TOKEN_EXPIRES_AT',
+        'IDEASOFT_CLIENT_SECRET',
         'ideasoft_oauth_pending',
       ]),
     };
@@ -7836,7 +7855,60 @@ app.post('/api/integrations/test/parasut', async (c) => {
   }
 });
 
-// ========== IdeaSoft Store API (Currency vb. — Bearer proxy) ==========
+app.post('/api/integrations/ideasoft/exchange-code', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ code?: string; redirect_uri?: string }>().catch(() => ({}));
+    const result = await exchangeIdeasoftAuthorizationCode(
+      c.env.DB,
+      body.code ?? '',
+      body.redirect_uri ?? ''
+    );
+    if (result.ok) return c.json({ ok: true, message: 'Access ve refresh token kaydedildi.' });
+    return c.json({ ok: false, error: result.error }, 400);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+app.post('/api/integrations/test/ideasoft', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        { ok: false, error: 'Mağaza adresi ve access token gerekli. OAuth ile token alın veya elle yapıştırın.' },
+        400
+      );
+    }
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, '/currencies?limit=1', { method: 'GET' }, settings, auth);
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+    if (res.ok) return c.json({ ok: true, message: 'Store API bağlantısı başarılı (GET /api/currencies).' });
+    const errMsg =
+      body && typeof body === 'object'
+        ? (body as { error_description?: string; message?: string; error?: string }).error_description
+          || (body as { message?: string }).message
+          || (body as { error?: string }).error
+        : null;
+    return c.json(
+      { ok: false, error: errMsg || text.slice(0, 200) || `HTTP ${res.status}` },
+      400
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+// ========== IdeaSoft Store API — Currency (LIST / GET / PUT, Bearer proxy) ==========
 app.get('/api/ideasoft/store-api/currencies', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -7853,7 +7925,7 @@ app.get('/api/ideasoft/store-api/currencies', async (c) => {
     }
     const qs = new URL(c.req.url).searchParams.toString();
     const path = `/currencies${qs ? `?${qs}` : ''}`;
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, path, { method: 'GET' });
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, path, { method: 'GET' }, settings, auth);
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -7862,11 +7934,11 @@ app.get('/api/ideasoft/store-api/currencies', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
     }
     return c.json(body);
   } catch (err: unknown) {
@@ -7890,7 +7962,7 @@ app.get('/api/ideasoft/store-api/currencies/:id', async (c) => {
         400
       );
     }
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, `/currencies/${id}`, { method: 'GET' });
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, `/currencies/${id}`, { method: 'GET' }, settings, auth);
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -7899,11 +7971,11 @@ app.get('/api/ideasoft/store-api/currencies/:id', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
     }
     return c.json(body);
   } catch (err: unknown) {
@@ -7928,10 +8000,11 @@ app.put('/api/ideasoft/store-api/currencies/:id', async (c) => {
       );
     }
     const bodyText = await c.req.text();
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, `/currencies/${id}`, {
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, `/currencies/${id}`, {
       method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
       body: bodyText || '{}',
-    });
+    }, settings, auth);
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -7940,11 +8013,11 @@ app.put('/api/ideasoft/store-api/currencies/:id', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
     }
     return c.json(body);
   } catch (err: unknown) {
@@ -7952,7 +8025,7 @@ app.put('/api/ideasoft/store-api/currencies/:id', async (c) => {
   }
 });
 
-// ========== IdeaSoft Store API — Brand (LIST/GET/POST/PUT/DELETE) ==========
+// ========== IdeaSoft Store API — Brand (LIST / POST / GET / PUT / DELETE, Bearer proxy — Store API PDF) ==========
 app.get('/api/ideasoft/store-api/brands', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -7969,7 +8042,7 @@ app.get('/api/ideasoft/store-api/brands', async (c) => {
     }
     const qs = new URL(c.req.url).searchParams.toString();
     const path = `/brands${qs ? `?${qs}` : ''}`;
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, path, { method: 'GET' });
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, path, { method: 'GET' }, settings, auth);
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -7978,48 +8051,11 @@ app.get('/api/ideasoft/store-api/brands', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
-    }
-    return c.json(body);
-  } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
-  }
-});
-
-app.get('/api/ideasoft/store-api/brands/:id', async (c) => {
-  try {
-    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const id = (c.req.param('id') || '').trim();
-    if (!/^\d+$/.test(id)) return c.json({ error: 'Geçersiz marka ID' }, 400);
-    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
-    const auth = getIdeasoftStoreAuth(settings);
-    if (!auth) {
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
       return c.json(
-        {
-          error:
-            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft kayıtları (store_base_url, IDEASOFT_ACCESS_TOKEN).',
-        },
-        400
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
       );
-    }
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, `/brands/${id}`, { method: 'GET' });
-    const text = await res.text();
-    let body: unknown = null;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      body = { _raw: text };
-    }
-    if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
     }
     return c.json(body);
   } catch (err: unknown) {
@@ -8042,10 +8078,17 @@ app.post('/api/ideasoft/store-api/brands', async (c) => {
       );
     }
     const bodyText = await c.req.text();
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, `/brands`, {
-      method: 'POST',
-      body: bodyText || '{}',
-    });
+    const res = await ideasoftDoStoreRequestWithRefresh(
+      c.env.DB,
+      '/brands',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: bodyText || '{}',
+      },
+      settings,
+      auth
+    );
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -8054,13 +8097,50 @@ app.post('/api/ideasoft/store-api/brands', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
     }
-    return c.json(body, res.status);
+    return c.json(body, ideasoftProxyOkJsonStatus(res));
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
+  }
+});
+
+app.get('/api/ideasoft/store-api/brands/:id', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const id = (c.req.param('id') || '').trim();
+    if (!/^\d+$/.test(id)) return c.json({ error: 'Geçersiz marka ID' }, 400);
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft kayıtları (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+        },
+        400
+      );
+    }
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, `/brands/${id}`, { method: 'GET' }, settings, auth);
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = { _raw: text };
+    }
+    if (!res.ok) {
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
+    }
+    return c.json(body);
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
   }
@@ -8083,10 +8163,17 @@ app.put('/api/ideasoft/store-api/brands/:id', async (c) => {
       );
     }
     const bodyText = await c.req.text();
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, `/brands/${id}`, {
-      method: 'PUT',
-      body: bodyText || '{}',
-    });
+    const res = await ideasoftDoStoreRequestWithRefresh(
+      c.env.DB,
+      `/brands/${id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: bodyText || '{}',
+      },
+      settings,
+      auth
+    );
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -8095,13 +8182,13 @@ app.put('/api/ideasoft/store-api/brands/:id', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
     }
-    return c.json(body, res.status);
+    return c.json(body);
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
   }
@@ -8123,11 +8210,11 @@ app.delete('/api/ideasoft/store-api/brands/:id', async (c) => {
         400
       );
     }
-    const res = await ideasoftStoreApiRequest(auth.storeBase, auth.token, `/brands/${id}`, { method: 'DELETE' });
-    if (res.status === 204) {
+    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, `/brands/${id}`, { method: 'DELETE' }, settings, auth);
+    const text = await res.text();
+    if (res.ok && res.status === 204) {
       return c.body(null, 204);
     }
-    const text = await res.text();
     let body: unknown = null;
     try {
       body = text ? JSON.parse(text) : null;
@@ -8135,17 +8222,118 @@ app.delete('/api/ideasoft/store-api/brands/:id', async (c) => {
       body = { _raw: text };
     }
     if (!res.ok) {
-      const msg =
-        typeof body === 'object' && body !== null && 'message' in body
-          ? String((body as { message?: unknown }).message)
-          : text || `HTTP ${res.status}`;
-      return c.json({ error: msg, body }, res.status >= 400 && res.status < 600 ? res.status : 502);
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
     }
-    return c.json(body ?? {});
+    return c.json(body);
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
   }
 });
+
+/** IdeaSoft Store marka ID → master product_brands.id (app_settings category ideasoft) */
+const IDEASOFT_BRAND_MAPPINGS_KEY = 'ideasoft_brand_mappings';
+
+app.get('/api/ideasoft/brand-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_BRAND_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/brand-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_BRAND_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_BRAND_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`
+      ).bind(IDEASOFT_BRAND_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+// ========== IdeaSoft Admin API (genel proxy — Authentication Admin API.pdf ile aynı OAuth/Bearer) ==========
+app.on(
+  ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  '/api/ideasoft/admin-api/*',
+  async (c) => {
+    try {
+      if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+      const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+      const auth = getIdeasoftStoreAuth(settings);
+      if (!auth) {
+        return c.json(
+          {
+            error:
+              'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft kayıtları (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+          },
+          400
+        );
+      }
+      const pathname = new URL(c.req.url).pathname;
+      const prefix = '/api/ideasoft/admin-api';
+      const rest = pathname.slice(prefix.length) || '/';
+      const search = new URL(c.req.url).search;
+      const pathAndQuery = `${rest.startsWith('/') ? rest : `/${rest}`}${search}`;
+
+      const method = c.req.method;
+      const init: RequestInit = { method };
+      if (method !== 'GET' && method !== 'HEAD' && method !== 'DELETE') {
+        const raw = await c.req.text();
+        init.body = raw;
+        const ct = c.req.header('Content-Type');
+        if (ct) init.headers = { 'Content-Type': ct };
+      }
+
+      const res = await ideasoftDoAdminRequestWithRefresh(c.env.DB, pathAndQuery, init, settings, auth);
+      const text = await res.text();
+      if (res.status === 204) return c.body(null, 204);
+      let body: unknown = null;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = { _raw: text };
+      }
+      if (!res.ok) {
+        const parts = ideasoftProxyErrorParts(body, text, res.status);
+        return c.json(
+          { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+          ideasoftProxyErrStatus(res)
+        );
+      }
+      return c.json(body);
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
+    }
+  }
+);
 
 /** Paraşüt API ürün listesi - app_settings parasut ayarları ile */
 app.get('/api/parasut/products', async (c) => {

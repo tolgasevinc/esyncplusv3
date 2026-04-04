@@ -14,3 +14,10 @@ export async function parseJsonResponse<T = unknown>(res: Response): Promise<T> 
     throw new Error(trimmed.slice(0, 150) || res.statusText || `HTTP ${res.status}`)
   }
 }
+
+/** IdeaSoft store-api proxy yanıtı: `error` + isteğe bağlı `hint` */
+export function formatIdeasoftProxyErrorForUi(data: { error?: string; hint?: string }): string {
+  const e = data.error?.trim() || 'İstek başarısız'
+  const h = data.hint?.trim()
+  return h ? `${e}\n\n${h}` : e
+}

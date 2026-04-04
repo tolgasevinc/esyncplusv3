@@ -42,7 +42,14 @@ export function Sidebar() {
   const { toggle, isDark } = useTheme()
 
   useEffect(() => {
-    const collapsePaths = ['/products', '/customers', '/teklifler', '/parasut/products', '/ideasoft/para-birimleri', '/ideasoft/markalar']
+    const collapsePaths = [
+      '/products',
+      '/customers',
+      '/teklifler',
+      '/parasut/products',
+      '/ideasoft/para-birimleri',
+      '/ideasoft/markalar',
+    ]
     if (collapsePaths.includes(location.pathname)) {
       setCollapsed(true)
     }

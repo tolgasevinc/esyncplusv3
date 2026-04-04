@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Coins, RefreshCw, Pencil, AlertCircle } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { usePersistedListState } from '@/hooks/usePersistedListState'
+import { Search, Save, X } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,13 +16,11 @@ import {
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { API_URL, parseJsonResponse } from '@/lib/api'
-import { cn } from '@/lib/utils'
 import { toastSuccess, toastError } from '@/lib/toast'
-import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { DecimalInput } from '@/components/DecimalInput'
+import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
+import { cn } from '@/lib/utils'
 
-/** Store API Currency (GET/PUT gövdesi) */
+/** Store API Currency (GET/PUT gövdesi — dökümanla uyumlu) */
 export interface IdeasoftCurrency {
   id: number
   label: string
@@ -36,15 +35,14 @@ export interface IdeasoftCurrency {
   isExtra: number
 }
 
-/** Liste varsayılanı: yalnızca aktif kayıtlar (Store API status=1) */
-const DEFAULT_STATUS_FILTER = '1' as const
+export type IdeasoftStatusFilter = 'all' | 'active' | 'inactive'
 
 const listDefaults = {
   search: '',
   page: 1,
-  pageSize: 20 as PageSizeValue,
-  fitLimit: 20,
-  statusFilter: DEFAULT_STATUS_FILTER as '' | '0' | '1',
+  pageSize: 25 as PageSizeValue,
+  fitLimit: 10,
+  statusFilter: 'active' as IdeasoftStatusFilter,
 }
 
 function extractCurrenciesList(json: unknown): { items: IdeasoftCurrency[]; total: number } {
@@ -53,51 +51,52 @@ function extractCurrenciesList(json: unknown): { items: IdeasoftCurrency[]; tota
   }
   if (json && typeof json === 'object') {
     const o = json as Record<string, unknown>
-    const hydraMember = o['hydra:member']
-    if (Array.isArray(hydraMember)) {
-      const total = typeof o['hydra:totalItems'] === 'number' ? o['hydra:totalItems'] : hydraMember.length
-      return { items: hydraMember as IdeasoftCurrency[], total }
+    const hydra = o['hydra:member']
+    if (Array.isArray(hydra)) {
+      const total =
+        typeof o['hydra:totalItems'] === 'number' ? (o['hydra:totalItems'] as number) : hydra.length
+      return { items: hydra as IdeasoftCurrency[], total }
     }
     if (Array.isArray(o.data)) {
-      const total = typeof o.total === 'number' ? o.total : o.data.length
-      return { items: o.data as IdeasoftCurrency[], total }
+      const d = o.data as IdeasoftCurrency[]
+      const total = typeof o.total === 'number' ? o.total : d.length
+      return { items: d, total }
     }
   }
   return { items: [], total: 0 }
 }
 
-function Badge01({ v, activeLabel }: { v: number; activeLabel: string }) {
-  const on = v === 1
-  return (
-    <span
-      className={cn(
-        'inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium',
-        on ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-muted text-muted-foreground'
-      )}
-    >
-      {on ? activeLabel : 'Hayır'}
-    </span>
-  )
+function emptyCurrency(): IdeasoftCurrency {
+  return {
+    id: 0,
+    label: '',
+    buyingPrice: 0,
+    sellingPrice: 0,
+    abbr: '',
+    status: 1,
+    permissionStatus: 1,
+    isPrimary: 0,
+    isEffective: 0,
+    isExtra: 0,
+  }
 }
 
 export function IdeasoftCurrenciesPage() {
   const [listState, setListState] = usePersistedListState('ideasoft-currencies-v2', listDefaults)
   const { search, page, pageSize, fitLimit, statusFilter } = listState
-  const limit = pageSize === 'fit' ? fitLimit : Number(pageSize) || 20
-
   const [items, setItems] = useState<IdeasoftCurrency[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [listError, setListError] = useState<string | null>(null)
-
-  const [editOpen, setEditOpen] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
   const [editId, setEditId] = useState<number | null>(null)
-  const [editLoading, setEditLoading] = useState(false)
+  const [form, setForm] = useState<IdeasoftCurrency>(emptyCurrency())
   const [saving, setSaving] = useState(false)
-  const [form, setForm] = useState<Partial<IdeasoftCurrency>>({})
-
+  const [loadDetailPending, setLoadDetailPending] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
-  const hasFilter = search.length > 0 || statusFilter !== DEFAULT_STATUS_FILTER
+  const limit =
+    pageSize === 'fit' ? Math.min(100, Math.max(1, fitLimit)) : Math.min(100, Math.max(1, pageSize))
+  const hasFilter = search.length > 0 || statusFilter !== 'active'
 
   const fetchList = useCallback(async () => {
     setLoading(true)
@@ -105,27 +104,30 @@ export function IdeasoftCurrenciesPage() {
     try {
       const params = new URLSearchParams({
         page: String(page),
-        limit: String(Math.min(100, Math.max(1, limit))),
+        limit: String(limit),
         sort: 'id',
       })
-      const q = search.trim()
-      if (q) params.set('q', q)
-      if (statusFilter === '0' || statusFilter === '1') params.set('status', statusFilter)
-
+      if (search.trim()) {
+        params.set('q', search.trim())
+      }
+      if (statusFilter === 'active') {
+        params.set('status', '1')
+      } else if (statusFilter === 'inactive') {
+        params.set('status', '0')
+      }
       const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies?${params}`)
       const data = await parseJsonResponse<unknown>(res)
       if (!res.ok) {
-        const err = (data as { error?: string }).error || 'Liste alınamadı'
-        setListError(err)
+        setListError(formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) || 'Liste alınamadı')
         setItems([])
         setTotal(0)
         return
       }
       const { items: rows, total: t } = extractCurrenciesList(data)
       setItems(rows)
-      setTotal(t || rows.length)
-    } catch (e) {
-      setListError(e instanceof Error ? e.message : 'Liste alınamadı')
+      setTotal(t)
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : 'Liste alınamadı')
       setItems([])
       setTotal(0)
     } finally {
@@ -134,334 +136,357 @@ export function IdeasoftCurrenciesPage() {
   }, [page, limit, search, statusFilter])
 
   useEffect(() => {
-    void fetchList()
+    fetchList()
   }, [fetchList])
 
-  const openEdit = useCallback(async (id: number) => {
-    setEditId(id)
-    setEditOpen(true)
-    setEditLoading(true)
-    setForm({})
+  const openEdit = async (row: IdeasoftCurrency) => {
+    setEditId(row.id)
+    setModalOpen(true)
+    setLoadDetailPending(true)
+    setForm(emptyCurrency())
     try {
-      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${id}`)
-      const data = await parseJsonResponse<IdeasoftCurrency & { error?: string }>(res)
-      if (!res.ok) throw new Error((data as { error?: string }).error || 'Kayıt yüklenemedi')
-      setForm(data)
-    } catch (e) {
-      toastError('Hata', e instanceof Error ? e.message : 'Yüklenemedi')
-      setEditOpen(false)
+      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${row.id}`)
+      const data = await parseJsonResponse<IdeasoftCurrency & { error?: string; hint?: string }>(res)
+      if (!res.ok) throw new Error(formatIdeasoftProxyErrorForUi(data) || 'Kayıt yüklenemedi')
+      setForm({
+        id: data.id,
+        label: data.label ?? '',
+        buyingPrice: Number(data.buyingPrice) || 0,
+        sellingPrice: Number(data.sellingPrice) || 0,
+        abbr: data.abbr ?? '',
+        updatedAt: data.updatedAt,
+        status: data.status ?? 0,
+        permissionStatus: data.permissionStatus ?? 0,
+        isPrimary: data.isPrimary ?? 0,
+        isEffective: data.isEffective ?? 0,
+        isExtra: data.isExtra ?? 0,
+      })
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Yüklenemedi')
+      setModalOpen(false)
       setEditId(null)
     } finally {
-      setEditLoading(false)
+      setLoadDetailPending(false)
     }
-  }, [])
+  }
 
-  const saveEdit = useCallback(async () => {
+  const closeModal = () => {
+    setModalOpen(false)
+    setEditId(null)
+    setForm(emptyCurrency())
+  }
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault()
     if (editId == null) return
     setSaving(true)
     try {
-      const payload: IdeasoftCurrency = {
-        id: form.id ?? editId,
-        label: (form.label ?? '').slice(0, 50),
-        buyingPrice: Number(form.buyingPrice ?? 0),
-        sellingPrice: Number(form.sellingPrice ?? 0),
-        abbr: (form.abbr ?? '').slice(0, 5),
-        updatedAt: form.updatedAt,
-        status: form.status === 1 ? 1 : 0,
-        permissionStatus: form.permissionStatus === 1 ? 1 : 0,
-        isPrimary: form.isPrimary === 1 ? 1 : 0,
-        isEffective: form.isEffective === 1 ? 1 : 0,
-        isExtra: form.isExtra === 1 ? 1 : 0,
+      const payload: Record<string, unknown> = {
+        id: form.id,
+        label: form.label.slice(0, 50),
+        buyingPrice: form.buyingPrice,
+        sellingPrice: form.sellingPrice,
+        abbr: form.abbr.slice(0, 5),
+        status: form.status ? 1 : 0,
+        permissionStatus: form.permissionStatus ? 1 : 0,
+        isPrimary: form.isPrimary ? 1 : 0,
+        isEffective: form.isEffective ? 1 : 0,
+        isExtra: form.isExtra ? 1 : 0,
       }
+      if (form.updatedAt) payload.updatedAt = form.updatedAt
+
       const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${editId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const data = await parseJsonResponse<{ error?: string }>(res)
-      if (!res.ok) throw new Error(data.error || 'Güncellenemedi')
-      toastSuccess('Güncellendi', 'Para birimi mağazada kaydedildi.')
-      setEditOpen(false)
-      setEditId(null)
-      void fetchList()
-    } catch (e) {
-      toastError('Hata', e instanceof Error ? e.message : 'Kaydedilemedi')
+      const data = await parseJsonResponse<{ error?: string; hint?: string }>(res)
+      if (!res.ok) throw new Error(formatIdeasoftProxyErrorForUi(data) || 'Güncellenemedi')
+      toastSuccess('Kaydedildi', 'Kur bilgileri güncellendi.')
+      closeModal()
+      fetchList()
+    } catch (err) {
+      toastError('Kayıt hatası', err instanceof Error ? err.message : 'Güncellenemedi')
     } finally {
       setSaving(false)
     }
-  }, [editId, form, fetchList])
-
-  const fmtDate = useMemo(
-    () => (s?: string) => {
-      if (!s) return '—'
-      try {
-        const d = new Date(s)
-        if (Number.isNaN(d.getTime())) return s
-        return d.toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' })
-      } catch {
-        return s
-      }
-    },
-    []
-  )
+  }
 
   return (
     <PageLayout
-      title="Para birimleri"
-      description="IdeaSoft mağaza Store API — döviz listesi ve güncelleme"
+      title="IdeaSoft — Para birimleri"
+      description="Store API: GET /api/currencies (liste), GET/PUT /api/currencies/{id}"
       backTo="/ideasoft"
       contentRef={contentRef}
       contentOverflow="hidden"
-    >
-      <Card className="flex flex-1 min-h-0 flex-col overflow-hidden">
-        <CardHeader className="shrink-0 space-y-4 pb-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Coins className="h-5 w-5 text-primary" />
-              Mağaza para birimleri
-            </CardTitle>
-            <div className="flex flex-wrap items-center gap-2">
-              <Input
-                placeholder="Ara (q)…"
-                value={search}
-                onChange={(e) => setListState({ search: e.target.value, page: 1 })}
-                className="h-9 w-48"
-              />
-              <select
-                aria-label="Durum filtresi"
-                title="Durum filtresi"
-                value={statusFilter}
-                onChange={(e) =>
-                  setListState({ statusFilter: e.target.value as '' | '0' | '1', page: 1 })
-                }
-                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+      showRefresh
+      onRefresh={fetchList}
+      headerActions={
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Ara (q)..."
+                  value={search}
+                  onChange={(e) => setListState({ search: e.target.value, page: 1 })}
+                  className="pl-8 w-56 h-9 rounded-r-none border-r-0"
+                />
+              </div>
+              <div
+                role="group"
+                aria-label="Kayıt durumu"
+                className="inline-flex rounded-r-md border border-l-0 border-input bg-muted/30 p-0.5 shrink-0"
               >
-                <option value="">Tüm durumlar</option>
-                <option value="1">Aktif</option>
-                <option value="0">Pasif</option>
-              </select>
-              <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => void fetchList()}>
-                <RefreshCw className="h-4 w-4" />
-                Yenile
-              </Button>
+                {(
+                  [
+                    { key: 'all' as const, label: 'Tümü' },
+                    { key: 'active' as const, label: 'Aktif' },
+                    { key: 'inactive' as const, label: 'Pasif' },
+                  ] as const
+                ).map(({ key, label }) => {
+                  const isActive = statusFilter === key
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      aria-label={label}
+                      onClick={() => setListState({ statusFilter: key, page: 1 })}
+                      className={cn(
+                        'h-9 px-2.5 text-xs font-medium transition-colors first:rounded-l-none last:rounded-r-md cursor-pointer inline-flex items-center justify-center',
+                        isActive
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setListState({ search: '', statusFilter: 'active', page: 1 })}
+                  className={`h-9 w-9 shrink-0 ${hasFilter ? 'text-primary' : 'text-muted-foreground'}`}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Arama ve filtreyi sıfırla</TooltipContent>
+            </Tooltip>
           </div>
+        </div>
+      }
+      footerContent={
+        <TablePaginationFooter
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          fitLimit={fitLimit}
+          onPageChange={(p) => setListState({ page: p })}
+          onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
+          onFitLimitChange={(fl) => setListState({ fitLimit: fl })}
+          tableContainerRef={contentRef}
+          hasFilter={hasFilter}
+        />
+      }
+    >
+      <Card className="flex-1 min-h-0 overflow-hidden flex flex-col">
+        <CardContent className="p-0 flex-1 min-h-0 overflow-hidden flex flex-col">
           {listError && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-              <span>{listError}</span>
+            <div className="px-4 py-3 text-sm text-destructive border-b border-border whitespace-pre-wrap shrink-0">
+              {listError}
             </div>
           )}
-        </CardHeader>
-        <CardContent className="flex min-h-0 flex-1 flex-col p-0 pt-0">
-          <div ref={contentRef} className="min-h-0 flex-1 overflow-auto">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="sticky top-0 z-10 border-b bg-muted/95 backdrop-blur">
-                <tr className="text-left">
-                  <th className="whitespace-nowrap p-2 font-medium">ID</th>
-                  <th className="whitespace-nowrap p-2 font-medium">Kısaltma</th>
-                  <th className="min-w-[140px] p-2 font-medium">Etiket</th>
-                  <th className="whitespace-nowrap p-2 font-medium text-right">Alış</th>
-                  <th className="whitespace-nowrap p-2 font-medium text-right">Satış</th>
-                  <th className="whitespace-nowrap p-2 font-medium">Güncelleme</th>
-                  <th className="whitespace-nowrap p-2 font-medium text-center">Durum</th>
-                  <th className="whitespace-nowrap p-2 font-medium text-center">İzin</th>
-                  <th className="whitespace-nowrap p-2 font-medium text-center">Birincil</th>
-                  <th className="whitespace-nowrap p-2 font-medium text-center">Efektif</th>
-                  <th className="whitespace-nowrap p-2 font-medium w-24 text-right">İşlem</th>
+              <thead className="sticky top-0 z-10 bg-muted/95 backdrop-blur">
+                <tr className="border-b bg-muted/50">
+                  <th className="text-left p-2 font-medium">ID</th>
+                  <th className="text-left p-2 font-medium">Kısaltma</th>
+                  <th className="text-left p-2 font-medium">Etiket</th>
+                  <th className="text-center p-2 font-medium w-24">Durum</th>
+                  <th className="text-right p-2 font-medium">Alış</th>
+                  <th className="text-right p-2 font-medium">Satış</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
-                      Yükleniyor…
+                    <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                      Yükleniyor...
                     </td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
-                      Kayıt yok veya bağlantı kurulamadı.
+                    <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                      Kayıt yok veya liste boş.
                     </td>
                   </tr>
                 ) : (
                   items.map((row) => (
-                    <tr key={row.id} className="border-b border-border/60 hover:bg-muted/30">
-                      <td className="p-2 font-mono text-xs">{row.id}</td>
-                      <td className="p-2 font-mono">{row.abbr}</td>
+                    <tr
+                      key={row.id}
+                      tabIndex={0}
+                      aria-label={`${row.abbr} — ${row.label || 'Kur'} detayını aç`}
+                      className={cn(
+                        'border-b border-border/60 hover:bg-muted/40 cursor-pointer',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset'
+                      )}
+                      onClick={() => {
+                        void openEdit(row)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          void openEdit(row)
+                        }
+                      }}
+                    >
+                      <td className="p-2 tabular-nums">{row.id}</td>
+                      <td className="p-2 font-medium">{row.abbr}</td>
                       <td className="p-2">{row.label}</td>
-                      <td className="p-2 text-right font-mono text-xs">{row.buyingPrice}</td>
-                      <td className="p-2 text-right font-mono text-xs">{row.sellingPrice}</td>
-                      <td className="p-2 text-xs text-muted-foreground whitespace-nowrap">{fmtDate(row.updatedAt)}</td>
                       <td className="p-2 text-center">
-                        <Badge01 v={row.status} activeLabel="Aktif" />
+                        <span
+                          className={cn(
+                            'inline-flex rounded-full px-2 py-0.5 text-xs font-medium',
+                            row.status === 1
+                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                              : 'bg-muted text-muted-foreground'
+                          )}
+                        >
+                          {row.status === 1 ? 'Aktif' : 'Pasif'}
+                        </span>
                       </td>
-                      <td className="p-2 text-center">
-                        <Badge01 v={row.permissionStatus} activeLabel="Açık" />
-                      </td>
-                      <td className="p-2 text-center">
-                        <Badge01 v={row.isPrimary} activeLabel="Evet" />
-                      </td>
-                      <td className="p-2 text-center">
-                        <Badge01 v={row.isEffective} activeLabel="Evet" />
-                      </td>
-                      <td className="p-2 text-right">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8"
-                              onClick={() => void openEdit(row.id)}
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Düzenle (PUT)</TooltipContent>
-                        </Tooltip>
-                      </td>
+                      <td className="p-2 text-right tabular-nums">{row.buyingPrice}</td>
+                      <td className="p-2 text-right tabular-nums">{row.sellingPrice}</td>
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
           </div>
-          <TablePaginationFooter
-            total={total}
-            page={page}
-            pageSize={pageSize}
-            fitLimit={fitLimit}
-            onPageChange={(p) => setListState({ page: p })}
-            onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
-            onFitLimitChange={(v) => setListState({ fitLimit: v })}
-            tableContainerRef={contentRef}
-            hasFilter={hasFilter}
-          />
         </CardContent>
       </Card>
 
-      <Dialog
-        open={editOpen}
-        onOpenChange={(o) => {
-          if (!o && !saving) {
-            setEditOpen(false)
-            setEditId(null)
-          }
-        }}
-      >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+      <Dialog open={modalOpen} onOpenChange={(o) => !o && closeModal()}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Para birimini düzenle</DialogTitle>
+            <DialogTitle>Kur düzenle #{editId}</DialogTitle>
           </DialogHeader>
-          {editLoading ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">Yükleniyor…</p>
+          {loadDetailPending ? (
+            <p className="text-sm text-muted-foreground py-6">Yükleniyor...</p>
           ) : (
-            <div className="grid gap-4 py-2">
-              <div className="grid gap-2">
-                <Label>ID</Label>
-                <Input value={String(form.id ?? '')} disabled className="font-mono" />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="cur-label">Etiket (≤50)</Label>
-                <Input
-                  id="cur-label"
-                  value={form.label ?? ''}
-                  maxLength={50}
-                  onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="cur-abbr">Kısaltma (≤5)</Label>
-                <Input
-                  id="cur-abbr"
-                  value={form.abbr ?? ''}
-                  maxLength={5}
-                  onChange={(e) => setForm((f) => ({ ...f, abbr: e.target.value }))}
-                  className="font-mono"
-                />
+            <form onSubmit={handleSave} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="abbr">Kısaltma (abbr, max 5)</Label>
+                  <Input
+                    id="abbr"
+                    maxLength={5}
+                    value={form.abbr}
+                    onChange={(e) => setForm((f) => ({ ...f, abbr: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="label">Etiket (max 50)</Label>
+                  <Input
+                    id="label"
+                    maxLength={50}
+                    value={form.label}
+                    onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-2">
-                  <Label>Alış fiyatı</Label>
-                  <DecimalInput
-                    value={form.buyingPrice ?? 0}
-                    onChange={(n) => setForm((f) => ({ ...f, buyingPrice: n ?? 0 }))}
+                <div className="space-y-2">
+                  <Label htmlFor="buy">Alış fiyatı (buyingPrice)</Label>
+                  <Input
+                    id="buy"
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={form.buyingPrice}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, buyingPrice: parseFloat(e.target.value) || 0 }))
+                    }
                   />
                 </div>
-                <div className="grid gap-2">
-                  <Label>Satış fiyatı</Label>
-                  <DecimalInput
-                    value={form.sellingPrice ?? 0}
-                    onChange={(n) => setForm((f) => ({ ...f, sellingPrice: n ?? 0 }))}
+                <div className="space-y-2">
+                  <Label htmlFor="sell">Satış fiyatı (sellingPrice)</Label>
+                  <Input
+                    id="sell"
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={form.sellingPrice}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, sellingPrice: parseFloat(e.target.value) || 0 }))
+                    }
                   />
                 </div>
               </div>
-              <div className="flex flex-wrap gap-x-6 gap-y-3 border-t pt-3">
-                <div className="flex items-center gap-2">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                  <Label htmlFor="st">Durum (status)</Label>
                   <Switch
-                    id="cur-status"
+                    id="st"
                     checked={form.status === 1}
                     onCheckedChange={(v) => setForm((f) => ({ ...f, status: v ? 1 : 0 }))}
                   />
-                  <Label htmlFor="cur-status" className="cursor-pointer">
-                    Kur aktif
-                  </Label>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                  <Label htmlFor="perm">İzin (permissionStatus)</Label>
                   <Switch
-                    id="cur-perm"
+                    id="perm"
                     checked={form.permissionStatus === 1}
                     onCheckedChange={(v) => setForm((f) => ({ ...f, permissionStatus: v ? 1 : 0 }))}
                   />
-                  <Label htmlFor="cur-perm" className="cursor-pointer">
-                    Kullanım izni
-                  </Label>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                  <Label htmlFor="prim">Birincil (isPrimary)</Label>
                   <Switch
-                    id="cur-primary"
+                    id="prim"
                     checked={form.isPrimary === 1}
                     onCheckedChange={(v) => setForm((f) => ({ ...f, isPrimary: v ? 1 : 0 }))}
                   />
-                  <Label htmlFor="cur-primary" className="cursor-pointer">
-                    Birincil kur
-                  </Label>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                  <Label htmlFor="eff">Efektif (isEffective)</Label>
                   <Switch
-                    id="cur-eff"
+                    id="eff"
                     checked={form.isEffective === 1}
                     onCheckedChange={(v) => setForm((f) => ({ ...f, isEffective: v ? 1 : 0 }))}
                   />
-                  <Label htmlFor="cur-eff" className="cursor-pointer">
-                    Efektif kur
-                  </Label>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2 rounded-md border p-3 col-span-2">
+                  <Label htmlFor="ex">Ekstra (isExtra)</Label>
                   <Switch
-                    id="cur-extra"
+                    id="ex"
                     checked={form.isExtra === 1}
                     onCheckedChange={(v) => setForm((f) => ({ ...f, isExtra: v ? 1 : 0 }))}
                   />
-                  <Label htmlFor="cur-extra" className="cursor-pointer">
-                    Ekstra
-                  </Label>
                 </div>
               </div>
               {form.updatedAt && (
-                <p className="text-xs text-muted-foreground">Son güncelleme (sunucu): {form.updatedAt}</p>
+                <p className="text-xs text-muted-foreground">Güncellenme: {form.updatedAt}</p>
               )}
-            </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={closeModal}>
+                  İptal
+                </Button>
+                <Button type="submit" variant="save" disabled={saving}>
+                  <Save className="h-4 w-4 mr-2" />
+                  {saving ? 'Kaydediliyor...' : 'Kaydet'}
+                </Button>
+              </DialogFooter>
+            </form>
           )}
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" disabled={saving} onClick={() => setEditOpen(false)}>
-              İptal
-            </Button>
-            <Button type="button" disabled={saving || editLoading} onClick={() => void saveEdit()}>
-              {saving ? 'Kaydediliyor…' : 'Kaydet'}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </PageLayout>

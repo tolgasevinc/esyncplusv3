@@ -1,10 +1,19 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+import {
+  useState,
+  useMemo,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronDown } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
+
+import './CategorySelect.css'
 
 export interface CategoryItem {
   id: number
@@ -235,6 +244,44 @@ export function splitCategoryPathForListColumn(path: CategoryPathItem[]): {
   return { groupCode, categoryCode, subLabel, tooltip }
 }
 
+function CategoryColorSwatch({ color, className }: { color: string; className?: string }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    ref.current?.style.setProperty('--category-select-swatch-bg', color)
+  }, [color])
+  return <span ref={ref} className={cn('category-select-color-swatch', className)} />
+}
+
+function PathBadgeLabel({
+  children,
+  styleClass,
+  useCustomBg,
+  customBg,
+}: {
+  children: ReactNode
+  styleClass: string
+  useCustomBg: boolean
+  customBg?: string
+}) {
+  const ref = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    if (!useCustomBg || !customBg || !ref.current) return
+    ref.current.style.setProperty('--category-select-path-bg', customBg)
+  }, [useCustomBg, customBg])
+  return (
+    <span
+      ref={ref}
+      className={cn(
+        'inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium',
+        styleClass,
+        useCustomBg && customBg && 'category-select-path-badge-last'
+      )}
+    >
+      {children}
+    </span>
+  )
+}
+
 /** Path'i kademeli badge olarak render et */
 function PathBadges({ path, color }: { path: CategoryPathItem[]; color?: string }) {
   const levelStyles = [
@@ -247,14 +294,12 @@ function PathBadges({ path, color }: { path: CategoryPathItem[]; color?: string 
       {path.map((p, i) => {
         const isLast = i === path.length - 1
         const styleClass = isLast && color ? '' : levelStyles[Math.min(i, 2)]
+        const useCustomBg = Boolean(isLast && color)
         return (
           <span key={i} className="inline-flex items-center gap-1">
-            <span
-              className={cn('inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium', styleClass)}
-              style={isLast && color ? { backgroundColor: color, color: '#fff' } : undefined}
-            >
+            <PathBadgeLabel styleClass={styleClass} useCustomBg={useCustomBg} customBg={color}>
               {p.name} {p.code ? `[${p.code}]` : ''}
-            </span>
+            </PathBadgeLabel>
             {i < path.length - 1 && <span className="text-muted-foreground text-xs">›</span>}
           </span>
         )
@@ -357,6 +402,7 @@ export function CategorySelect({
                   <button
                     key={`${item.level}-${item.id}`}
                     type="button"
+                    aria-label={item.label}
                     onClick={() => {
                       onChange(item.id)
                       setOpen(false)
@@ -420,6 +466,14 @@ export function CategorySelect({
     }
   }, [focusedIndex])
 
+  useLayoutEffect(() => {
+    const el = listRef.current
+    if (!open || !dropdownRect || !el) return
+    el.style.setProperty('--category-select-portal-top', `${dropdownRect.top}px`)
+    el.style.setProperty('--category-select-portal-left', `${dropdownRect.left}px`)
+    el.style.setProperty('--category-select-portal-width', `${dropdownRect.width}px`)
+  }, [open, dropdownRect])
+
   const handleSelect = (item: HierarchyItem) => {
     if (!item.selectable) return
     onChange(item.id)
@@ -467,9 +521,9 @@ export function CategorySelect({
     <div ref={containerRef} className={cn('relative', className)}>
       <div className="relative flex items-center w-full">
         {selectedItem?.color && !open && (
-          <span
+          <CategoryColorSwatch
+            color={selectedItem.color}
             className="absolute left-3 z-10 shrink-0 w-3.5 h-3.5 rounded border pointer-events-none"
-            style={{ backgroundColor: selectedItem.color }}
           />
         )}
         <Input
@@ -493,15 +547,7 @@ export function CategorySelect({
         createPortal(
           <div
             ref={listRef}
-            className="fixed z-[100] rounded-md border bg-popover py-1 shadow-lg"
-            style={{
-              top: dropdownRect.top,
-              left: dropdownRect.left,
-              width: dropdownRect.width,
-              minWidth: 520,
-              maxHeight: 320,
-              overflowY: 'auto',
-            }}
+            className="category-select-dropdown-portal fixed z-[100] rounded-md border bg-popover py-1 shadow-lg"
           >
           <button
             type="button"
@@ -552,9 +598,9 @@ export function CategorySelect({
                   className={rowClass}
                 >
                   {item.color ? (
-                    <span
+                    <CategoryColorSwatch
+                      color={item.color}
                       className="shrink-0 w-3.5 h-3.5 rounded border"
-                      style={{ backgroundColor: item.color }}
                     />
                   ) : (
                     <span
@@ -569,9 +615,9 @@ export function CategorySelect({
               ) : (
                 <div key={`${item.level}-${item.id}`} className={rowClass}>
                   {item.color ? (
-                    <span
+                    <CategoryColorSwatch
+                      color={item.color}
                       className="shrink-0 w-3.5 h-3.5 rounded border"
-                      style={{ backgroundColor: item.color }}
                     />
                   ) : (
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />

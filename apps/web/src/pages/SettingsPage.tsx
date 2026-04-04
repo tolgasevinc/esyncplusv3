@@ -77,7 +77,7 @@ const SETTINGS_GROUPS: SettingsNavGroup[] = [
     icon: Plug,
     items: [
       { label: 'Paraşüt', to: '/ayarlar/entegrasyonlar?tab=parasut' },
-      { label: 'IdeaSoft', to: '/ideasoft' },
+      { label: 'IdeaSoft', to: '/ayarlar/entegrasyonlar?tab=ideasoft' },
       { label: 'Opencart', to: '/opencart' },
       { label: 'Shopify', soon: true },
       { label: 'Trendyol', soon: true },

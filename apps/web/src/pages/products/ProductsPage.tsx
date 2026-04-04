@@ -1821,9 +1821,45 @@ export function ProductsPage() {
                   children: label,
                 }
                 return color ? (
-                  <DynamicBgFgButton key={elemKey} {...commonProps} bg={color} type="button" role="radio" aria-label={label} aria-checked={isActive} />
+                  isActive ? (
+                    <DynamicBgFgButton
+                      key={elemKey}
+                      {...commonProps}
+                      bg={color}
+                      type="button"
+                      role="radio"
+                      aria-label={label}
+                      aria-checked="true"
+                    />
+                  ) : (
+                    <DynamicBgFgButton
+                      key={elemKey}
+                      {...commonProps}
+                      bg={color}
+                      type="button"
+                      role="radio"
+                      aria-label={label}
+                      aria-checked="false"
+                    />
+                  )
+                ) : isActive ? (
+                  <button
+                    key={elemKey}
+                    {...commonProps}
+                    type="button"
+                    role="radio"
+                    aria-label={label}
+                    aria-checked="true"
+                  />
                 ) : (
-                  <button key={elemKey} {...commonProps} type="button" role="radio" aria-label={label} aria-checked={isActive} />
+                  <button
+                    key={elemKey}
+                    {...commonProps}
+                    type="button"
+                    role="radio"
+                    aria-label={label}
+                    aria-checked="false"
+                  />
                 )
               })}
             </div>
@@ -3261,8 +3297,10 @@ export function ProductsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
-            <Label>Yeni tip</Label>
+            <Label htmlFor="bulk-type-select">Yeni tip</Label>
             <select
+              id="bulk-type-select"
+              aria-label="Yeni tip"
               value={bulkTypeId}
               onChange={(e) => setBulkTypeId(e.target.value ? Number(e.target.value) : '')}
               className="flex h-10 w-full mt-2 rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -3294,8 +3332,10 @@ export function ProductsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
-            <Label>Yeni ürün grubu</Label>
+            <Label htmlFor="bulk-item-group-select">Yeni ürün grubu</Label>
             <select
+              id="bulk-item-group-select"
+              aria-label="Yeni ürün grubu"
               value={bulkItemGroupId}
               onChange={(e) => setBulkItemGroupId(e.target.value ? Number(e.target.value) : '')}
               className="flex h-10 w-full mt-2 rounded-md border border-input bg-background px-3 py-2 text-sm"
