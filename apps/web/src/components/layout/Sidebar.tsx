@@ -50,6 +50,8 @@ export function Sidebar() {
       '/ideasoft/para-birimleri',
       '/ideasoft/markalar',
       '/ideasoft/kategoriler',
+      '/ideasoft/birimler',
+      '/ideasoft/urunler',
     ]
     if (collapsePaths.includes(location.pathname)) {
       setCollapsed(true)

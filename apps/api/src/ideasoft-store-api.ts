@@ -3,7 +3,7 @@
  * OAuth2 (dökümanlar): authorizationUrl …/panel/auth, tokenUrl …/oauth/v2/token, akış authorization_code.
  * Access token ~24 saat; refresh token ile yenileme; refresh ~2 ay sonra yeniden yetkilendirme.
  * Store API: {mağaza}/api/...
- * Admin API: {mağaza}/admin/api/... (IdeaSoft yaygın yol; aynı Bearer token)
+ * Admin API: {mağaza}/admin-api/... (Stoplight / PDF; aynı Bearer token)
  */
 
 /** Süre dolmadan ~5 dk önce yenile (saat kayması / gecikmeli istekler için) */
@@ -81,7 +81,7 @@ export async function ideasoftStoreApiRequest(
 }
 
 /**
- * Admin API — {storeBase}/admin/api/...
+ * Admin API — {storeBase}/admin-api/...
  * Authentication Admin API.pdf ile aynı OAuth token kullanılır.
  */
 export async function ideasoftAdminApiRequest(
@@ -91,7 +91,7 @@ export async function ideasoftAdminApiRequest(
   init?: RequestInit
 ): Promise<Response> {
   const path = pathAndQuery.startsWith('/') ? pathAndQuery : `/${pathAndQuery}`;
-  const url = `${storeBase}/admin/api${path}`;
+  const url = `${storeBase}/admin-api${path}`;
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${token}`);
   if (!headers.has('Accept')) headers.set('Accept', 'application/json');
@@ -385,7 +385,7 @@ export async function ideasoftDoStoreRequestWithRefresh(
   return ideasoftDoRequestWithRefresh(db, pathAndQuery, init, ideasoftStoreApiRequest, auth);
 }
 
-/** Admin API proxy — aynı OAuth; path `/currencies` → GET {base}/admin/api/currencies */
+/** Admin API proxy — aynı OAuth; path `/currencies` → GET {base}/admin-api/currencies */
 export async function ideasoftDoAdminRequestWithRefresh(
   db: D1Database,
   pathAndQuery: string,

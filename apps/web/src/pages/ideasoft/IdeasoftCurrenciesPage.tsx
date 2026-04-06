@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Search, Save, X } from 'lucide-react'
+import { Link2, Search, Save, X } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -81,6 +81,36 @@ function emptyCurrency(): IdeasoftCurrency {
   }
 }
 
+interface MasterCurrency {
+  id: number
+  name: string
+  code?: string
+  symbol?: string
+}
+
+/** ideasoft_currency_id (string) → master product_currencies.id (string) */
+function applyIdeasoftCurrencyMapping(
+  prev: Record<string, string>,
+  ideasoftCurrencyId: string,
+  masterCurrencyId: string
+): Record<string, string> {
+  const next = { ...prev }
+  for (const [k, v] of Object.entries(next)) {
+    if (v === masterCurrencyId && k !== ideasoftCurrencyId) delete next[k]
+  }
+  next[ideasoftCurrencyId] = masterCurrencyId
+  return next
+}
+
+function removeIdeasoftCurrencyMappingKey(
+  prev: Record<string, string>,
+  ideasoftCurrencyId: string
+): Record<string, string> {
+  const next = { ...prev }
+  delete next[ideasoftCurrencyId]
+  return next
+}
+
 export function IdeasoftCurrenciesPage() {
   const [listState, setListState] = usePersistedListState('ideasoft-currencies-v2', listDefaults)
   const { search, page, pageSize, fitLimit, statusFilter } = listState
@@ -93,6 +123,14 @@ export function IdeasoftCurrenciesPage() {
   const [form, setForm] = useState<IdeasoftCurrency>(emptyCurrency())
   const [saving, setSaving] = useState(false)
   const [loadDetailPending, setLoadDetailPending] = useState(false)
+  const [masterCurrencies, setMasterCurrencies] = useState<MasterCurrency[]>([])
+  const [masterLoading, setMasterLoading] = useState(false)
+  const [currencyMappings, setCurrencyMappings] = useState<Record<string, string>>({})
+  const [mappingsLoading, setMappingsLoading] = useState(false)
+  const [matchPickerRow, setMatchPickerRow] = useState<IdeasoftCurrency | null>(null)
+  const [matchPickerSearch, setMatchPickerSearch] = useState('')
+  const [matchPickerSelectedMasterId, setMatchPickerSelectedMasterId] = useState<number | null>(null)
+  const [savingMapping, setSavingMapping] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
   const limit =
     pageSize === 'fit' ? Math.min(100, Math.max(1, fitLimit)) : Math.min(100, Math.max(1, pageSize))
@@ -138,6 +176,148 @@ export function IdeasoftCurrenciesPage() {
   useEffect(() => {
     fetchList()
   }, [fetchList])
+
+  const fetchMappings = useCallback(async () => {
+    setMappingsLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`)
+      const data = await parseJsonResponse<{ mappings?: Record<string, string> }>(res)
+      setCurrencyMappings(data.mappings && typeof data.mappings === 'object' ? data.mappings : {})
+    } catch {
+      setCurrencyMappings({})
+    } finally {
+      setMappingsLoading(false)
+    }
+  }, [])
+
+  const fetchMasterCurrencies = useCallback(async () => {
+    setMasterLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/product-currencies?limit=9999`)
+      const data = await parseJsonResponse<{
+        data?: { id: number; name: string; code?: string; symbol?: string }[]
+        error?: string
+      }>(res)
+      if (!res.ok) throw new Error(data.error || 'Master para birimleri yüklenemedi')
+      setMasterCurrencies(
+        (data.data ?? []).map((x) => ({
+          id: x.id,
+          name: x.name,
+          code: x.code,
+          symbol: x.symbol,
+        }))
+      )
+    } catch {
+      setMasterCurrencies([])
+    } finally {
+      setMasterLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void fetchMappings()
+    void fetchMasterCurrencies()
+  }, [fetchMappings, fetchMasterCurrencies])
+
+  const masterById = useMemo(() => new Map(masterCurrencies.map((c) => [c.id, c])), [masterCurrencies])
+
+  const matchPickerFilteredCurrencies = useMemo(() => {
+    const q = matchPickerSearch.trim().toLowerCase()
+    if (!q) return masterCurrencies
+    return masterCurrencies.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        (c.code && c.code.toLowerCase().includes(q)) ||
+        (c.symbol && c.symbol.toLowerCase().includes(q)) ||
+        String(c.id).includes(q)
+    )
+  }, [masterCurrencies, matchPickerSearch])
+
+  const openMatchPicker = (row: IdeasoftCurrency, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMatchPickerRow(row)
+    setMatchPickerSearch('')
+    const cur = currencyMappings[String(row.id)]
+    setMatchPickerSelectedMasterId(cur ? parseInt(cur, 10) || null : null)
+  }
+
+  const closeMatchPicker = () => {
+    setMatchPickerRow(null)
+    setMatchPickerSearch('')
+    setMatchPickerSelectedMasterId(null)
+  }
+
+  const saveCurrencyMapping = async () => {
+    if (!matchPickerRow || matchPickerSelectedMasterId == null) return
+    const isKey = String(matchPickerRow.id)
+    const masterKey = String(matchPickerSelectedMasterId)
+    setSavingMapping(true)
+    try {
+      const next = applyIdeasoftCurrencyMapping(currencyMappings, isKey, masterKey)
+      const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCurrencyMappings(next)
+      toastSuccess('Eşleştirildi', 'IdeaSoft para birimi master kayıt ile bağlandı.')
+      closeMatchPicker()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setSavingMapping(false)
+    }
+  }
+
+  const clearCurrencyMapping = async () => {
+    if (!matchPickerRow) return
+    const isKey = String(matchPickerRow.id)
+    setSavingMapping(true)
+    try {
+      const next = removeIdeasoftCurrencyMappingKey(currencyMappings, isKey)
+      const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCurrencyMappings(next)
+      toastSuccess('Kaldırıldı', 'Master para birimi eşleştirmesi silindi.')
+      closeMatchPicker()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setSavingMapping(false)
+    }
+  }
+
+  const clearCurrencyMappingInline = async (row: IdeasoftCurrency, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const isKey = String(row.id)
+    if (!currencyMappings[isKey]) return
+    setSavingMapping(true)
+    try {
+      const next = removeIdeasoftCurrencyMappingKey(currencyMappings, isKey)
+      const res = await fetch(`${API_URL}/api/ideasoft/currency-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCurrencyMappings(next)
+      toastSuccess('Kaldırıldı', 'Eşleştirme kaldırıldı.')
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setSavingMapping(false)
+    }
+  }
 
   const openEdit = async (row: IdeasoftCurrency) => {
     setEditId(row.id)
@@ -215,12 +395,16 @@ export function IdeasoftCurrenciesPage() {
   return (
     <PageLayout
       title="IdeaSoft — Para birimleri"
-      description="Store API: GET /api/currencies (liste), GET/PUT /api/currencies/{id}"
+      description="Store API kur listesi; master eşleştirme Parametreler › Para birimleri (product_currencies)."
       backTo="/ideasoft"
       contentRef={contentRef}
       contentOverflow="hidden"
       showRefresh
-      onRefresh={fetchList}
+      onRefresh={() => {
+        void fetchList()
+        void fetchMappings()
+        void fetchMasterCurrencies()
+      }}
       headerActions={
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
@@ -313,18 +497,20 @@ export function IdeasoftCurrenciesPage() {
                   <th className="text-center p-2 font-medium w-24">Durum</th>
                   <th className="text-right p-2 font-medium">Alış</th>
                   <th className="text-right p-2 font-medium">Satış</th>
+                  <th className="text-left p-2 font-medium min-w-[140px]">Master</th>
+                  <th className="text-center p-2 font-medium w-[200px]">Eşleştir / Kaldır</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={8} className="p-8 text-center text-muted-foreground">
                       Yükleniyor...
                     </td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={8} className="p-8 text-center text-muted-foreground">
                       Kayıt yok veya liste boş.
                     </td>
                   </tr>
@@ -365,6 +551,71 @@ export function IdeasoftCurrenciesPage() {
                       </td>
                       <td className="p-2 text-right tabular-nums">{row.buyingPrice}</td>
                       <td className="p-2 text-right tabular-nums">{row.sellingPrice}</td>
+                      <td className="p-2 text-muted-foreground truncate max-w-[200px]">
+                        {(() => {
+                          const mid = currencyMappings[String(row.id)]
+                          if (!mid) return mappingsLoading ? '…' : '—'
+                          const mc = masterById.get(parseInt(mid, 10))
+                          if (!mc) return <span className="tabular-nums">#{mid}</span>
+                          const sym = mc.symbol ? ` ${mc.symbol}` : ''
+                          return (
+                            <span
+                              className="text-foreground"
+                              title={
+                                mc.code
+                                  ? `${mc.name} (${mc.code})${sym}`
+                                  : `${mc.name}${sym}`
+                              }
+                            >
+                              <span className="truncate">{mc.name}</span>
+                              {mc.code && (
+                                <span className="text-xs text-muted-foreground ml-1 shrink-0">
+                                  ({mc.code})
+                                </span>
+                              )}
+                            </span>
+                          )
+                        })()}
+                      </td>
+                      <td className="p-2 text-center" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex flex-wrap items-center justify-center gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs gap-1"
+                                onClick={(e) => openMatchPicker(row, e)}
+                                disabled={masterLoading}
+                              >
+                                <Link2 className="h-3.5 w-3.5 shrink-0" />
+                                Eşleştir
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Master para birimi seç</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs text-destructive hover:text-destructive"
+                                onClick={(e) => void clearCurrencyMappingInline(row, e)}
+                                disabled={
+                                  !currencyMappings[String(row.id)] ||
+                                  savingMapping ||
+                                  mappingsLoading
+                                }
+                              >
+                                Kaldır
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Master eşleştirmesini kaldır</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </td>
                     </tr>
                   ))
                 )}
@@ -486,6 +737,117 @@ export function IdeasoftCurrenciesPage() {
                 </Button>
               </DialogFooter>
             </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!matchPickerRow} onOpenChange={(open) => !open && closeMatchPicker()}>
+        <DialogContent className="max-w-md max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>
+              Master para birimi eşleştir
+              {matchPickerRow && (
+                <span className="block text-sm font-normal text-muted-foreground mt-1 truncate">
+                  IdeaSoft: {matchPickerRow.abbr || matchPickerRow.label || `#${matchPickerRow.id}`}
+                </span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          {matchPickerRow && (
+            <>
+              {currencyMappings[String(matchPickerRow.id)] && (
+                <p className="text-sm text-muted-foreground">
+                  Mevcut:{' '}
+                  <span className="text-foreground font-medium">
+                    {(() => {
+                      const id = parseInt(currencyMappings[String(matchPickerRow.id)]!, 10)
+                      const c = masterById.get(id)
+                      return c
+                        ? `${c.name}${c.code ? ` (${c.code})` : ''}${c.symbol ? ` ${c.symbol}` : ''}`
+                        : `#${currencyMappings[String(matchPickerRow.id)]}`
+                    })()}
+                  </span>
+                </p>
+              )}
+              <div className="relative shrink-0">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Master para birimi ara (ad, kod, sembol, id)..."
+                  value={matchPickerSearch}
+                  onChange={(e) => setMatchPickerSearch(e.target.value)}
+                  className="pl-8 h-9"
+                />
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto rounded-md border">
+                {masterLoading ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    Master para birimleri yükleniyor…
+                  </div>
+                ) : masterCurrencies.length === 0 ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    Master kayıt yok. Önce Parametreler › Para birimleri üzerinden ekleyin.
+                  </div>
+                ) : matchPickerFilteredCurrencies.length === 0 ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">Sonuç yok.</div>
+                ) : (
+                  <div className="p-1 space-y-0.5">
+                    {matchPickerFilteredCurrencies.map((c) => {
+                      const selected = matchPickerSelectedMasterId === c.id
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setMatchPickerSelectedMasterId(c.id)}
+                          className={cn(
+                            'w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-2 min-w-0',
+                            selected ? 'bg-primary/15 ring-1 ring-primary/30' : 'hover:bg-muted/60'
+                          )}
+                        >
+                          <span className="font-medium truncate min-w-0">{c.name}</span>
+                          {c.code && (
+                            <span className="text-xs text-muted-foreground shrink-0">({c.code})</span>
+                          )}
+                          {c.symbol && (
+                            <span className="text-xs text-muted-foreground shrink-0">{c.symbol}</span>
+                          )}
+                          <span className="text-xs text-muted-foreground tabular-nums shrink-0 ml-auto">
+                            #{c.id}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+              <DialogFooter className="flex-col sm:flex-row gap-2 sm:justify-between sm:gap-0">
+                <div className="flex gap-2 w-full sm:w-auto">
+                  {currencyMappings[String(matchPickerRow.id)] && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => void clearCurrencyMapping()}
+                      disabled={savingMapping}
+                    >
+                      Kaldır
+                    </Button>
+                  )}
+                </div>
+                <div className="flex gap-2 justify-end w-full sm:w-auto">
+                  <Button type="button" variant="outline" onClick={closeMatchPicker} disabled={savingMapping}>
+                    İptal
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="save"
+                    disabled={savingMapping || matchPickerSelectedMasterId == null}
+                    onClick={() => void saveCurrencyMapping()}
+                  >
+                    {savingMapping ? 'Kaydediliyor...' : 'Kaydet'}
+                  </Button>
+                </div>
+              </DialogFooter>
+            </>
           )}
         </DialogContent>
       </Dialog>

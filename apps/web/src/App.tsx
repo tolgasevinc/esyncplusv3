@@ -61,6 +61,12 @@ const IdeasoftBrandsPage = lazy(() =>
 const IdeasoftCategoriesPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftCategoriesPage').then((m) => ({ default: m.IdeasoftCategoriesPage }))
 )
+const IdeasoftProductsPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftProductsPage').then((m) => ({ default: m.IdeasoftProductsPage }))
+)
+const IdeasoftUnitsPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftUnitsPage').then((m) => ({ default: m.IdeasoftUnitsPage }))
+)
 const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
 function App() {
   return (
@@ -89,6 +95,8 @@ function App() {
         <Route path="/ideasoft/para-birimleri" element={<IdeasoftCurrenciesPage />} />
         <Route path="/ideasoft/markalar" element={<IdeasoftBrandsPage />} />
         <Route path="/ideasoft/kategoriler" element={<IdeasoftCategoriesPage />} />
+        <Route path="/ideasoft/urunler" element={<IdeasoftProductsPage />} />
+        <Route path="/ideasoft/birimler" element={<IdeasoftUnitsPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />

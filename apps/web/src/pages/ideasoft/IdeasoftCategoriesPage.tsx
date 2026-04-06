@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, Search, Save, Trash2, X } from 'lucide-react'
+import { Link2, Plus, Search, Save, Trash2, Unlink, X } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,6 +23,8 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { toastSuccess, toastError } from '@/lib/toast'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import type { CategoryItem } from '@/components/CategorySelect'
+import { MasterCategoryTreePicker } from '@/components/MasterCategoryTreePicker'
 
 /** Admin API Category — LIST/GET (PDF) */
 export interface IdeasoftCategoryRow {
@@ -50,6 +52,30 @@ const listDefaults = {
   cascadePath: [] as number[],
 }
 
+/** parseInt gevşek; "12abc"→12 ve "0" gibi değerler yanlış kilitlemeye yol açmasın */
+function parseStrictPositiveId(raw: unknown): number | null {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  if (!/^\d+$/.test(s)) return null
+  const n = Number(s)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n
+}
+
+function sanitizeIdeasoftCategoryMappings(raw: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, val] of Object.entries(raw)) {
+    const ks = String(k).trim()
+    if (!/^\d+$/.test(ks)) continue
+    const ideasoftId = Number(ks)
+    if (!Number.isFinite(ideasoftId) || ideasoftId <= 0) continue
+    const mid = parseStrictPositiveId(val)
+    if (mid == null) continue
+    out[String(ideasoftId)] = String(mid)
+  }
+  return out
+}
+
 function normalizeAdminImageUrl(u: string | undefined | null): string | null {
   const s = (u || '').trim()
   if (!s) return null
@@ -70,10 +96,30 @@ function extractCategoriesList(json: unknown): { items: IdeasoftCategoryRow[]; t
         typeof o['hydra:totalItems'] === 'number' ? (o['hydra:totalItems'] as number) : hydra.length
       return { items: hydra as IdeasoftCategoryRow[], total }
     }
+    const member = o.member
+    if (Array.isArray(member)) {
+      const total =
+        typeof o['hydra:totalItems'] === 'number'
+          ? (o['hydra:totalItems'] as number)
+          : typeof o.total === 'number'
+            ? o.total
+            : member.length
+      return { items: member as IdeasoftCategoryRow[], total }
+    }
     if (Array.isArray(o.data)) {
       const d = o.data as IdeasoftCategoryRow[]
       const total = typeof o.total === 'number' ? o.total : d.length
       return { items: d, total }
+    }
+    const items = o.items
+    if (Array.isArray(items)) {
+      const total = typeof o.total === 'number' ? o.total : items.length
+      return { items: items as IdeasoftCategoryRow[], total }
+    }
+    const categories = o.categories
+    if (Array.isArray(categories)) {
+      const total = typeof o.total === 'number' ? o.total : categories.length
+      return { items: categories as IdeasoftCategoryRow[], total }
     }
   }
   return { items: [], total: 0 }
@@ -95,19 +141,53 @@ function listParentId(path: number[]): number {
   return path.length === 0 ? 0 : path[path.length - 1]!
 }
 
+/**
+ * IdeaSoft Admin API: `parent=0` göndermek 400 döndürüyor
+ * ("The string '0' can only be null or digits." — kök için parametre gönderilmemeli).
+ * Üst kategori > 0 ise `parent` eklenir.
+ */
+function appendCategoryParentParam(params: URLSearchParams, parentId: number) {
+  if (parentId > 0) params.set('parent', String(parentId))
+}
+
+function parentIdFromCategoryListRow(row: Record<string, unknown>): number | null {
+  const p = row.parent
+  if (p == null) return null
+  if (typeof p === 'object' && p !== null && !Array.isArray(p) && 'id' in p) {
+    const id = Number((p as { id: unknown }).id)
+    return Number.isFinite(id) ? id : null
+  }
+  return null
+}
+
+/** `parent` gönderilmeden gelen listede yalnızca 1. seviye (üst id yok veya 0). */
+function filterToRootLevelCategories(items: IdeasoftCategoryRow[]): IdeasoftCategoryRow[] {
+  const raw = items as unknown as Record<string, unknown>[]
+  const anyChildRow = raw.some((r) => {
+    const pid = parentIdFromCategoryListRow(r)
+    return pid != null && pid > 0
+  })
+  if (!anyChildRow) return items
+  return items.filter((_, i) => {
+    const pid = parentIdFromCategoryListRow(raw[i]!)
+    return pid == null || pid === 0
+  })
+}
+
 async function fetchCategoryOptions(
   parentId: number
 ): Promise<{ id: number; name: string }[]> {
   const params = new URLSearchParams({
-    parent: String(parentId),
     limit: '100',
     page: '1',
-    sort: 'sortOrder',
+    sort: 'id',
   })
+  appendCategoryParentParam(params, parentId)
   const res = await fetch(`${API_URL}/api/ideasoft/admin-api/categories?${params}`)
   const data = await parseJsonResponse<unknown>(res)
   if (!res.ok) return []
-  const { items } = extractCategoriesList(data)
+  let { items } = extractCategoriesList(data)
+  if (parentId === 0) items = filterToRootLevelCategories(items)
   return items.map((x) => ({ id: x.id, name: x.name ?? `#${x.id}` }))
 }
 
@@ -244,7 +324,9 @@ function categoryFormToPayload(
 
 const CANONICAL_RE = /^[a-z0-9-/]+$/
 
-function CascadeSelects({
+const CASCADE_MAX_DEPTH = 3
+
+function CategoryCascadeThreeSelects({
   path,
   onPathChange,
   disabled,
@@ -253,42 +335,68 @@ function CascadeSelects({
   onPathChange: (next: number[]) => void
   disabled?: boolean
 }) {
-  const [optionsByLevel, setOptionsByLevel] = useState<{ id: number; name: string }[][]>([])
-  const loadingRef = useRef(false)
+  const onPathChangeRef = useRef(onPathChange)
+  onPathChangeRef.current = onPathChange
+  const pathRef = useRef(path)
+  pathRef.current = path
+
+  const [opt1, setOpt1] = useState<{ id: number; name: string }[]>([])
+  const [opt2, setOpt2] = useState<{ id: number; name: string }[]>([])
+  const [opt3, setOpt3] = useState<{ id: number; name: string }[]>([])
+
+  const idL1 = path[0]
+  const idL2 = path[1]
 
   useEffect(() => {
     let cancel = false
-    const run = async () => {
-      loadingRef.current = true
-      const levels: { id: number; name: string }[][] = []
-      try {
-        let parentId = 0
-        const maxLevels = Math.max(1, path.length + 1)
-        for (let depth = 0; depth < maxLevels && depth < 12; depth++) {
-          const opts = await fetchCategoryOptions(parentId)
-          if (cancel) return
-          levels.push(opts)
-          if (depth < path.length) {
-            const nextId = path[depth]
-            if (opts.some((o) => o.id === nextId)) {
-              parentId = nextId!
-            } else {
-              break
-            }
-          } else {
-            break
-          }
-        }
-        if (!cancel) setOptionsByLevel(levels)
-      } finally {
-        loadingRef.current = false
-      }
-    }
-    void run()
+    void (async () => {
+      const o = await fetchCategoryOptions(0)
+      if (!cancel) setOpt1(o)
+    })()
     return () => {
       cancel = true
     }
-  }, [path])
+  }, [])
+
+  useEffect(() => {
+    let cancel = false
+    if (idL1 == null) {
+      setOpt2([])
+      return
+    }
+    void (async () => {
+      const o = await fetchCategoryOptions(idL1)
+      if (cancel) return
+      setOpt2(o)
+      const p = pathRef.current
+      if (p[1] != null && !o.some((x) => x.id === p[1])) {
+        onPathChangeRef.current(p.slice(0, 1))
+      }
+    })()
+    return () => {
+      cancel = true
+    }
+  }, [idL1])
+
+  useEffect(() => {
+    let cancel = false
+    if (idL2 == null) {
+      setOpt3([])
+      return
+    }
+    void (async () => {
+      const o = await fetchCategoryOptions(idL2)
+      if (cancel) return
+      setOpt3(o)
+      const p = pathRef.current
+      if (p[2] != null && !o.some((x) => x.id === p[2])) {
+        onPathChangeRef.current(p.slice(0, 2))
+      }
+    })()
+    return () => {
+      cancel = true
+    }
+  }, [idL2])
 
   const setLevel = (levelIndex: number, raw: string) => {
     if (raw === '') {
@@ -297,57 +405,80 @@ function CascadeSelects({
     }
     const id = parseInt(raw, 10)
     if (!Number.isFinite(id)) return
-    const next = [...path.slice(0, levelIndex), id]
+    const next = [...path.slice(0, levelIndex), id].slice(0, CASCADE_MAX_DEPTH)
     onPathChange(next)
   }
 
-  const levelCount = Math.max(1, path.length + 1)
+  const v1 = path[0] != null ? String(path[0]) : ''
+  const v2 = path[1] != null ? String(path[1]) : ''
+  const v3 = path[2] != null ? String(path[2]) : ''
+
+  const selClass =
+    'h-9 min-w-[9.5rem] max-w-[11rem] flex-1 rounded-md border border-input bg-background px-2 text-sm truncate'
 
   return (
-    <div className="flex flex-wrap items-end gap-2">
-      {Array.from({ length: levelCount }, (_, levelIndex) => {
-        const opts = optionsByLevel[levelIndex] ?? []
-        const value = path[levelIndex] != null ? String(path[levelIndex]) : ''
-        const label =
-          levelIndex === 0
-            ? 'Kök kategori'
-            : `${levelIndex + 1}. seviye`
-        return (
-          <div key={levelIndex} className="flex flex-col gap-1 min-w-[160px]">
-            <Label htmlFor={`ideasoft-cat-cascade-${levelIndex}`} className="text-xs text-muted-foreground">
-              {label}
-            </Label>
-            <select
-              id={`ideasoft-cat-cascade-${levelIndex}`}
-              aria-label={label}
-              className={cn(
-                'h-9 w-full rounded-md border border-input bg-background px-2 text-sm',
-                disabled && 'opacity-50 pointer-events-none'
-              )}
-              value={value}
-              disabled={disabled}
-              onChange={(e) => setLevel(levelIndex, e.target.value)}
-            >
-              <option value="">{levelIndex === 0 ? '— Kök listesi —' : '— Seçin —'}</option>
-              {opts.map((o) => (
-                <option key={o.id} value={String(o.id)}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )
-      })}
+    <div className="flex flex-wrap items-center gap-2 min-w-0">
+      <select
+        id="ideasoft-cat-cascade-l1"
+        aria-label="Kategori"
+        className={cn(selClass, disabled && 'opacity-50 pointer-events-none')}
+        value={v1}
+        disabled={disabled}
+        onChange={(e) => setLevel(0, e.target.value)}
+      >
+        <option value="">— Kategori —</option>
+        {opt1.map((o) => (
+          <option key={o.id} value={String(o.id)}>
+            {o.name}
+          </option>
+        ))}
+      </select>
+      <select
+        id="ideasoft-cat-cascade-l2"
+        aria-label="2. seviye kategori"
+        className={cn(
+          selClass,
+          (disabled || idL1 == null) && 'opacity-50 pointer-events-none cursor-not-allowed'
+        )}
+        value={v2}
+        disabled={disabled || idL1 == null}
+        onChange={(e) => setLevel(1, e.target.value)}
+      >
+        <option value="">— 2. seviye —</option>
+        {opt2.map((o) => (
+          <option key={o.id} value={String(o.id)}>
+            {o.name}
+          </option>
+        ))}
+      </select>
+      <select
+        id="ideasoft-cat-cascade-l3"
+        aria-label="3. seviye kategori"
+        className={cn(
+          selClass,
+          (disabled || idL2 == null) && 'opacity-50 pointer-events-none cursor-not-allowed'
+        )}
+        value={v3}
+        disabled={disabled || idL2 == null}
+        onChange={(e) => setLevel(2, e.target.value)}
+      >
+        <option value="">— 3. seviye —</option>
+        {opt3.map((o) => (
+          <option key={o.id} value={String(o.id)}>
+            {o.name}
+          </option>
+        ))}
+      </select>
       {path.length > 0 && (
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          className="h-9 mt-auto"
+          className="h-9 shrink-0 px-2"
           disabled={disabled}
           onClick={() => onPathChange([])}
         >
-          Sıfırla
+          Kategori sıfırla
         </Button>
       )}
     </div>
@@ -363,6 +494,29 @@ function CategoryLogoAvatar({ imageUrlRaw, name }: { imageUrlRaw?: string; name?
       <AvatarFallback className="rounded-md text-[10px] font-medium">{initial}</AvatarFallback>
     </Avatar>
   )
+}
+
+/** IdeaSoft kategori id (string) → master product_categories.id (string) */
+function applyIdeasoftCategoryMapping(
+  prev: Record<string, string>,
+  ideasoftCategoryId: string,
+  masterCategoryId: string
+): Record<string, string> {
+  const next = { ...prev }
+  for (const [k, v] of Object.entries(next)) {
+    if (v === masterCategoryId && k !== ideasoftCategoryId) delete next[k]
+  }
+  next[ideasoftCategoryId] = masterCategoryId
+  return next
+}
+
+function removeIdeasoftCategoryMappingKey(
+  prev: Record<string, string>,
+  ideasoftCategoryId: string
+): Record<string, string> {
+  const next = { ...prev }
+  delete next[ideasoftCategoryId]
+  return next
 }
 
 export function IdeasoftCategoriesPage() {
@@ -381,20 +535,33 @@ export function IdeasoftCategoriesPage() {
   const [loadDetailPending, setLoadDetailPending] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [masterCategoryItems, setMasterCategoryItems] = useState<CategoryItem[]>([])
+  const [masterLoading, setMasterLoading] = useState(false)
+  const [categoryMappings, setCategoryMappings] = useState<Record<string, string>>({})
+  const [mappingsLoading, setMappingsLoading] = useState(false)
+  const [matchPickerRow, setMatchPickerRow] = useState<IdeasoftCategoryRow | null>(null)
+  const [matchPickerSearch, setMatchPickerSearch] = useState('')
+  const [matchPickerSelectedMasterId, setMatchPickerSelectedMasterId] = useState<number | null>(null)
+  const [savingMapping, setSavingMapping] = useState(false)
+  const [clearAllMappingsOpen, setClearAllMappingsOpen] = useState(false)
+  const [clearingAllMappings, setClearingAllMappings] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
   const limit =
     pageSize === 'fit' ? Math.min(100, Math.max(1, fitLimit)) : Math.min(100, Math.max(1, pageSize))
-  const parentListId = listParentId(cascadePath)
+  const cascadePathEffective = cascadePath.slice(0, CASCADE_MAX_DEPTH)
+  const parentListId = listParentId(cascadePathEffective)
   const hasFilter =
-    search.length > 0 || statusFilter !== 'active' || cascadePath.length > 0
+    search.length > 0 || statusFilter !== 'active' || cascadePathEffective.length > 0
+
+  const categoryMappingCount = useMemo(() => Object.keys(categoryMappings).length, [categoryMappings])
 
   const buildListParams = useCallback(() => {
     const params = new URLSearchParams({
       page: String(page),
       limit: String(limit),
-      sort: 'sortOrder',
-      parent: String(parentListId),
+      sort: 'id',
     })
+    appendCategoryParentParam(params, parentListId)
     if (search.trim()) params.set('s', search.trim())
     if (statusFilter === 'active') params.set('status', '1')
     else if (statusFilter === 'inactive') params.set('status', '0')
@@ -447,6 +614,191 @@ export function IdeasoftCategoriesPage() {
   useEffect(() => {
     fetchList()
   }, [fetchList])
+
+  const fetchMappings = useCallback(async () => {
+    setMappingsLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`)
+      const data = await parseJsonResponse<{ mappings?: Record<string, unknown> }>(res)
+      const raw = data.mappings && typeof data.mappings === 'object' ? data.mappings : {}
+      setCategoryMappings(sanitizeIdeasoftCategoryMappings(raw))
+    } catch {
+      setCategoryMappings({})
+    } finally {
+      setMappingsLoading(false)
+    }
+  }, [])
+
+  const fetchMasterCategories = useCallback(async () => {
+    setMasterLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/product-categories?limit=9999`)
+      const data = await parseJsonResponse<{
+        data?: {
+          id: number
+          name: string
+          code?: string | null
+          group_id?: number | null
+          category_id?: number | null
+          sort_order?: number
+          color?: string | null
+        }[]
+        error?: string
+      }>(res)
+      if (!res.ok) throw new Error(data.error || 'Master kategoriler yüklenemedi')
+      setMasterCategoryItems(
+        (data.data ?? []).map((x) => ({
+          id: x.id,
+          name: x.name,
+          code: x.code ?? '',
+          group_id: x.group_id ?? undefined,
+          category_id: x.category_id ?? undefined,
+          sort_order: x.sort_order,
+          color: x.color ?? undefined,
+        }))
+      )
+    } catch {
+      setMasterCategoryItems([])
+    } finally {
+      setMasterLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void fetchMappings()
+    void fetchMasterCategories()
+  }, [fetchMappings, fetchMasterCategories])
+
+  const masterById = useMemo(
+    () => new Map(masterCategoryItems.map((c) => [c.id, c])),
+    [masterCategoryItems]
+  )
+
+  const validMasterIdSet = useMemo(
+    () => new Set(masterCategoryItems.map((c) => c.id)),
+    [masterCategoryItems]
+  )
+
+  /** Yalnızca gerçekten master tabloda var olan id’ler — silinmiş/çöp eşleştirme ağacı kilitlemesin */
+  const masterIdsOccupiedByOtherIdeasoft = useMemo(() => {
+    if (!matchPickerRow) return new Set<number>() as ReadonlySet<number>
+    const cur = String(matchPickerRow.id)
+    const s = new Set<number>()
+    for (const [isKey, masterStr] of Object.entries(categoryMappings)) {
+      if (isKey === cur) continue
+      const mid = parseStrictPositiveId(masterStr)
+      if (mid == null || !validMasterIdSet.has(mid)) continue
+      s.add(mid)
+    }
+    return s
+  }, [categoryMappings, matchPickerRow, validMasterIdSet])
+
+  const openMatchPicker = (row: IdeasoftCategoryRow, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMatchPickerRow(row)
+    setMatchPickerSearch('')
+    const m = parseStrictPositiveId(categoryMappings[String(row.id)])
+    setMatchPickerSelectedMasterId(m != null && validMasterIdSet.has(m) ? m : null)
+  }
+
+  const closeMatchPicker = () => {
+    setMatchPickerRow(null)
+    setMatchPickerSearch('')
+    setMatchPickerSelectedMasterId(null)
+  }
+
+  const saveCategoryMapping = async () => {
+    if (!matchPickerRow || matchPickerSelectedMasterId == null) return
+    const isKey = String(matchPickerRow.id)
+    const masterKey = String(matchPickerSelectedMasterId)
+    setSavingMapping(true)
+    try {
+      const next = applyIdeasoftCategoryMapping(categoryMappings, isKey, masterKey)
+      const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
+      toastSuccess('Eşleştirildi', 'IdeaSoft kategorisi master kategori ile bağlandı.')
+      closeMatchPicker()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setSavingMapping(false)
+    }
+  }
+
+  const clearCategoryMapping = async () => {
+    if (!matchPickerRow) return
+    const isKey = String(matchPickerRow.id)
+    setSavingMapping(true)
+    try {
+      const next = removeIdeasoftCategoryMappingKey(categoryMappings, isKey)
+      const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
+      toastSuccess('Kaldırıldı', 'Master kategori eşleştirmesi silindi.')
+      closeMatchPicker()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setSavingMapping(false)
+    }
+  }
+
+  const clearCategoryMappingInline = async (row: IdeasoftCategoryRow, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const isKey = String(row.id)
+    if (!categoryMappings[isKey]) return
+    setSavingMapping(true)
+    try {
+      const next = removeIdeasoftCategoryMappingKey(categoryMappings, isKey)
+      const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: next }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
+      toastSuccess('Kaldırıldı', 'Eşleştirme kaldırıldı.')
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setSavingMapping(false)
+    }
+  }
+
+  const clearAllIdeasoftCategoryMappings = async () => {
+    setClearingAllMappings(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: {} }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      setCategoryMappings({})
+      closeMatchPicker()
+      setClearAllMappingsOpen(false)
+      toastSuccess('Temizlendi', 'Tüm IdeaSoft–master kategori eşleştirmeleri kaldırıldı.')
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setClearingAllMappings(false)
+    }
+  }
 
   const closeModal = () => {
     setModalOpen(false)
@@ -556,98 +908,120 @@ export function IdeasoftCategoriesPage() {
     }
   }
 
-  const headerCascade = useMemo(
-    () => (
-      <CascadeSelects
-        path={cascadePath}
-        disabled={loading}
-        onPathChange={(next) => setListState({ cascadePath: next, page: 1 })}
-      />
-    ),
-    [cascadePath, loading, setListState]
+  const onCascadePathChange = useCallback(
+    (next: number[]) =>
+      setListState({ cascadePath: next.slice(0, CASCADE_MAX_DEPTH), page: 1 }),
+    [setListState]
   )
 
   return (
     <PageLayout
       title="IdeaSoft — Kategoriler"
-      description="Admin API: LIST/GET/POST/PUT/DELETE /admin-api/categories, COUNT /count, arama ağacı /search_tree; filtre üst üste seviye."
+      description="Admin API kategoriler; master eşleştirme Parametreler › Kategoriler (product_categories) ile satırdan yapılır."
       backTo="/ideasoft"
       contentRef={contentRef}
       contentOverflow="hidden"
       showRefresh
       onRefresh={fetchList}
       headerActions={
-        <div className="flex flex-col gap-3 w-full min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1">
-              <div className="flex items-center gap-0">
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    placeholder="Ara (s)..."
-                    value={search}
-                    onChange={(e) => setListState({ search: e.target.value, page: 1 })}
-                    className="pl-8 w-56 h-9 rounded-r-none border-r-0"
-                  />
-                </div>
-                <div
-                  role="group"
-                  aria-label="Durum"
-                  className="inline-flex rounded-r-md border border-l-0 border-input bg-muted/30 p-0.5 shrink-0"
-                >
-                  {(
-                    [
-                      { key: 'all' as const, label: 'Tümü' },
-                      { key: 'active' as const, label: 'Aktif' },
-                      { key: 'inactive' as const, label: 'Pasif' },
-                    ] as const
-                  ).map(({ key, label }) => {
-                    const isActive = statusFilter === key
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        aria-label={label}
-                        onClick={() => setListState({ statusFilter: key, page: 1 })}
-                        className={cn(
-                          'h-9 px-2.5 text-xs font-medium transition-colors first:rounded-l-none last:rounded-r-md cursor-pointer inline-flex items-center justify-center',
-                          isActive
-                            ? 'bg-background text-foreground shadow-sm'
-                            : 'text-muted-foreground hover:text-foreground'
-                        )}
-                      >
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1 shrink-0">
+            <div className="flex items-center gap-0">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Ara (s)..."
+                  value={search}
+                  onChange={(e) => setListState({ search: e.target.value, page: 1 })}
+                  className="pl-8 w-52 h-9 rounded-r-none border-r-0 sm:w-56"
+                />
               </div>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() =>
-                      setListState({ search: '', statusFilter: 'active', cascadePath: [], page: 1 })
-                    }
-                    className={`h-9 w-9 shrink-0 ${hasFilter ? 'text-primary' : 'text-muted-foreground'}`}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Filtreleri sıfırla</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="icon" onClick={openNew} className="h-9 w-9 shrink-0">
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Yeni kategori (POST, ebeveyn: mevcut liste seviyesi)</TooltipContent>
-              </Tooltip>
+              <div
+                role="group"
+                aria-label="Durum"
+                className="inline-flex rounded-r-md border border-l-0 border-input bg-muted/30 p-0.5 shrink-0"
+              >
+                {(
+                  [
+                    { key: 'all' as const, label: 'Tümü' },
+                    { key: 'active' as const, label: 'Aktif' },
+                    { key: 'inactive' as const, label: 'Pasif' },
+                  ] as const
+                ).map(({ key, label }) => {
+                  const isActive = statusFilter === key
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      aria-label={label}
+                      onClick={() => setListState({ statusFilter: key, page: 1 })}
+                      className={cn(
+                        'h-9 px-2.5 text-xs font-medium transition-colors first:rounded-l-none last:rounded-r-md cursor-pointer inline-flex items-center justify-center',
+                        isActive
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() =>
+                    setListState({ search: '', statusFilter: 'active', cascadePath: [], page: 1 })
+                  }
+                  className={`h-9 w-9 shrink-0 ${hasFilter ? 'text-primary' : 'text-muted-foreground'}`}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Filtreleri sıfırla</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="icon" onClick={openNew} className="h-9 w-9 shrink-0">
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Yeni kategori (POST, ebeveyn: mevcut liste seviyesi)</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className={cn(
+                    'h-9 w-9 shrink-0',
+                    categoryMappingCount > 0 ? 'text-destructive' : 'text-muted-foreground'
+                  )}
+                  disabled={
+                    categoryMappingCount === 0 || mappingsLoading || clearingAllMappings || savingMapping
+                  }
+                  onClick={() => setClearAllMappingsOpen(true)}
+                  aria-label="Tüm eşleştirmeleri kaldır"
+                >
+                  <Unlink className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {categoryMappingCount > 0
+                  ? `Tüm master eşleştirmelerini kaldır (${categoryMappingCount})`
+                  : 'Eşleştirme yok'}
+              </TooltipContent>
+            </Tooltip>
           </div>
-          {headerCascade}
+          <CategoryCascadeThreeSelects
+            path={cascadePathEffective}
+            disabled={loading}
+            onPathChange={onCascadePathChange}
+          />
         </div>
       }
       footerContent={
@@ -673,8 +1047,8 @@ export function IdeasoftCategoriesPage() {
           )}
           <p className="px-4 py-2 text-xs text-muted-foreground border-b border-border shrink-0">
             Liste ebeveyn ID: <span className="font-mono tabular-nums">{parentListId}</span>
-            {cascadePath.length > 0 && (
-              <span className="ml-2">Yol: {cascadePath.join(' → ')}</span>
+            {cascadePathEffective.length > 0 && (
+              <span className="ml-2">Yol: {cascadePathEffective.join(' → ')}</span>
             )}
           </p>
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto">
@@ -688,18 +1062,20 @@ export function IdeasoftCategoriesPage() {
                   <th className="text-center p-2 font-medium w-20">Sıra</th>
                   <th className="text-center p-2 font-medium w-24">Durum</th>
                   <th className="text-center p-2 font-medium w-28">Alt kategori</th>
+                  <th className="text-left p-2 font-medium min-w-[120px]">Master</th>
+                  <th className="text-center p-2 font-medium w-[148px]">Eşleştir</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={9} className="p-8 text-center text-muted-foreground">
                       Yükleniyor...
                     </td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={9} className="p-8 text-center text-muted-foreground">
                       Bu seviyede kayıt yok.
                     </td>
                   </tr>
@@ -746,6 +1122,66 @@ export function IdeasoftCategoriesPage() {
                       </td>
                       <td className="p-2 text-center text-xs text-muted-foreground">
                         {row.hasChildren === 0 ? 'Var' : row.hasChildren === 1 ? 'Yok' : '—'}
+                      </td>
+                      <td className="p-2 text-muted-foreground truncate max-w-[200px]">
+                        {(() => {
+                          const mid = parseStrictPositiveId(categoryMappings[String(row.id)])
+                          if (mid == null || !validMasterIdSet.has(mid)) {
+                            return mappingsLoading ? '…' : '—'
+                          }
+                          const mc = masterById.get(mid)
+                          if (!mc) return <span className="tabular-nums">#{mid}</span>
+                          return (
+                            <span
+                              className="text-foreground"
+                              title={mc.code ? `${mc.name} [${mc.code}]` : mc.name}
+                            >
+                              <span className="truncate">{mc.name}</span>
+                              {mc.code ? (
+                                <span className="text-xs text-muted-foreground ml-1 shrink-0">
+                                  [{mc.code}]
+                                </span>
+                              ) : null}
+                            </span>
+                          )
+                        })()}
+                      </td>
+                      <td className="p-2 text-center" onClick={(e) => e.stopPropagation()}>
+                        <div className="inline-flex flex-wrap items-center justify-center gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs gap-1"
+                                onClick={(e) => openMatchPicker(row, e)}
+                                disabled={masterLoading || savingMapping}
+                              >
+                                <Link2 className="h-3.5 w-3.5 shrink-0" />
+                                Eşleştir
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Master kategori seç (Parametreler › Kategoriler)</TooltipContent>
+                          </Tooltip>
+                          {parseStrictPositiveId(categoryMappings[String(row.id)]) != null && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-xs text-destructive hover:text-destructive"
+                                  onClick={(e) => void clearCategoryMappingInline(row, e)}
+                                  disabled={savingMapping}
+                                >
+                                  Kaldır
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Master eşleştirmesini kaldır</TooltipContent>
+                            </Tooltip>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1047,6 +1483,103 @@ export function IdeasoftCategoriesPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <Dialog open={!!matchPickerRow} onOpenChange={(open) => !open && closeMatchPicker()}>
+        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>
+              Master kategori eşleştir
+              {matchPickerRow && (
+                <span className="block text-sm font-normal text-muted-foreground mt-1 truncate">
+                  IdeaSoft: {matchPickerRow.name ?? `#${matchPickerRow.id}`}
+                </span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          {matchPickerRow && (
+            <>
+              {(() => {
+                const curMid = parseStrictPositiveId(categoryMappings[String(matchPickerRow.id)])
+                if (curMid == null) return null
+                const c = masterById.get(curMid)
+                return (
+                  <p className="text-sm text-muted-foreground">
+                    Mevcut:{' '}
+                    <span className="text-foreground font-medium">
+                      {c ? `${c.name}${c.code ? ` [${c.code}]` : ''}` : `#${curMid}`}
+                    </span>
+                  </p>
+                )
+              })()}
+              <div className="relative shrink-0">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Master kategori ara (ad, kod, id)..."
+                  value={matchPickerSearch}
+                  onChange={(e) => setMatchPickerSearch(e.target.value)}
+                  className="pl-8 h-9"
+                />
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto rounded-md border bg-muted/20">
+                {masterLoading ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    Master kategoriler yükleniyor…
+                  </div>
+                ) : masterCategoryItems.length === 0 ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    Master kategori yok. Önce Parametreler › Kategoriler üzerinden ekleyin.
+                  </div>
+                ) : (
+                  <MasterCategoryTreePicker
+                    categories={masterCategoryItems}
+                    selectedId={matchPickerSelectedMasterId}
+                    onSelect={setMatchPickerSelectedMasterId}
+                    searchQuery={matchPickerSearch}
+                    disabledMasterIds={masterIdsOccupiedByOtherIdeasoft}
+                  />
+                )}
+              </div>
+              <DialogFooter className="flex-col sm:flex-row gap-2 sm:justify-between sm:gap-0">
+                <div className="flex gap-2 w-full sm:w-auto">
+                  {parseStrictPositiveId(categoryMappings[String(matchPickerRow.id)]) != null && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => void clearCategoryMapping()}
+                      disabled={savingMapping}
+                    >
+                      Kaldır
+                    </Button>
+                  )}
+                </div>
+                <div className="flex gap-2 justify-end w-full sm:w-auto">
+                  <Button type="button" variant="outline" onClick={closeMatchPicker} disabled={savingMapping}>
+                    İptal
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="save"
+                    disabled={savingMapping || matchPickerSelectedMasterId == null}
+                    onClick={() => void saveCategoryMapping()}
+                  >
+                    {savingMapping ? 'Kaydediliyor...' : 'Kaydet'}
+                  </Button>
+                </div>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDeleteDialog
+        open={clearAllMappingsOpen}
+        onOpenChange={setClearAllMappingsOpen}
+        title="Tüm eşleştirmeleri kaldır"
+        description={`Kayıtlı ${categoryMappingCount} IdeaSoft–master kategori eşleştirmesi silinecek. Bu işlem geri alınamaz; istediğinizde yeniden eşleştirmeniz gerekir.`}
+        onConfirm={() => void clearAllIdeasoftCategoryMappings()}
+        loading={clearingAllMappings}
+      />
 
       <ConfirmDeleteDialog
         open={deleteOpen}

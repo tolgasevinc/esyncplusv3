@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers } from 'lucide-react'
+import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers, Store, Loader2, CheckCircle2, XCircle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -164,6 +164,22 @@ interface BrandOption extends SelectOption {
 /** SKU/code karşılaştırması için normalize (Parasut eşleşme) */
 function normalizeSku(s: string | undefined): string {
   return (s || '').trim().toLowerCase().replace(/ı/g, 'i').replace(/İ/g, 'i')
+}
+
+/** IdeaSoft toplu aktarım hata gövdesi (bazen JSON string) */
+function formatIdeasoftBulkErrorLine(raw: string | undefined): string {
+  if (!raw?.trim()) return 'Bilinmeyen hata'
+  const t = raw.trim()
+  try {
+    const j = JSON.parse(t) as { errorMessage?: string; message?: string; code?: number }
+    if (j && typeof j === 'object') {
+      const msg = (j.errorMessage || j.message || '').trim()
+      if (msg) return j.code != null ? `[${j.code}] ${msg}` : msg
+    }
+  } catch {
+    /* düz metin */
+  }
+  return t.length > 280 ? `${t.slice(0, 280)}…` : t
 }
 
 const PARASUT_ATTR_LABELS: Record<string, string> = {
@@ -667,6 +683,7 @@ export function ProductsPage() {
   const [parasutPreviewError, setParasutPreviewError] = useState<string | null>(null)
   const [parasutFieldEdits, setParasutFieldEdits] = useState<Record<string, string>>({})
   const [parasutTransferLoading, setParasutTransferLoading] = useState(false)
+  const [ideasoftTransferLoading, setIdeasoftTransferLoading] = useState(false)
   /** SKU ile otomatik eşleşme yoksa Paraşüt panelindeki ürün kimliği */
   const [parasutManualId, setParasutManualId] = useState('')
   const [filterCategorySearch, setFilterCategorySearch] = useState('')
@@ -675,11 +692,30 @@ export function ProductsPage() {
   const [matchedParasutSkus, setMatchedParasutSkus] = useState<Set<string>>(new Set())
   const [parasutIconSrc, setParasutIconSrc] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [bulkModal, setBulkModal] = useState<'category' | 'type' | 'itemGroup' | null>(null)
+  const [bulkModal, setBulkModal] = useState<
+    'category' | 'type' | 'itemGroup' | 'brand' | 'unit' | 'tax' | 'quantity' | null
+  >(null)
   const [bulkCategoryId, setBulkCategoryId] = useState<number | ''>('')
   const [bulkTypeId, setBulkTypeId] = useState<number | ''>('')
   const [bulkItemGroupId, setBulkItemGroupId] = useState<number | ''>('')
+  const [bulkBrandId, setBulkBrandId] = useState<number | ''>('')
+  const [bulkUnitId, setBulkUnitId] = useState<number | ''>('')
+  const [bulkTaxRate, setBulkTaxRate] = useState<string>('20')
+  const [bulkQuantity, setBulkQuantity] = useState<string>('0')
   const [bulkSaving, setBulkSaving] = useState(false)
+  const [ideasoftBulkLoading, setIdeasoftBulkLoading] = useState(false)
+  const [ideasoftBulkSummary, setIdeasoftBulkSummary] = useState<{
+    succeeded: number
+    failed: number
+    rows: {
+      product_id: number
+      nameLabel: string
+      skuLabel: string
+      ok: boolean
+      ideasoft_product_id?: number
+      detail: string
+    }[]
+  } | null>(null)
   const imageUploadProductRef = useRef<Product | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterGroupId !== '' || filterTypeId !== '' || filterNoImage
@@ -845,6 +881,29 @@ export function ProductsPage() {
       setParasutTransferLoading(false)
     }
   }, [editingId, parasutPreview, parasutFieldEdits, parasutManualId])
+
+  const submitIdeasoftTransfer = useCallback(async () => {
+    if (!editingId) return
+    setIdeasoftTransferLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/products/${editingId}/ideasoft-transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = await parseJsonResponse<{ error?: string; hint?: string; message?: string }>(res)
+      if (!res.ok) {
+        const msg = data.error || 'IdeaSoft aktarımı başarısız'
+        const h = data.hint?.trim()
+        throw new Error(h ? `${msg}\n\n${h}` : msg)
+      }
+      toastSuccess('IdeaSoft', data.message || 'Ürün IdeaSoft’a aktarıldı.')
+    } catch (e) {
+      toastError('Hata', parasutFetchErrorMessage(e))
+    } finally {
+      setIdeasoftTransferLoading(false)
+    }
+  }, [editingId])
 
   const categoryPath = useMemo(
     () => getCategoryPath(categories, form.category_id),
@@ -1752,7 +1811,100 @@ export function ProductsPage() {
     }
   }
 
-  const handleBulkUpdate = async (field: 'category_id' | 'type_id' | 'product_item_group_id', value: number | null) => {
+  type BulkPatch = {
+    category_id?: number | null
+    type_id?: number | null
+    product_item_group_id?: number | null
+    brand_id?: number | null
+    unit_id?: number | null
+    tax_rate?: number | null
+    quantity?: number | null
+  }
+
+  const submitBulkIdeasoftTransfer = useCallback(async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    if (
+      !window.confirm(
+        `${ids.length} ürün IdeaSoft’ta tek tek yeni kayıt olarak oluşturulacak (mevcut IdeaSoft ürün ID’si veya eşleşme kullanılmaz; ID’yi IdeaSoft atar). SKU boş olanlar hata verir. Devam edilsin mi?`
+      )
+    ) {
+      return
+    }
+    const labelById = new Map<number, { name: string; sku?: string }>()
+    for (const p of data) labelById.set(p.id, { name: p.name, sku: p.sku })
+    setIdeasoftBulkLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/products/bulk-ideasoft-transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      })
+      const dataJson = await parseJsonResponse<{
+        error?: string
+        hint?: string
+        succeeded?: number
+        failed?: number
+        results?: {
+          product_id: number
+          ok: boolean
+          error?: string
+          hint?: string
+          message?: string
+          ideasoft_product_id?: number
+        }[]
+      }>(res)
+      if (!res.ok) {
+        const h = dataJson.hint?.trim()
+        throw new Error(h ? `${dataJson.error || 'İstek başarısız'}\n\n${h}` : dataJson.error || 'İstek başarısız')
+      }
+      const succ = dataJson.succeeded ?? 0
+      const fail = dataJson.failed ?? 0
+      const results = dataJson.results ?? []
+      const rows = results.map((r) => {
+        const lab = labelById.get(r.product_id)
+        const nameLabel = lab?.name?.trim() || '—'
+        const skuLabel = (lab?.sku ?? '').trim() || '—'
+        let detail = ''
+        if (r.ok) {
+          detail =
+            r.message?.trim() ||
+            (r.ideasoft_product_id != null
+              ? `IdeaSoft ürün #${r.ideasoft_product_id}`
+              : 'Tamam')
+        } else {
+          detail = formatIdeasoftBulkErrorLine(r.error)
+          const hi = r.hint?.trim()
+          if (hi) detail = `${detail}\n${hi}`
+        }
+        return {
+          product_id: r.product_id,
+          nameLabel,
+          skuLabel,
+          ok: r.ok,
+          ideasoft_product_id: r.ideasoft_product_id,
+          detail,
+        }
+      })
+      rows.sort((a, b) => Number(a.ok) - Number(b.ok))
+      setIdeasoftBulkSummary({ succeeded: succ, failed: fail, rows })
+      if (fail === 0) {
+        toastSuccess('IdeaSoft toplu aktarım', `${succ} ürün aktarıldı. Özet pencerede listeleyebilirsiniz.`)
+      } else if (succ > 0) {
+        toastWarning('IdeaSoft toplu aktarım', `${succ} başarılı, ${fail} başarısız — ayrıntılar pencerede.`)
+      } else {
+        toastError('IdeaSoft toplu aktarım', 'Hiçbir ürün aktarılamadı — ayrıntılar pencerede.')
+      }
+      setSelectedIds(new Set())
+      fetchData()
+    } catch (e) {
+      toastError('IdeaSoft toplu aktarım', parasutFetchErrorMessage(e))
+    } finally {
+      setIdeasoftBulkLoading(false)
+    }
+  }, [selectedIds, fetchData, data])
+
+  const applyBulkPatch = async (patch: BulkPatch) => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
     setBulkSaving(true)
@@ -1760,7 +1912,7 @@ export function ProductsPage() {
       const res = await fetch(`${API_URL}/api/products/bulk`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids, [field]: value }),
+        body: JSON.stringify({ ids, ...patch }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Güncellenemedi')
@@ -1911,6 +2063,24 @@ export function ProductsPage() {
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setBulkItemGroupId(''); setBulkModal('itemGroup') }}>
                   Ürün grubu değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setBulkBrandId(''); setBulkModal('brand') }}>
+                  Marka değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setBulkUnitId(''); setBulkModal('unit') }}>
+                  Birim değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setBulkTaxRate('20'); setBulkModal('tax') }}>
+                  KDV değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setBulkQuantity('0'); setBulkModal('quantity') }}>
+                  Miktar değiştir
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={ideasoftBulkLoading}
+                  onClick={() => void submitBulkIdeasoftTransfer()}
+                >
+                  {ideasoftBulkLoading ? 'IdeaSoft’a aktarılıyor…' : 'IdeaSoft’a aktar (toplu)'}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -3146,6 +3316,7 @@ export function ProductsPage() {
                             size="icon"
                             className="h-9 w-9 shrink-0"
                             onClick={() => void openParasutTransferModal()}
+                            disabled={saving}
                             aria-label="Paraşüte aktar"
                           >
                             {parasutIconSrc ? (
@@ -3163,6 +3334,32 @@ export function ProductsPage() {
                         </span>
                       </TooltipTrigger>
                       <TooltipContent>Paraşüte aktar</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-block">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            className="h-9 w-9 shrink-0"
+                            onClick={() => void submitIdeasoftTransfer()}
+                            disabled={saving || ideasoftTransferLoading}
+                            aria-label="IdeaSoft'a aktar"
+                          >
+                            {ideasoftTransferLoading ? (
+                              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                            ) : (
+                              <Store className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        IdeaSoft’a aktar — Veritabanındaki kayıt gönderilir (SKU zorunlu). Kayıtlı eşleştirmelerle marka/kategori/kur
+                        atanır; aynı SKU’lu IdeaSoft ürünü varsa güncellenir, yoksa yeni oluşturulur. Formdaki son değişiklikler için
+                        önce Kaydet.
+                      </TooltipContent>
                     </Tooltip>
                   </div>
                 )}
@@ -3258,6 +3455,98 @@ export function ProductsPage() {
         loading={deleting}
       />
 
+      <Dialog
+        open={ideasoftBulkSummary != null}
+        onOpenChange={(o) => {
+          if (!o) setIdeasoftBulkSummary(null)
+        }}
+      >
+        <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
+            <DialogTitle>IdeaSoft toplu aktarım özeti</DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-1 text-sm">
+                {ideasoftBulkSummary && (
+                  <>
+                    <p>
+                      <span className="text-foreground font-medium">{ideasoftBulkSummary.rows.length}</span> ürün işlendi:{' '}
+                      <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                        {ideasoftBulkSummary.succeeded} aktarıldı
+                      </span>
+                      {ideasoftBulkSummary.failed > 0 && (
+                        <>
+                          {', '}
+                          <span className="text-destructive font-medium">{ideasoftBulkSummary.failed} başarısız</span>
+                        </>
+                      )}
+                      .
+                    </p>
+                    <p className="text-muted-foreground">
+                      Liste mevcut sayfadaki ad/SKU ile eşleştirilebildi; başka sayfadan seçilen satırlarda ad/SKU &quot;—&quot; olabilir.
+                    </p>
+                  </>
+                )}
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="px-6 pb-2 flex-1 min-h-0 overflow-y-auto border-t border-border">
+            {ideasoftBulkSummary && ideasoftBulkSummary.rows.length > 0 && (
+              <table className="w-full text-sm mt-3">
+                <thead className="sticky top-0 z-[1] bg-muted/95 backdrop-blur">
+                  <tr className="border-b text-left">
+                    <th className="p-2 font-medium w-28">Durum</th>
+                    <th className="p-2 font-medium w-16">Master #</th>
+                    <th className="p-2 font-medium min-w-[120px]">Ürün adı</th>
+                    <th className="p-2 font-medium w-28">SKU</th>
+                    <th className="p-2 font-medium w-24">IdeaSoft #</th>
+                    <th className="p-2 font-medium min-w-[180px]">Açıklama</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ideasoftBulkSummary.rows.map((row) => (
+                    <tr
+                      key={row.product_id}
+                      className={cn(
+                        'border-b border-border/60 align-top',
+                        row.ok ? 'bg-emerald-500/[0.04]' : 'bg-destructive/[0.04]'
+                      )}
+                    >
+                      <td className="p-2">
+                        {row.ok ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                            <CheckCircle2 className="h-4 w-4 shrink-0" />
+                            <span className="text-xs font-medium">Tamam</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-destructive">
+                            <XCircle className="h-4 w-4 shrink-0" />
+                            <span className="text-xs font-medium">Hata</span>
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-2 tabular-nums font-mono text-xs">{row.product_id}</td>
+                      <td className="p-2 max-w-[200px] break-words">{row.nameLabel}</td>
+                      <td className="p-2 font-mono text-xs break-all">{row.skuLabel}</td>
+                      <td className="p-2 tabular-nums font-mono text-xs">
+                        {row.ok && row.ideasoft_product_id != null ? row.ideasoft_product_id : '—'}
+                      </td>
+                      <td className="p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-w-md">
+                        {row.detail}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <DialogFooter className="px-6 py-4 border-t shrink-0">
+            <Button type="button" onClick={() => setIdeasoftBulkSummary(null)}>
+              Kapat
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={bulkModal === 'category'} onOpenChange={(o) => !o && setBulkModal(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -3280,7 +3569,7 @@ export function ProductsPage() {
             <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
             <Button
               disabled={!bulkCategoryId || bulkSaving}
-              onClick={() => handleBulkUpdate('category_id', bulkCategoryId || null)}
+              onClick={() => void applyBulkPatch({ category_id: bulkCategoryId || null })}
             >
               {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
             </Button>
@@ -3315,7 +3604,7 @@ export function ProductsPage() {
             <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
             <Button
               disabled={!bulkTypeId || bulkSaving}
-              onClick={() => handleBulkUpdate('type_id', bulkTypeId || null)}
+              onClick={() => void applyBulkPatch({ type_id: bulkTypeId || null })}
             >
               {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
             </Button>
@@ -3350,7 +3639,158 @@ export function ProductsPage() {
             <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
             <Button
               disabled={!bulkItemGroupId || bulkSaving}
-              onClick={() => handleBulkUpdate('product_item_group_id', bulkItemGroupId || null)}
+              onClick={() => void applyBulkPatch({ product_item_group_id: bulkItemGroupId || null })}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkModal === 'brand'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu Marka Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün markasını değiştireceksiniz.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label htmlFor="bulk-brand-select">Yeni marka</Label>
+            <select
+              id="bulk-brand-select"
+              aria-label="Yeni marka"
+              value={bulkBrandId}
+              onChange={(e) => setBulkBrandId(e.target.value ? Number(e.target.value) : '')}
+              className="flex h-10 w-full mt-2 rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">Seçin</option>
+              {brands.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.code ? `${b.name} (${b.code})` : b.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={!bulkBrandId || bulkSaving}
+              onClick={() => void applyBulkPatch({ brand_id: bulkBrandId || null })}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkModal === 'unit'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu Birim Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün stok birimini değiştireceksiniz.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label htmlFor="bulk-unit-select">Yeni birim</Label>
+            <select
+              id="bulk-unit-select"
+              aria-label="Yeni birim"
+              value={bulkUnitId}
+              onChange={(e) => setBulkUnitId(e.target.value ? Number(e.target.value) : '')}
+              className="flex h-10 w-full mt-2 rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">Seçin</option>
+              {units.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={!bulkUnitId || bulkSaving}
+              onClick={() => void applyBulkPatch({ unit_id: bulkUnitId || null })}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkModal === 'tax'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu KDV Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün KDV oranını (%) güncelleyeceksiniz.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label htmlFor="bulk-tax-input">KDV (%)</Label>
+            <Input
+              id="bulk-tax-input"
+              type="number"
+              step="0.01"
+              min={0}
+              className="mt-2"
+              value={bulkTaxRate}
+              onChange={(e) => setBulkTaxRate(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={bulkSaving}
+              onClick={() => {
+                const n = parseFloat(String(bulkTaxRate).replace(',', '.'))
+                if (!Number.isFinite(n) || n < 0) {
+                  toastError('Geçersiz değer', 'KDV için 0 veya üzeri geçerli bir sayı girin.')
+                  return
+                }
+                void applyBulkPatch({ tax_rate: n })
+              }}
+            >
+              {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkModal === 'quantity'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Toplu Miktar Değiştir</DialogTitle>
+            <DialogDescription>
+              {selectedIds.size} ürünün stok miktarını aynı değere çekeceksiniz.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Label htmlFor="bulk-qty-input">Miktar</Label>
+            <Input
+              id="bulk-qty-input"
+              type="number"
+              step="any"
+              className="mt-2"
+              value={bulkQuantity}
+              onChange={(e) => setBulkQuantity(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
+            <Button
+              disabled={bulkSaving}
+              onClick={() => {
+                const n = parseFloat(String(bulkQuantity).replace(',', '.'))
+                if (!Number.isFinite(n)) {
+                  toastError('Geçersiz değer', 'Geçerli bir miktar girin.')
+                  return
+                }
+                void applyBulkPatch({ quantity: n })
+              }}
             >
               {bulkSaving ? 'Kaydediliyor...' : 'Uygula'}
             </Button>

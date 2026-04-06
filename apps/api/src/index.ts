@@ -1394,6 +1394,537 @@ app.get('/api/products/:id', async (c) => {
   }
 });
 
+function ideasoftExtractProductListRows(json: unknown): Record<string, unknown>[] {
+  if (Array.isArray(json)) return json as Record<string, unknown>[];
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>;
+    const hydra = o['hydra:member'];
+    if (Array.isArray(hydra)) return hydra as Record<string, unknown>[];
+    if (Array.isArray(o.member)) return o.member as Record<string, unknown>[];
+    if (Array.isArray(o.data)) return o.data as Record<string, unknown>[];
+    if (Array.isArray(o.items)) return o.items as Record<string, unknown>[];
+  }
+  return [];
+}
+
+function parseProductImageStoragePaths(imageField: string | null | undefined): string[] {
+  if (!imageField?.trim()) return [];
+  const s = imageField.trim();
+  try {
+    const p = JSON.parse(s) as unknown;
+    if (Array.isArray(p)) return p.map((x) => String(x).trim()).filter(Boolean);
+  } catch {
+    /* tek yol */
+  }
+  return [s];
+}
+
+function invertIdeasoftIdMap(m: Record<string, string>, masterIdStr: string): string | null {
+  for (const [isId, mid] of Object.entries(m)) {
+    if (String(mid) === masterIdStr) return isId;
+  }
+  return null;
+}
+
+async function loadAppSettingsJsonMap(db: D1Database, category: string, key: string): Promise<Record<string, string>> {
+  const { results } = await db
+    .prepare(
+      `SELECT value FROM app_settings WHERE category = ? AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    )
+    .bind(category, key)
+    .all();
+  const raw = (results as { value?: string }[])[0]?.value;
+  if (!raw?.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function applyIdeasoftProductMappingInvert(
+  prev: Record<string, string>,
+  ideasoftProductId: string,
+  masterProductId: string
+): Record<string, string> {
+  const next = { ...prev };
+  for (const [k, v] of Object.entries(next)) {
+    if (v === masterProductId && k !== ideasoftProductId) delete next[k];
+  }
+  next[ideasoftProductId] = masterProductId;
+  return next;
+}
+
+async function persistIdeasoftProductMappings(db: D1Database, mappings: Record<string, string>): Promise<void> {
+  const existing = await db
+    .prepare(`SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`)
+    .bind(IDEASOFT_PRODUCT_MAPPINGS_KEY)
+    .first();
+  if (existing) {
+    await db
+      .prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      )
+      .bind(JSON.stringify(mappings), IDEASOFT_PRODUCT_MAPPINGS_KEY)
+      .run();
+  } else {
+    await db
+      .prepare(`INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`)
+      .bind(IDEASOFT_PRODUCT_MAPPINGS_KEY, JSON.stringify(mappings))
+      .run();
+  }
+}
+
+function pickIdeasoftNumericId(body: unknown): number | null {
+  if (body && typeof body === 'object') {
+    const o = body as Record<string, unknown>;
+    const id = o.id;
+    if (typeof id === 'number' && Number.isFinite(id)) return id;
+    if (typeof id === 'string' && /^\d+$/.test(id)) return parseInt(id, 10);
+  }
+  return null;
+}
+
+type IdeasoftTransferEnv = { DB: D1Database; STORAGE: R2Bucket };
+
+async function runSingleIdeasoftTransfer(
+  env: IdeasoftTransferEnv,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  masterId: number,
+  manualIdeasoftProductId: number | null,
+  brandMap: Record<string, string>,
+  catMap: Record<string, string>,
+  curMap: Record<string, string>,
+  unitLabelMap: Record<string, string>,
+  productMap: Record<string, string>,
+  /** true: IdeaSoft’ta mevcut ürün ID’si kullanılmaz; yalnızca POST ile yeni kayıt (toplu aktarım). */
+  createNewOnly = false
+): Promise<
+  | { ok: true; ideasoft_product_id: number; created: boolean; message: string }
+  | { ok: false; error: string; hint?: string }
+> {
+  const db = env.DB;
+  const storage = env.STORAGE;
+  const masterIdStr = String(masterId);
+
+  const row = await db
+      .prepare(
+        `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.status, p.brand_id, p.category_id, p.currency_id, p.unit_id, p.image,
+         pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
+         FROM products p
+         LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
+         WHERE p.id = ? AND p.is_deleted = 0
+         LIMIT 1`
+      )
+      .bind(masterId)
+      .first<{
+        id: number;
+        name: string;
+        sku: string | null;
+        barcode: string | null;
+        price: number;
+        quantity: number;
+        status: number;
+        brand_id: number | null;
+        category_id: number | null;
+        currency_id: number | null;
+        unit_id: number | null;
+        image: string | null;
+        ecommerce_name: string | null;
+        main_description: string | null;
+        seo_slug: string | null;
+        seo_title: string | null;
+        seo_description: string | null;
+        seo_keywords: string | null;
+      }>();
+  if (!row) return { ok: false, error: 'Ürün bulunamadı' };
+
+  const sku = (row.sku ?? '').trim();
+  if (!sku) return { ok: false, error: 'IdeaSoft aktarımı için ana ürün SKU dolu olmalıdır' };
+
+  try {
+    let isBrandId: number | undefined;
+    if (row.brand_id != null && row.brand_id > 0) {
+      const isB = invertIdeasoftIdMap(brandMap, String(row.brand_id));
+      if (isB && /^\d+$/.test(isB)) isBrandId = parseInt(isB, 10);
+    }
+    let isCatId: number | undefined;
+    if (row.category_id != null && row.category_id > 0) {
+      const isC = invertIdeasoftIdMap(catMap, String(row.category_id));
+      if (isC && /^\d+$/.test(isC)) isCatId = parseInt(isC, 10);
+    }
+    let isCurId: number | undefined;
+    if (row.currency_id != null && row.currency_id > 0) {
+      const isCr = invertIdeasoftIdMap(curMap, String(row.currency_id));
+      if (isCr && /^\d+$/.test(isCr)) isCurId = parseInt(isCr, 10);
+    }
+
+    let stockTypeLabel = 'Piece';
+    if (row.unit_id != null && row.unit_id > 0) {
+      const masterU = String(row.unit_id);
+      for (const [label, mid] of Object.entries(unitLabelMap)) {
+        if (String(mid) === masterU) {
+          stockTypeLabel = label;
+          break;
+        }
+      }
+    }
+
+    const displayName = ((row.ecommerce_name ?? row.name) || '').trim() || 'Ürün';
+    const seoKw = (row.seo_keywords ?? '').trim();
+    const searchKw =
+      seoKw.length > 0 ? (seoKw.split(/[,;]/)[0]?.trim() ?? '').slice(0, 255) : '';
+
+    const paths = parseProductImageStoragePaths(row.image);
+    let firstImageSlot: Record<string, unknown> | null = null;
+    if (paths.length > 0) {
+      const dataUrl = await storagePathToDataUrl(storage, paths[0]!);
+      if (dataUrl?.startsWith('data:image/')) {
+        const ext =
+          dataUrl.includes('image/png') ? 'png' : dataUrl.includes('image/webp') ? 'webp' : dataUrl.includes('image/gif') ? 'gif' : 'jpg';
+        const fnBase = normalizeForSearch(sku)
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')
+          .slice(0, 40) || 'urun';
+        firstImageSlot = {
+          filename: `${fnBase}-1`,
+          extension: ext,
+          sortOrder: 1,
+          attachment: dataUrl,
+        };
+      }
+    }
+
+    let targetIsId: number | null = null;
+    if (!createNewOnly) {
+      if (manualIdeasoftProductId != null && manualIdeasoftProductId > 0) {
+        targetIsId = manualIdeasoftProductId;
+      } else {
+        const mapped = invertIdeasoftIdMap(productMap, masterIdStr);
+        if (mapped && /^\d+$/.test(mapped)) targetIsId = parseInt(mapped, 10);
+      }
+
+      if (targetIsId == null) {
+        const sp = new URLSearchParams({ page: '1', limit: '40', sort: 'id', s: sku });
+        const listRes = await ideasoftDoAdminRequestWithRefresh(
+          db,
+          `/products?${sp.toString()}`,
+          { method: 'GET' },
+          settings,
+          auth
+        );
+        const listText = await listRes.text();
+        let listJson: unknown = null;
+        try {
+          listJson = listText ? JSON.parse(listText) : null;
+        } catch {
+          listJson = null;
+        }
+        if (!listRes.ok) {
+          const parts = ideasoftProxyErrorParts(listJson, listText, listRes.status);
+          return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
+        }
+        const skuNorm = normalizeForSearch(sku);
+        for (const r of ideasoftExtractProductListRows(listJson)) {
+          const rs = normalizeForSearch(String(r.sku ?? '').trim());
+          if (rs === skuNorm) {
+            const id = pickIdeasoftNumericId(r);
+            if (id != null) {
+              targetIsId = id;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    const baseFields: Record<string, unknown> = {
+      name: displayName,
+      fullName: displayName,
+      sku,
+      barcode: (row.barcode ?? '').trim(),
+      price1: Number(row.price) || 0,
+      stockAmount: Number(row.quantity) || 0,
+      status: row.status ? 1 : 0,
+      stockTypeLabel,
+      detail: { details: (row.main_description ?? '').trim() },
+      slug: (row.seo_slug ?? '').trim(),
+      pageTitle: (row.seo_title ?? '').trim(),
+      metaDescription: (row.seo_description ?? '').trim(),
+      metaKeywords: seoKw,
+      searchKeywords: searchKw,
+    };
+    if (isBrandId != null) baseFields.brand = { id: isBrandId };
+    if (isCurId != null) baseFields.currency = { id: isCurId };
+    if (isCatId != null) baseFields.categories = [{ id: isCatId }];
+    if (firstImageSlot) baseFields.images = [firstImageSlot];
+
+    let finalIsId: number | null = null;
+    let created = false;
+
+    if (targetIsId != null) {
+      const getRes = await ideasoftDoAdminRequestWithRefresh(
+        db,
+        `/products/${targetIsId}`,
+        { method: 'GET' },
+        settings,
+        auth
+      );
+      const getText = await getRes.text();
+      let existing: unknown = null;
+      try {
+        existing = getText ? JSON.parse(getText) : null;
+      } catch {
+        existing = null;
+      }
+      if (!getRes.ok) {
+        const parts = ideasoftProxyErrorParts(existing, getText, getRes.status);
+        return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
+      }
+      const ex =
+        existing && typeof existing === 'object' && !Array.isArray(existing)
+          ? { ...(existing as Record<string, unknown>) }
+          : {};
+      for (const k of Object.keys(ex)) {
+        if (k.startsWith('@') || k.startsWith('hydra:')) delete ex[k];
+      }
+      const merged: Record<string, unknown> = { ...ex, ...baseFields };
+      if (Array.isArray(ex.prices) && !Array.isArray(baseFields.prices)) merged.prices = ex.prices;
+      if (Array.isArray(ex.optionGroups)) merged.optionGroups = ex.optionGroups;
+      if (Array.isArray(ex.selectionGroups)) merged.selectionGroups = ex.selectionGroups;
+      if (ex.seoSetting && typeof ex.seoSetting === 'object') merged.seoSetting = ex.seoSetting;
+
+      const putRes = await ideasoftDoAdminRequestWithRefresh(
+        db,
+        `/products/${targetIsId}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(merged),
+        },
+        settings,
+        auth
+      );
+      const putText = await putRes.text();
+      let putJson: unknown = null;
+      try {
+        putJson = putText ? JSON.parse(putText) : null;
+      } catch {
+        putJson = null;
+      }
+      if (!putRes.ok) {
+        const parts = ideasoftProxyErrorParts(putJson, putText, putRes.status);
+        return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
+      }
+      finalIsId = pickIdeasoftNumericId(putJson) ?? targetIsId;
+    } else {
+      const postRes = await ideasoftDoAdminRequestWithRefresh(
+        db,
+        `/products`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(baseFields),
+        },
+        settings,
+        auth
+      );
+      const postText = await postRes.text();
+      let postJson: unknown = null;
+      try {
+        postJson = postText ? JSON.parse(postText) : null;
+      } catch {
+        postJson = null;
+      }
+      if (!postRes.ok) {
+        const parts = ideasoftProxyErrorParts(postJson, postText, postRes.status);
+        return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
+      }
+      finalIsId = pickIdeasoftNumericId(postJson);
+      created = true;
+    }
+
+    if (finalIsId == null) {
+      return { ok: false, error: 'IdeaSoft yanıtında ürün ID okunamadı' };
+    }
+
+    const nextMap = applyIdeasoftProductMappingInvert(productMap, String(finalIsId), masterIdStr);
+    for (const k of Object.keys(productMap)) delete productMap[k];
+    Object.assign(productMap, nextMap);
+    await persistIdeasoftProductMappings(db, productMap);
+
+    return {
+      ok: true,
+      ideasoft_product_id: finalIsId,
+      created,
+      message:
+        createNewOnly || created
+          ? `IdeaSoft’ta yeni ürün oluşturuldu (#${finalIsId}).`
+          : `IdeaSoft ürünü güncellendi (#${finalIsId}).`,
+    };
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : 'IdeaSoft aktarım hatası' };
+  }
+}
+
+/** Master ürünü IdeaSoft Admin API’ye oluşturur veya günceller; SKU + eşleştirmeler kullanılır. */
+app.post('/api/products/:id/ideasoft-transfer', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const masterIdStr = (c.req.param('id') || '').trim();
+    if (!/^\d+$/.test(masterIdStr)) return c.json({ error: 'Geçersiz ürün ID' }, 400);
+    const masterId = parseInt(masterIdStr, 10);
+    let reqBody: { ideasoft_product_id?: number | string } = {};
+    try {
+      reqBody = (await c.req.json()) as { ideasoft_product_id?: number | string };
+    } catch {
+      reqBody = {};
+    }
+    const manualIsIdRaw = reqBody.ideasoft_product_id;
+    const manualIdeasoftProductId =
+      manualIsIdRaw != null && String(manualIsIdRaw).trim() !== ''
+        ? parseInt(String(manualIsIdRaw).trim(), 10)
+        : NaN;
+    const manualResolved =
+      Number.isFinite(manualIdeasoftProductId) && manualIdeasoftProductId > 0 ? manualIdeasoftProductId : null;
+
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+        },
+        400
+      );
+    }
+
+    const brandMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_BRAND_MAPPINGS_KEY);
+    const catMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_CATEGORY_MAPPINGS_KEY);
+    const curMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_CURRENCY_MAPPINGS_KEY);
+    const unitLabelMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_UNIT_MAPPINGS_KEY);
+    const productMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_PRODUCT_MAPPINGS_KEY);
+
+    const result = await runSingleIdeasoftTransfer(
+      { DB: c.env.DB, STORAGE: c.env.STORAGE },
+      settings,
+      auth,
+      masterId,
+      manualResolved,
+      brandMap,
+      catMap,
+      curMap,
+      unitLabelMap,
+      productMap
+    );
+
+    if (!result.ok) {
+      return c.json(
+        {
+          error: result.error,
+          ...('hint' in result && result.hint ? { hint: result.hint } : {}),
+        },
+        400
+      );
+    }
+    return c.json({
+      ok: true,
+      ideasoft_product_id: result.ideasoft_product_id,
+      created: result.created,
+      message: result.message,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'IdeaSoft aktarım hatası' }, 500);
+  }
+});
+
+/** Seçili master ürünleri sırayla IdeaSoft’a aktarır (SKU zorunlu). */
+app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ ids?: number[] }>().catch(() => ({}));
+    const ids = Array.isArray(body.ids)
+      ? body.ids.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0)
+      : [];
+    if (ids.length === 0) return c.json({ error: 'En az bir ürün ID gerekli' }, 400);
+    if (ids.length > 200) return c.json({ error: 'Tek seferde en fazla 200 ürün' }, 400);
+
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+        },
+        400
+      );
+    }
+
+    const brandMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_BRAND_MAPPINGS_KEY);
+    const catMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_CATEGORY_MAPPINGS_KEY);
+    const curMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_CURRENCY_MAPPINGS_KEY);
+    const unitLabelMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_UNIT_MAPPINGS_KEY);
+    const productMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_PRODUCT_MAPPINGS_KEY);
+
+    const results: {
+      product_id: number;
+      ok: boolean;
+      ideasoft_product_id?: number;
+      created?: boolean;
+      message?: string;
+      error?: string;
+      hint?: string;
+    }[] = [];
+
+    for (const masterId of ids) {
+      const r = await runSingleIdeasoftTransfer(
+        { DB: c.env.DB, STORAGE: c.env.STORAGE },
+        settings,
+        auth,
+        masterId,
+        null,
+        brandMap,
+        catMap,
+        curMap,
+        unitLabelMap,
+        productMap,
+        true
+      );
+      if (r.ok) {
+        results.push({
+          product_id: masterId,
+          ok: true,
+          ideasoft_product_id: r.ideasoft_product_id,
+          created: r.created,
+          message: r.message,
+        });
+      } else {
+        results.push({
+          product_id: masterId,
+          ok: false,
+          error: r.error,
+          ...(r.hint ? { hint: r.hint } : {}),
+        });
+      }
+    }
+
+    const succeeded = results.filter((x) => x.ok).length;
+    const failed = results.length - succeeded;
+    return c.json({
+      ok: failed === 0,
+      succeeded,
+      failed,
+      results,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Toplu IdeaSoft aktarım hatası' }, 500);
+  }
+});
+
 app.post('/api/products', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -1641,7 +2172,7 @@ app.delete('/api/products/:id', async (c) => {
   }
 });
 
-/** Toplu ürün güncelleme: kategori, tip veya ürün grubu değiştir */
+/** Toplu ürün güncelleme: kategori, tip, ürün grubu, marka, birim, KDV veya miktar */
 app.patch('/api/products/bulk', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -1650,18 +2181,38 @@ app.patch('/api/products/bulk', async (c) => {
       category_id?: number | null;
       type_id?: number | null;
       product_item_group_id?: number | null;
+      brand_id?: number | null;
+      unit_id?: number | null;
+      tax_rate?: number | null;
+      quantity?: number | null;
     }>();
     const ids = Array.isArray(body.ids) ? body.ids.filter((x): x is number => typeof x === 'number' && x > 0) : [];
     if (ids.length === 0) return c.json({ error: 'En az bir ürün ID gerekli' }, 400);
     const hasCategory = body.category_id !== undefined;
     const hasType = body.type_id !== undefined;
     const hasGroup = body.product_item_group_id !== undefined;
-    if (!hasCategory && !hasType && !hasGroup) return c.json({ error: 'Güncellenecek alan belirtin (category_id, type_id veya product_item_group_id)' }, 400);
+    const hasBrand = body.brand_id !== undefined;
+    const hasUnit = body.unit_id !== undefined;
+    const hasTax = body.tax_rate !== undefined;
+    const hasQty = body.quantity !== undefined;
+    if (!hasCategory && !hasType && !hasGroup && !hasBrand && !hasUnit && !hasTax && !hasQty) {
+      return c.json(
+        {
+          error:
+            'Güncellenecek alan belirtin (category_id, type_id, product_item_group_id, brand_id, unit_id, tax_rate veya quantity)',
+        },
+        400
+      );
+    }
     const updates: string[] = [];
     const values: (number | null)[] = [];
     if (hasCategory) { updates.push('category_id = ?'); values.push(body.category_id ?? null); }
     if (hasType) { updates.push('type_id = ?'); values.push(body.type_id ?? null); }
     if (hasGroup) { updates.push('product_item_group_id = ?'); values.push(body.product_item_group_id ?? null); }
+    if (hasBrand) { updates.push('brand_id = ?'); values.push(body.brand_id ?? null); }
+    if (hasUnit) { updates.push('unit_id = ?'); values.push(body.unit_id ?? null); }
+    if (hasTax) { updates.push('tax_rate = ?'); values.push(body.tax_rate ?? null); }
+    if (hasQty) { updates.push('quantity = ?'); values.push(body.quantity ?? null); }
     updates.push("updated_at = datetime('now')");
     const placeholders = ids.map(() => '?').join(',');
     const stmt = c.env.DB.prepare(
@@ -8272,6 +8823,186 @@ app.put('/api/ideasoft/brand-mappings', async (c) => {
       await c.env.DB.prepare(
         `INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`
       ).bind(IDEASOFT_BRAND_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/** IdeaSoft kategori ID → master product_categories.id (app_settings category ideasoft) */
+const IDEASOFT_CATEGORY_MAPPINGS_KEY = 'ideasoft_category_mappings';
+
+app.get('/api/ideasoft/category-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_CATEGORY_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/category-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_CATEGORY_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_CATEGORY_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`
+      ).bind(IDEASOFT_CATEGORY_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/** IdeaSoft Store para birimi ID → master product_currencies.id (app_settings category ideasoft) */
+const IDEASOFT_CURRENCY_MAPPINGS_KEY = 'ideasoft_currency_mappings';
+
+app.get('/api/ideasoft/currency-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_CURRENCY_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/currency-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_CURRENCY_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_CURRENCY_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`
+      ).bind(IDEASOFT_CURRENCY_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/** IdeaSoft ürün `stockTypeLabel` kodu (örn. Piece, kg) → master product_unit.id (app_settings category ideasoft) */
+const IDEASOFT_UNIT_MAPPINGS_KEY = 'ideasoft_unit_mappings';
+
+app.get('/api/ideasoft/unit-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_UNIT_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/unit-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_UNIT_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_UNIT_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`
+      ).bind(IDEASOFT_UNIT_MAPPINGS_KEY, JSON.stringify(toSave)).run();
+    }
+    return c.json({ ok: true, mappings: toSave });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/** IdeaSoft ürün id → master products.id (app_settings category ideasoft) */
+const IDEASOFT_PRODUCT_MAPPINGS_KEY = 'ideasoft_product_mappings';
+
+app.get('/api/ideasoft/product-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ mappings: {} });
+    const { results } = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+    ).bind(IDEASOFT_PRODUCT_MAPPINGS_KEY).all();
+    const raw = (results as { value?: string }[])[0]?.value;
+    if (!raw?.trim()) return c.json({ mappings: {} });
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return c.json({ mappings: typeof parsed === 'object' && parsed !== null ? parsed : {} });
+  } catch {
+    return c.json({ mappings: {} });
+  }
+});
+
+app.put('/api/ideasoft/product-mappings', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ mappings: Record<string, string> }>().catch(() => ({}));
+    const mappings = body?.mappings;
+    if (!mappings || typeof mappings !== 'object') return c.json({ error: 'mappings gerekli' }, 400);
+    const toSave = Object.fromEntries(
+      Object.entries(mappings).filter(([k, v]) => k && v && String(k).trim() && String(v).trim())
+    );
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM app_settings WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(IDEASOFT_PRODUCT_MAPPINGS_KEY).first();
+    if (existing) {
+      await c.env.DB.prepare(
+        `UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = 'ideasoft' AND "key" = ? AND is_deleted = 0`
+      ).bind(JSON.stringify(toSave), IDEASOFT_PRODUCT_MAPPINGS_KEY).run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_settings (category, "key", value) VALUES ('ideasoft', ?, ?)`
+      ).bind(IDEASOFT_PRODUCT_MAPPINGS_KEY, JSON.stringify(toSave)).run();
     }
     return c.json({ ok: true, mappings: toSave });
   } catch (err: unknown) {

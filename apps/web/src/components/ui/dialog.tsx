@@ -44,6 +44,12 @@ const DialogContent = React.forwardRef<
           e.preventDefault()
           return
         }
+        // <input type="color"> paleti çoğu tarayıcıda dialog içeriğinin dışında; tıklanınca modal kapanmasın.
+        const ae = document.activeElement
+        if (ae instanceof HTMLInputElement && ae.type === 'color') {
+          e.preventDefault()
+          return
+        }
         onPointerDownOutside?.(e)
       }}
       onInteractOutside={(e) => {
