@@ -85,9 +85,9 @@ function App() {
         <Toaster
           richColors
           position="top-center"
-          className="!z-[2147483647]"
-          style={{ zIndex: 2147483647 }}
-          toastOptions={{ style: { zIndex: 2147483647 } }}
+          className="!z-[2147483647] !pointer-events-auto"
+          style={{ zIndex: 2147483647, pointerEvents: 'auto' }}
+          toastOptions={{ style: { zIndex: 2147483647, pointerEvents: 'auto' } }}
         />,
         document.body
       )}

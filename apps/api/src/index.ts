@@ -83,6 +83,51 @@ async function storagePathToDataUrl(storage: R2Bucket | undefined, path: string)
   }
 }
 
+/**
+ * Paraşüt ürün `photo` alanı için değer üretir.
+ * - Zaten http(s) ise olduğu gibi döner.
+ * - R2 anahtarı ise: istek herkese açık bir API kökünden geliyorsa `/storage/serve?key=...` URL’si kullanılır
+ *   (JSON gövdesi küçük kalır; Paraşüt görseli kendi sunucusundan indirir — büyük data: URL’lerinde sık görülen hatalar azalır).
+ * - localhost / özel IP kökeninde data URL’e düşülür (Paraşüt erişemez; geliştirme / iç ağ).
+ */
+function parasutImageRequestOriginIsPublic(requestUrl: string | undefined): boolean {
+  if (!requestUrl) return false;
+  try {
+    const { hostname } = new URL(requestUrl);
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') return false;
+    if (/^192\.168\./.test(hostname)) return false;
+    if (/^10\./.test(hostname)) return false;
+    const m = /^172\.(\d+)\./.exec(hostname);
+    if (m) {
+      const n = parseInt(m[1]!, 10);
+      if (n >= 16 && n <= 31) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function buildParasutPhotoForPush(
+  storage: R2Bucket | undefined,
+  imagePath: string,
+  requestUrl: string | undefined,
+): Promise<string | null> {
+  const path = imagePath.trim();
+  if (!path) return null;
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  if (parasutImageRequestOriginIsPublic(requestUrl) && requestUrl) {
+    try {
+      const serve = new URL('/storage/serve', new URL(requestUrl).origin);
+      serve.searchParams.set('key', path);
+      return serve.toString();
+    } catch {
+      /* data URL’e düş */
+    }
+  }
+  return storagePathToDataUrl(storage, path);
+}
+
 type Bindings = {
   DB: D1Database;
   STORAGE: R2Bucket;
@@ -1533,6 +1578,58 @@ function pickIdeasoftNumericId(body: unknown): number | null {
 
 type IdeasoftTransferEnv = { DB: D1Database; STORAGE: R2Bucket };
 
+/** Tekil PUT’ta istek gövdesinden; yoksa veya yalnızca güncellemede tam gönderim. */
+type IdeasoftTransferPartialSyncBody = {
+  sync_general?: boolean;
+  sync_price?: boolean;
+  sync_images?: boolean;
+  sync_seo?: boolean;
+};
+
+function resolveIdeasoftPartialSyncFlags(
+  body: IdeasoftTransferPartialSyncBody | undefined,
+  isPartialUpdate: boolean,
+): { general: boolean; price: boolean; images: boolean; seo: boolean } {
+  if (!isPartialUpdate) {
+    return { general: true, price: true, images: true, seo: true };
+  }
+  const keys = ['sync_general', 'sync_price', 'sync_images', 'sync_seo'] as const;
+  const hasHint = body && keys.some((k) => body[k] !== undefined);
+  if (!hasHint) {
+    return { general: true, price: true, images: true, seo: true };
+  }
+  return {
+    general: !!body!.sync_general,
+    price: !!body!.sync_price,
+    images: !!body!.sync_images,
+    seo: !!body!.sync_seo,
+  };
+}
+
+/** Tekil aktarım modalından: IdeaSoft stok ve indirim % (discountType 0 = yüzde). */
+type IdeasoftTransferFieldOverrides = {
+  stockAmount?: number;
+  discountPercent?: number;
+};
+
+function parseIdeasoftTransferFieldOverrides(body: {
+  ideasoft_stock_amount?: number | string;
+  ideasoft_discount_percent?: number | string;
+}): IdeasoftTransferFieldOverrides | undefined {
+  const out: IdeasoftTransferFieldOverrides = {};
+  const sa = body.ideasoft_stock_amount;
+  if (sa !== undefined && sa !== null && String(sa).trim() !== '') {
+    const n = typeof sa === 'number' ? sa : parseFloat(String(sa).replace(',', '.'));
+    if (Number.isFinite(n) && n >= 0) out.stockAmount = Math.round(n);
+  }
+  const dp = body.ideasoft_discount_percent;
+  if (dp !== undefined && dp !== null && String(dp).trim() !== '') {
+    const n = typeof dp === 'number' ? dp : parseFloat(String(dp).replace(',', '.'));
+    if (Number.isFinite(n) && n > 0) out.discountPercent = Math.min(100, n);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 async function runSingleIdeasoftTransfer(
   env: IdeasoftTransferEnv,
   settings: Record<string, string>,
@@ -1545,7 +1642,9 @@ async function runSingleIdeasoftTransfer(
   unitLabelMap: Record<string, string>,
   productMap: Record<string, string>,
   /** true: IdeaSoft’ta mevcut ürün ID’si kullanılmaz; yalnızca POST ile yeni kayıt (toplu aktarım). */
-  createNewOnly = false
+  createNewOnly = false,
+  partialSync?: IdeasoftTransferPartialSyncBody,
+  ideasoftTransferOverrides?: IdeasoftTransferFieldOverrides | null
 ): Promise<
   | { ok: true; ideasoft_product_id: number; created: boolean; message: string }
   | { ok: false; error: string; hint?: string }
@@ -1622,34 +1721,6 @@ async function runSingleIdeasoftTransfer(
     const searchKw =
       seoKw.length > 0 ? (seoKw.split(/[,;]/)[0]?.trim() ?? '').slice(0, 255) : '';
 
-    const paths = parseProductImageStoragePaths(row.image);
-    /** IdeaSoft Admin API: görsel sırası 1–8 (Product / ProductImage POST gövdesi). */
-    const ideasoftMaxImages = 8;
-    const fnBase =
-      normalizeForSearch(sku)
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 40) || 'urun';
-    const imageSlots: Record<string, unknown>[] = [];
-    for (let i = 0; i < paths.length && imageSlots.length < ideasoftMaxImages; i++) {
-      const dataUrl = await storagePathToDataUrl(storage, paths[i]!);
-      if (!dataUrl?.startsWith('data:image/')) continue;
-      const ext = dataUrl.includes('image/png')
-        ? 'png'
-        : dataUrl.includes('image/webp')
-          ? 'webp'
-          : dataUrl.includes('image/gif')
-            ? 'gif'
-            : 'jpg';
-      const sortOrder = imageSlots.length + 1;
-      imageSlots.push({
-        filename: `${fnBase}-${sortOrder}`,
-        extension: ext,
-        sortOrder,
-        attachment: dataUrl,
-      });
-    }
-
     let targetIsId: number | null = null;
     if (!createNewOnly) {
       if (manualIdeasoftProductId != null && manualIdeasoftProductId > 0) {
@@ -1693,6 +1764,43 @@ async function runSingleIdeasoftTransfer(
       }
     }
 
+    const isPartialUpdate = !createNewOnly && targetIsId != null;
+    const sync = resolveIdeasoftPartialSyncFlags(partialSync, isPartialUpdate);
+    if (isPartialUpdate && !sync.general && !sync.price && !sync.images && !sync.seo) {
+      return { ok: false, error: 'Güncellenecek en az bir bilgi grubu seçilmelidir (genel, fiyat, görsel veya SEO).' };
+    }
+
+    const paths = parseProductImageStoragePaths(row.image);
+    /** IdeaSoft Admin API: görsel sırası 1–8 (Product / ProductImage POST gövdesi). */
+    const ideasoftMaxImages = 8;
+    const fnBase =
+      normalizeForSearch(sku)
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 40) || 'urun';
+    const imageSlots: Record<string, unknown>[] = [];
+    const loadImages = !isPartialUpdate || sync.images;
+    if (loadImages) {
+      for (let i = 0; i < paths.length && imageSlots.length < ideasoftMaxImages; i++) {
+        const dataUrl = await storagePathToDataUrl(storage, paths[i]!);
+        if (!dataUrl?.startsWith('data:image/')) continue;
+        const ext = dataUrl.includes('image/png')
+          ? 'png'
+          : dataUrl.includes('image/webp')
+            ? 'webp'
+            : dataUrl.includes('image/gif')
+              ? 'gif'
+              : 'jpg';
+        const sortOrder = imageSlots.length + 1;
+        imageSlots.push({
+          filename: `${fnBase}-${sortOrder}`,
+          extension: ext,
+          sortOrder,
+          attachment: dataUrl,
+        });
+      }
+    }
+
     const baseFields: Record<string, unknown> = {
       name: displayName,
       fullName: displayName,
@@ -1713,6 +1821,16 @@ async function runSingleIdeasoftTransfer(
     if (isCurId != null) baseFields.currency = { id: isCurId };
     if (isCatId != null) baseFields.categories = [{ id: isCatId }];
     if (imageSlots.length > 0) baseFields.images = imageSlots;
+
+    if (ideasoftTransferOverrides) {
+      if (ideasoftTransferOverrides.stockAmount !== undefined) {
+        baseFields.stockAmount = Math.max(0, Math.round(ideasoftTransferOverrides.stockAmount));
+      }
+      if (ideasoftTransferOverrides.discountPercent !== undefined) {
+        baseFields.discount = Math.max(0, Math.min(100, ideasoftTransferOverrides.discountPercent));
+        baseFields.discountType = 0;
+      }
+    }
 
     let finalIsId: number | null = null;
     let created = false;
@@ -1743,8 +1861,45 @@ async function runSingleIdeasoftTransfer(
       for (const k of Object.keys(ex)) {
         if (k.startsWith('@') || k.startsWith('hydra:')) delete ex[k];
       }
-      const merged: Record<string, unknown> = { ...ex, ...baseFields };
-      if (Array.isArray(ex.prices) && !Array.isArray(baseFields.prices)) merged.prices = ex.prices;
+      const merged: Record<string, unknown> = { ...ex };
+      const partial: Record<string, unknown> = {};
+      if (sync.general) {
+        Object.assign(partial, {
+          name: displayName,
+          fullName: displayName,
+          sku,
+          barcode: (row.barcode ?? '').trim(),
+          stockAmount: Number(row.quantity) || 0,
+          status: row.status ? 1 : 0,
+          stockTypeLabel,
+          detail: { details: (row.main_description ?? '').trim() },
+        });
+        if (isBrandId != null) partial.brand = { id: isBrandId };
+        if (isCurId != null) partial.currency = { id: isCurId };
+        if (isCatId != null) partial.categories = [{ id: isCatId }];
+      }
+      if (sync.price) partial.price1 = Number(row.price) || 0;
+      if (sync.images && imageSlots.length > 0) partial.images = imageSlots;
+      if (sync.seo) {
+        Object.assign(partial, {
+          slug: (row.seo_slug ?? '').trim(),
+          pageTitle: (row.seo_title ?? '').trim(),
+          metaDescription: (row.seo_description ?? '').trim(),
+          metaKeywords: seoKw,
+          searchKeywords: searchKw,
+        });
+      }
+      if (ideasoftTransferOverrides) {
+        if (ideasoftTransferOverrides.stockAmount !== undefined) {
+          partial.stockAmount = Math.max(0, Math.round(ideasoftTransferOverrides.stockAmount));
+        }
+        if (ideasoftTransferOverrides.discountPercent !== undefined) {
+          partial.discount = Math.max(0, Math.min(100, ideasoftTransferOverrides.discountPercent));
+          partial.discountType = 0;
+        }
+      }
+      Object.assign(merged, partial);
+      if (Array.isArray(ex.prices) && !Array.isArray(partial.prices)) merged.prices = ex.prices;
       if (Array.isArray(ex.optionGroups)) merged.optionGroups = ex.optionGroups;
       if (Array.isArray(ex.selectionGroups)) merged.selectionGroups = ex.selectionGroups;
       if (ex.seoSetting && typeof ex.seoSetting === 'object') merged.seoSetting = ex.seoSetting;
@@ -1829,9 +1984,17 @@ app.post('/api/products/:id/ideasoft-transfer', async (c) => {
     const masterIdStr = (c.req.param('id') || '').trim();
     if (!/^\d+$/.test(masterIdStr)) return c.json({ error: 'Geçersiz ürün ID' }, 400);
     const masterId = parseInt(masterIdStr, 10);
-    let reqBody: { ideasoft_product_id?: number | string } = {};
+    let reqBody: {
+      ideasoft_product_id?: number | string;
+      sync_general?: boolean;
+      sync_price?: boolean;
+      sync_images?: boolean;
+      sync_seo?: boolean;
+      ideasoft_stock_amount?: number | string;
+      ideasoft_discount_percent?: number | string;
+    } = {};
     try {
-      reqBody = (await c.req.json()) as { ideasoft_product_id?: number | string };
+      reqBody = (await c.req.json()) as typeof reqBody;
     } catch {
       reqBody = {};
     }
@@ -1861,6 +2024,15 @@ app.post('/api/products/:id/ideasoft-transfer', async (c) => {
     const unitLabelMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_UNIT_MAPPINGS_KEY);
     const productMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_PRODUCT_MAPPINGS_KEY);
 
+    const partialSync: IdeasoftTransferPartialSyncBody = {
+      sync_general: reqBody.sync_general,
+      sync_price: reqBody.sync_price,
+      sync_images: reqBody.sync_images,
+      sync_seo: reqBody.sync_seo,
+    };
+
+    const ideasoftTransferOverrides = parseIdeasoftTransferFieldOverrides(reqBody);
+
     const result = await runSingleIdeasoftTransfer(
       { DB: c.env.DB, STORAGE: c.env.STORAGE },
       settings,
@@ -1871,7 +2043,10 @@ app.post('/api/products/:id/ideasoft-transfer', async (c) => {
       catMap,
       curMap,
       unitLabelMap,
-      productMap
+      productMap,
+      false,
+      partialSync,
+      ideasoftTransferOverrides,
     );
 
     if (!result.ok) {
@@ -1894,16 +2069,33 @@ app.post('/api/products/:id/ideasoft-transfer', async (c) => {
   }
 });
 
-/** Seçili master ürünleri sırayla IdeaSoft’a aktarır (SKU zorunlu). */
+/** Seçili master ürünleri sırayla IdeaSoft’a aktarır (SKU zorunlu); eşleşme/SKU ile günceller veya yeni oluşturur. */
 app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
-    const body = await c.req.json<{ ids?: number[] }>().catch(() => ({}));
+    const body = await c.req.json<{
+      ids?: number[];
+      sync_general?: boolean;
+      sync_price?: boolean;
+      sync_images?: boolean;
+      sync_seo?: boolean;
+      ideasoft_stock_amount?: number | string;
+      ideasoft_discount_percent?: number | string;
+    }>().catch(() => ({}));
     const ids = Array.isArray(body.ids)
       ? body.ids.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0)
       : [];
     if (ids.length === 0) return c.json({ error: 'En az bir ürün ID gerekli' }, 400);
     if (ids.length > 200) return c.json({ error: 'Tek seferde en fazla 200 ürün' }, 400);
+
+    const partialSync: IdeasoftTransferPartialSyncBody = {
+      sync_general: body.sync_general,
+      sync_price: body.sync_price,
+      sync_images: body.sync_images,
+      sync_seo: body.sync_seo,
+    };
+
+    const ideasoftTransferOverrides = parseIdeasoftTransferFieldOverrides(body);
 
     const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
     const auth = getIdeasoftStoreAuth(settings);
@@ -1945,7 +2137,9 @@ app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
         curMap,
         unitLabelMap,
         productMap,
-        true
+        false,
+        partialSync,
+        ideasoftTransferOverrides,
       );
       if (r.ok) {
         results.push({
@@ -9932,7 +10126,7 @@ app.post('/api/parasut/products/:id/add-as-master', async (c) => {
     const attrs: Record<string, unknown> = { name, code: sku ?? '' };
     const imagePath = parseImageToFirstPath(image);
     if (imagePath) {
-      const photoUrl = await storagePathToDataUrl(c.env.STORAGE, imagePath);
+      const photoUrl = await buildParasutPhotoForPush(c.env.STORAGE, imagePath, c.req.url);
       if (photoUrl) attrs.photo = photoUrl;
     }
 
@@ -10079,7 +10273,9 @@ type ProductRowForParasutPush = {
   id: number; name: string; sku: string | null; barcode: string | null; price: number; quantity: number;
   tax_rate: number | null; unit_id: number | null; currency_id: number | null; supplier_code: string | null; gtip_code: string | null; image: string | null;
   category_id: number | null;
-  unit_code: string | null; currency_code: string | null;
+  unit_code: string | null;
+  unit_name: string | null;
+  currency_code: string | null;
 };
 
 function parseProductImageToFirstPath(img: unknown): string | null {
@@ -10119,15 +10315,16 @@ async function buildParasutPushAttributes(
   storage: R2Bucket | undefined,
   productRow: ProductRowForParasutPush,
   selected: ParasutPushSelected[],
-  opts?: { skipPhoto?: boolean },
+  opts?: { skipPhoto?: boolean; photoRequestUrl?: string },
 ): Promise<Record<string, unknown>> {
   const skipPhoto = !!opts?.skipPhoto;
+  const photoReq = opts?.photoRequestUrl;
   const attrs: Record<string, unknown> = { name: productRow.name };
   if (!isEmptyParasutVal(productRow.sku)) attrs.code = productRow.sku!.trim();
   if (!skipPhoto) {
     const imagePath = parseProductImageToFirstPath(productRow.image);
     if (imagePath) {
-      const photoUrl = await storagePathToDataUrl(storage, imagePath);
+      const photoUrl = await buildParasutPhotoForPush(storage, imagePath, photoReq);
       if (photoUrl) attrs.photo = photoUrl;
     }
   }
@@ -10145,17 +10342,80 @@ async function buildParasutPushAttributes(
     else if (master === 'tax_rate') attrs.vat_rate = productRow.tax_rate ?? 0;
     else if (master === 'supplier_code' && !isEmptyParasutVal(productRow.supplier_code)) attrs.supplier_code = productRow.supplier_code!.trim();
     else if (master === 'gtip_code' && !isEmptyParasutVal(productRow.gtip_code)) attrs.gtip = productRow.gtip_code!.trim();
-    else if (master === 'unit_id' && !isEmptyParasutVal(productRow.unit_code)) attrs.unit = productRow.unit_code!.trim();
+    else if (master === 'unit_id') {
+      const name = productRow.unit_name != null ? String(productRow.unit_name).trim() : '';
+      const code = productRow.unit_code != null ? String(productRow.unit_code).trim().toUpperCase() : '';
+      const unitLabel =
+        name ||
+        (code === 'AD' ? 'Adet' : '') ||
+        (productRow.unit_code != null ? String(productRow.unit_code).trim() : '') ||
+        '';
+      if (unitLabel) attrs.unit = unitLabel;
+    }
     else if (master === 'currency_id') attrs.currency = (productRow.currency_code || 'TRY').toUpperCase();
     else if (master === 'image' && !skipPhoto) {
       const path = parseProductImageToFirstPath(productRow.image);
       if (path) {
-        const photoUrl = await storagePathToDataUrl(storage, path);
+        const photoUrl = await buildParasutPhotoForPush(storage, path, photoReq);
         if (photoUrl) attrs[parasut] = photoUrl;
       }
     }
   }
   return attrs;
+}
+
+function stripParasutBuyingPriceAttrs(attrs: Record<string, unknown>): void {
+  delete attrs.buying_price;
+  delete attrs.buying_currency;
+}
+
+/**
+ * Mevcut Paraşüt kaydı güncellenirken: kullanıcı hangi kümeleri seçtiyse diğer master alanlarını gövdeden çıkarır.
+ * Ürün bilgisi: ad, kod, barkod, birim, KDV, tedarikçi kodu, GTIP, stok eşlemesi.
+ * Fiyat: satış fiyatı + kur (currency_id eşlemesi).
+ * Görsel: photo + image eşlemesi.
+ */
+function applyParasutMasterSyncGroupFilters(
+  attrs: Record<string, unknown>,
+  selected: ParasutPushSelected[],
+  opts: { sync_product_info: boolean; sync_photo: boolean; sync_price: boolean },
+): void {
+  const { sync_product_info, sync_photo, sync_price } = opts;
+  if (!sync_photo) {
+    delete attrs.photo;
+    for (const { parasut, master } of selected) {
+      if (master === 'image' && parasut?.trim()) delete attrs[parasut.trim()];
+    }
+  }
+  if (!sync_price) {
+    delete attrs.list_price;
+    delete attrs.currency;
+    for (const { parasut, master } of selected) {
+      if (master === 'price' && parasut?.trim()) delete attrs[parasut.trim()];
+      if (master === 'currency_id' && parasut?.trim()) delete attrs[parasut.trim()];
+    }
+  }
+  if (!sync_product_info) {
+    delete attrs.name;
+    delete attrs.code;
+    delete attrs.barcode;
+    delete attrs.unit;
+    delete attrs.vat_rate;
+    delete attrs.supplier_code;
+    delete attrs.gtip;
+    for (const { parasut, master } of selected) {
+      const p = parasut?.trim();
+      if (!p) continue;
+      if (master === 'name') delete attrs[p];
+      else if (master === 'sku') delete attrs[p];
+      else if (master === 'barcode') delete attrs[p];
+      else if (master === 'tax_rate') delete attrs[p];
+      else if (master === 'supplier_code') delete attrs[p];
+      else if (master === 'gtip_code') delete attrs[p];
+      else if (master === 'unit_id') delete attrs[p];
+      else if (master === 'quantity') delete attrs[p];
+    }
+  }
 }
 
 /** Paraşüt alt isteğinde gövde limiti / zaman aşımı riski — aşırı büyük data URL kaldırılır */
@@ -10200,12 +10460,12 @@ function pickWritableParasutProductAttributes(attrs: Record<string, unknown>): R
   return out;
 }
 
-/** PUT 400/422 iken sırayla çıkarılacak alanlar (en sık sorun çıkaranlar önce); name hiç çıkarılmaz */
+/** PUT 400/422/500/502/503 iken sırayla çıkarılacak alanlar (en sık sorun çıkaranlar önce); name hiç çıkarılmaz */
 const PARASUT_PUT_RETRY_STRIP_ORDER: readonly string[] = [
+  'photo',
   'gtip',
   'barcode',
   'unit',
-  'photo',
   'code',
   'inventory_tracking',
   'archived',
@@ -10220,6 +10480,8 @@ const PARASUT_PUT_RETRY_STRIP_ORDER: readonly string[] = [
   'buying_price',
   'buying_currency',
 ];
+
+const PARASUT_PUT_RETRYABLE_STATUSES = new Set([400, 422, 500, 502, 503]);
 
 function parasutApiErrorMessage(json: unknown, httpStatus: number): string {
   if (json && typeof json === 'object' && json !== null) {
@@ -10274,7 +10536,7 @@ function normalizeParasutGtipInAttributes(attrs: Record<string, unknown>): void 
   delete attrs.gtip;
 }
 
-/** Güncelleme öncesi: Paraşüt'teki kayıt (alış fiyatı vb. PUT'ta zorunlu olabiliyor) */
+/** Güncelleme öncesi: Paraşüt'teki kayıt; master push'ta alış fiyatı birleştirilmez. */
 async function fetchParasutProductAttributes(
   base: string,
   companyId: string,
@@ -10290,12 +10552,14 @@ async function fetchParasutProductAttributes(
   return attrs && typeof attrs === 'object' ? attrs : null;
 }
 
-/** PUT gövdesine: uzaktaki alış fiyatı / döviz (göndermezsek Paraşüt reddedebilir) */
+/** PUT gövdesine: uzaktaki alanlar (master push’ta alış fiyatı hariç). */
 function mergeParasutUpdateAttrsWithExistingRemote(
   updateAttrs: Record<string, unknown>,
   remote: Record<string, unknown> | null,
+  opts?: { mergeBuying?: boolean },
 ): void {
   if (!remote) return;
+  const mergeBuying = opts?.mergeBuying !== false;
   const pickRemote = (k: string) => {
     if (Object.prototype.hasOwnProperty.call(updateAttrs, k)) return;
     const v = remote[k];
@@ -10303,12 +10567,14 @@ function mergeParasutUpdateAttrsWithExistingRemote(
     if (typeof v === 'string' && !v.trim() && k !== 'name' && k !== 'code') return;
     updateAttrs[k] = v;
   };
-  pickRemote('buying_price');
-  pickRemote('buying_currency');
+  if (mergeBuying) {
+    pickRemote('buying_price');
+    pickRemote('buying_currency');
+  }
   pickRemote('inventory_tracking');
 }
 
-/** Hâlâ eksikse satış fiyatı / para birimi ile doldur (create ile aynı mantık) */
+/** Paraşüt ürün PUT (panel): alış eksikse list_price / currency ile tamamla. Master push bu fonksiyonu kullanmaz. */
 function applyParasutUpdateBuyingDefaults(attrs: Record<string, unknown>): void {
   const listRaw = attrs.list_price;
   const listNum = typeof listRaw === 'number' && Number.isFinite(listRaw)
@@ -10323,22 +10589,15 @@ function applyParasutUpdateBuyingDefaults(attrs: Record<string, unknown>): void 
   }
 }
 
-/** Yeni ürün: Paraşüt çoğu hesapta alış fiyatı / para birimi bekler */
+/** Yeni ürün: list_price / KDV / stok; alış fiyatı gönderilmez. */
 function applyParasutCreateDefaults(attrs: Record<string, unknown>): void {
   const listRaw = attrs.list_price;
   const listNum = typeof listRaw === 'number' && Number.isFinite(listRaw)
     ? listRaw
     : parseFloat(String(listRaw ?? '0').replace(',', '.')) || 0;
   attrs.list_price = listNum;
-  const buyRaw = attrs.buying_price;
-  const buyNum = typeof buyRaw === 'number' && Number.isFinite(buyRaw)
-    ? buyRaw
-    : parseFloat(String(buyRaw ?? '').replace(',', '.'));
-  attrs.buying_price = Number.isFinite(buyNum) ? buyNum : listNum;
   const cur = attrs.currency != null ? String(attrs.currency).trim().toUpperCase() : '';
   attrs.currency = cur || 'TRY';
-  const bcur = attrs.buying_currency != null ? String(attrs.buying_currency).trim().toUpperCase() : '';
-  attrs.buying_currency = bcur || (attrs.currency as string) || 'TRY';
   if (attrs.vat_rate == null || attrs.vat_rate === '') {
     attrs.vat_rate = 0;
   } else if (typeof attrs.vat_rate === 'string') {
@@ -10416,7 +10675,7 @@ app.post('/api/parasut/products/push-preview', async (c) => {
 
     const productRow = await c.env.DB.prepare(
       `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.unit_id, p.currency_id, p.category_id, p.supplier_code, p.gtip_code, p.image,
-       u.code as unit_code, cur.code as currency_code
+       u.code as unit_code, u.name as unit_name, cur.code as currency_code
        FROM products p
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
@@ -10432,7 +10691,9 @@ app.post('/api/parasut/products/push-preview', async (c) => {
     const auth = await getParasutAuth(c);
     if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
 
-    const attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected);
+    const attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected, {
+      photoRequestUrl: c.req.url,
+    });
 
     const base = 'https://api.parasut.com';
     const params = new URLSearchParams();
@@ -10494,6 +10755,10 @@ app.post('/api/parasut/products/push', async (c) => {
       create_new?: boolean;
       selected_fields?: ParasutPushSelected[];
       attribute_overrides?: Record<string, unknown>;
+      /** Yalnızca mevcut kayıt güncellemesinde; en az biri true olmalı */
+      sync_product_info?: boolean;
+      sync_photo?: boolean;
+      sync_price?: boolean;
     }>();
     const parasutIdRaw = body?.parasut_id != null ? String(body.parasut_id).trim() : '';
     const productId = body?.product_id;
@@ -10512,7 +10777,7 @@ app.post('/api/parasut/products/push', async (c) => {
 
     const productRow = await c.env.DB.prepare(
       `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.unit_id, p.currency_id, p.category_id, p.supplier_code, p.gtip_code, p.image,
-       u.code as unit_code, cur.code as currency_code
+       u.code as unit_code, u.name as unit_name, cur.code as currency_code
        FROM products p
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
@@ -10523,11 +10788,44 @@ app.post('/api/parasut/products/push', async (c) => {
     const auth = await getParasutAuth(c);
     if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
 
-    let attrs = await buildParasutPushAttributes(c.env.STORAGE, productRow, selected, wantsCreate ? { skipPhoto: true } : undefined);
+    let attrs = await buildParasutPushAttributes(
+      c.env.STORAGE,
+      productRow,
+      selected,
+      wantsCreate ? { skipPhoto: true } : { photoRequestUrl: c.req.url },
+    );
     attrs = mergeParasutAttributeOverrides(attrs, body.attribute_overrides);
+    stripParasutBuyingPriceAttrs(attrs);
+
+    if (!wantsCreate) {
+      const hinted =
+        body.sync_product_info !== undefined ||
+        body.sync_photo !== undefined ||
+        body.sync_price !== undefined;
+      const syncProduct = hinted ? !!body.sync_product_info : true;
+      const syncPhoto = hinted ? !!body.sync_photo : true;
+      const syncPrice = hinted ? !!body.sync_price : true;
+      if (hinted && !syncProduct && !syncPhoto && !syncPrice) {
+        return c.json({ error: 'En az bir aktarım seçeneği işaretlenmelidir (ürün bilgisi, görsel veya fiyat).' }, 400);
+      }
+      applyParasutMasterSyncGroupFilters(attrs, selected, {
+        sync_product_info: syncProduct,
+        sync_photo: syncPhoto,
+        sync_price: syncPrice,
+      });
+    }
 
     const nm = attrs.name != null ? String(attrs.name).trim() : '';
-    if (!nm) attrs.name = productRow.name?.trim() || 'Ürün';
+    if (!nm && wantsCreate) {
+      attrs.name = productRow.name?.trim() || 'Ürün';
+    } else if (!nm && !wantsCreate) {
+      const hintedGrp =
+        body.sync_product_info !== undefined ||
+        body.sync_photo !== undefined ||
+        body.sync_price !== undefined;
+      const syncProduct = hintedGrp ? !!body.sync_product_info : true;
+      if (syncProduct) attrs.name = productRow.name?.trim() || 'Ürün';
+    }
     if (attrs.code != null && String(attrs.code).trim() === '' && productRow.sku?.trim()) {
       attrs.code = productRow.sku.trim();
     }
@@ -10630,9 +10928,14 @@ app.post('/api/parasut/products/push', async (c) => {
     stripOversizedParasutPhoto(updateAttrs);
 
     const remoteAttrs = await fetchParasutProductAttributes(base, String(auth.companyId), auth.token, parasutId);
-    mergeParasutUpdateAttrsWithExistingRemote(updateAttrs, remoteAttrs);
-    applyParasutUpdateBuyingDefaults(updateAttrs);
+    mergeParasutUpdateAttrsWithExistingRemote(updateAttrs, remoteAttrs, { mergeBuying: false });
+    stripParasutBuyingPriceAttrs(updateAttrs);
     const updateAttrsFinal = pickWritableParasutProductAttributes(updateAttrs);
+    if (remoteAttrs && Object.prototype.hasOwnProperty.call(updateAttrsFinal, 'code')) {
+      const rs = remoteAttrs.code != null ? String(remoteAttrs.code).trim() : '';
+      const ls = updateAttrsFinal.code != null ? String(updateAttrsFinal.code).trim() : '';
+      if (rs !== '' && rs === ls) delete updateAttrsFinal.code;
+    }
 
     const putParasutProduct = (attributes: Record<string, unknown>) =>
       fetch(`${base}/v4/${auth.companyId}/products/${parasutId}`, {
@@ -10668,7 +10971,7 @@ app.post('/api/parasut/products/push', async (c) => {
           ...(parasutFieldsOmitted.length > 0 ? { parasut_fields_omitted: parasutFieldsOmitted } : {}),
         });
       }
-      if (updateRes.status !== 400 && updateRes.status !== 422) {
+      if (!PARASUT_PUT_RETRYABLE_STATUSES.has(updateRes.status)) {
         break;
       }
       const nextKey = PARASUT_PUT_RETRY_STRIP_ORDER.find((k) =>

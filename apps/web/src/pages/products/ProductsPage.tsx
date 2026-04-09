@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers, Store, Loader2, CheckCircle2, XCircle } from 'lucide-react'
+import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers, Store, CheckCircle2, XCircle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -41,6 +41,7 @@ import { ProductCodeDisplay } from '@/components/ProductCodeDisplay'
 import { ProductPricePreview } from '@/components/ProductPricePreview'
 import { buildProductCode } from '@/lib/productCode'
 import { Switch } from '@/components/ui/switch'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   DropdownMenu,
@@ -197,19 +198,6 @@ const PARASUT_ATTR_LABELS: Record<string, string> = {
   gtip: 'GTIP',
   supplier_code: 'Tedarikçi kodu',
   photo: 'Ana görsel',
-}
-
-const PARASUT_ATTR_SORT_ORDER = [
-  'code', 'name', 'list_price', 'currency', 'buying_price', 'buying_currency', 'unit', 'vat_rate',
-  'initial_stock_count', 'stock_count', 'barcode', 'gtip', 'supplier_code', 'photo',
-]
-
-function sortParasutAttributeKeys(keys: string[]): string[] {
-  const rank = (k: string) => {
-    const i = PARASUT_ATTR_SORT_ORDER.indexOf(k)
-    return i === -1 ? 999 : i
-  }
-  return [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
 }
 
 function parasutFetchErrorMessage(e: unknown): string {
@@ -567,6 +555,15 @@ function parseImageToArray(image: string | undefined): string[] {
   return arr.slice(0, IMAGE_SLOTS)
 }
 
+function hasProductImagePaths(image: string | undefined): boolean {
+  return parseImageToArray(image).some((s) => s.trim().length > 0)
+}
+
+/** Modal / form: görseller `images[]` slot dizisinde tutulur (`image` kolonu ayrı alan değil). */
+function hasFormProductImages(images: string[] | undefined): boolean {
+  return (images ?? []).some((s) => typeof s === 'string' && s.trim().length > 0)
+}
+
 function serializeImagesToImage(images: string[]): string | undefined {
   const filtered = images.filter(Boolean)
   if (filtered.length === 0) return undefined
@@ -670,22 +667,30 @@ export function ProductsPage() {
   const [competitorUrlsText, setCompetitorUrlsText] = useState('')
   const [openCartPublishOpen, setOpenCartPublishOpen] = useState(false)
   const [openCartUpdateOptions, setOpenCartUpdateOptions] = useState({ update_price: true, update_description: true, update_images: true })
-  const [parasutTransferOpen, setParasutTransferOpen] = useState(false)
-  const [parasutPreviewLoading, setParasutPreviewLoading] = useState(false)
-  const [parasutPreview, setParasutPreview] = useState<{
-    parasut_id: string | null
-    parasut_product: { id?: string; code: string; name: string } | null
-    sku_used: string
-    attributes_display: Record<string, unknown>
-    has_photo: boolean
-    selected_fields: { parasut: string; master: string }[]
-  } | null>(null)
-  const [parasutPreviewError, setParasutPreviewError] = useState<string | null>(null)
-  const [parasutFieldEdits, setParasutFieldEdits] = useState<Record<string, string>>({})
   const [parasutTransferLoading, setParasutTransferLoading] = useState(false)
+  const [parasutPreviewLoading, setParasutPreviewLoading] = useState(false)
+  const [parasutTransferModalOpen, setParasutTransferModalOpen] = useState(false)
+  const [parasutPending, setParasutPending] = useState<{
+    parasut_id: string
+    sku_used: string
+    parasut_product: { id?: string; code: string; name: string } | null
+    attributes_display: Record<string, unknown>
+    selected_fields: { parasut: string; master: string }[]
+    has_photo: boolean
+  } | null>(null)
+  const [parasutSyncProductInfo, setParasutSyncProductInfo] = useState(true)
+  const [parasutSyncPhoto, setParasutSyncPhoto] = useState(true)
+  const [parasutSyncPrice, setParasutSyncPrice] = useState(true)
   const [ideasoftTransferLoading, setIdeasoftTransferLoading] = useState(false)
-  /** SKU ile otomatik eşleşme yoksa Paraşüt panelindeki ürün kimliği */
-  const [parasutManualId, setParasutManualId] = useState('')
+  const [ideasoftTransferModalOpen, setIdeasoftTransferModalOpen] = useState(false)
+  const [ideasoftSyncGeneral, setIdeasoftSyncGeneral] = useState(false)
+  const [ideasoftSyncPrice, setIdeasoftSyncPrice] = useState(false)
+  const [ideasoftSyncImages, setIdeasoftSyncImages] = useState(false)
+  const [ideasoftSyncSeo, setIdeasoftSyncSeo] = useState(false)
+  const [ideasoftTransferStock, setIdeasoftTransferStock] = useState('20')
+  const [ideasoftTransferDiscountPct, setIdeasoftTransferDiscountPct] = useState('55')
+  const [ideasoftApplyTransferStock, setIdeasoftApplyTransferStock] = useState(true)
+  const [ideasoftApplyTransferDiscount, setIdeasoftApplyTransferDiscount] = useState(true)
   const [filterCategorySearch, setFilterCategorySearch] = useState('')
   const [filterBrandSearch, setFilterBrandSearch] = useState('')
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
@@ -704,6 +709,15 @@ export function ProductsPage() {
   const [bulkQuantity, setBulkQuantity] = useState<string>('0')
   const [bulkSaving, setBulkSaving] = useState(false)
   const [ideasoftBulkLoading, setIdeasoftBulkLoading] = useState(false)
+  const [ideasoftBulkTransferModalOpen, setIdeasoftBulkTransferModalOpen] = useState(false)
+  const [ideasoftBulkSyncGeneral, setIdeasoftBulkSyncGeneral] = useState(false)
+  const [ideasoftBulkSyncPrice, setIdeasoftBulkSyncPrice] = useState(false)
+  const [ideasoftBulkSyncImages, setIdeasoftBulkSyncImages] = useState(false)
+  const [ideasoftBulkSyncSeo, setIdeasoftBulkSyncSeo] = useState(false)
+  const [ideasoftBulkTransferStock, setIdeasoftBulkTransferStock] = useState('20')
+  const [ideasoftBulkTransferDiscountPct, setIdeasoftBulkTransferDiscountPct] = useState('55')
+  const [ideasoftBulkApplyTransferStock, setIdeasoftBulkApplyTransferStock] = useState(true)
+  const [ideasoftBulkApplyTransferDiscount, setIdeasoftBulkApplyTransferDiscount] = useState(true)
   const [ideasoftBulkSummary, setIdeasoftBulkSummary] = useState<{
     succeeded: number
     failed: number
@@ -767,129 +781,248 @@ export function ProductsPage() {
     }
   }, [])
 
-  const openParasutTransferModal = useCallback(async () => {
+  const buildParasutOverridesFromDisplay = useCallback(
+    (disp: Record<string, unknown>) => {
+      const nameVal = disp.name != null ? String(disp.name).trim() : ''
+      if (!nameVal) {
+        toastError('Paraşüt aktarımı', 'Ürün adı boş; önce ürünü kaydedin.')
+        return null
+      }
+      const numericKeys = new Set(['list_price', 'vat_rate', 'initial_stock_count', 'stock_count'])
+      const overrides: Record<string, unknown> = {}
+      for (const [k, raw] of Object.entries(disp)) {
+        if (k === 'buying_price' || k === 'buying_currency') continue
+        if (raw === null || raw === undefined) {
+          overrides[k] = ''
+          continue
+        }
+        if (typeof raw === 'number' && numericKeys.has(k)) {
+          overrides[k] = raw
+          continue
+        }
+        const s = typeof raw === 'string' ? raw.trim() : String(raw)
+        if (s === '' && typeof raw !== 'number') {
+          overrides[k] = ''
+          continue
+        }
+        if (numericKeys.has(k)) {
+          const n = typeof raw === 'number' && Number.isFinite(raw) ? raw : parseFloat(s.replace(',', '.'))
+          if (Number.isNaN(n)) {
+            toastError('Paraşüt aktarımı', `"${PARASUT_ATTR_LABELS[k] ?? k}" için geçersiz sayı.`)
+            return null
+          }
+          overrides[k] = n
+        } else {
+          overrides[k] = typeof raw === 'string' ? s : raw
+        }
+      }
+      return overrides
+    },
+    []
+  )
+
+  const executeParasutPush = useCallback(
+    async (opts: {
+      createNew: boolean
+      parasutId?: string
+      selected_fields: { parasut: string; master: string }[]
+      attributes_display: Record<string, unknown>
+      sync?: { product: boolean; photo: boolean; price: boolean }
+    }) => {
+      if (!editingId) return
+      const overrides = buildParasutOverridesFromDisplay(opts.attributes_display)
+      if (!overrides) return
+      const body: Record<string, unknown> = {
+        product_id: editingId,
+        create_new: opts.createNew,
+        selected_fields: opts.selected_fields,
+        attribute_overrides: overrides,
+      }
+      if (!opts.createNew && opts.parasutId) body.parasut_id = opts.parasutId
+      if (!opts.createNew && opts.sync) {
+        body.sync_product_info = opts.sync.product
+        body.sync_photo = opts.sync.photo
+        body.sync_price = opts.sync.price
+      }
+      const pushRes = await fetch(`${API_URL}/api/parasut/products/push`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const pushData = await parseJsonResponse<{ error?: string; message?: string }>(pushRes)
+      if (!pushRes.ok) throw new Error(pushData.error || 'Aktarım başarısız')
+      toastSuccess(
+        'Paraşüt',
+        pushData.message ||
+          (opts.createNew ? 'Paraşüt’te yeni ürün oluşturuldu.' : 'Ürün Paraşüt’e aktarıldı.')
+      )
+    },
+    [editingId, buildParasutOverridesFromDisplay]
+  )
+
+  /** SKU ile Paraşüt’te kayıt varsa modal ile kümeler; yoksa doğrudan tam aktarım. */
+  const runParasutTransfer = useCallback(async () => {
     if (!editingId) return
-    setParasutTransferOpen(true)
-    setParasutPreview(null)
-    setParasutPreviewError(null)
-    setParasutFieldEdits({})
-    setParasutManualId('')
     setParasutPreviewLoading(true)
     try {
-      const res = await fetch(`${API_URL}/api/parasut/products/push-preview`, {
+      const prevRes = await fetch(`${API_URL}/api/parasut/products/push-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ product_id: editingId }),
       })
-      const data = await parseJsonResponse<{
+      const prevData = await parseJsonResponse<{
         error?: string
         parasut_id?: string | null
         parasut_product?: { id?: string; code: string; name: string } | null
         sku_used?: string
         attributes_display?: Record<string, unknown>
-        has_photo?: boolean
         selected_fields?: { parasut: string; master: string }[]
-      }>(res)
-      if (!res.ok) throw new Error(data.error || 'Önizleme alınamadı')
-      const d = data
-      const rawPid = d.parasut_id
-      const fromProduct = d.parasut_product?.id
+        has_photo?: boolean
+      }>(prevRes)
+      if (!prevRes.ok) throw new Error(prevData.error || 'Önizleme alınamadı')
+
+      const rawPid = prevData.parasut_id
+      const fromProduct = prevData.parasut_product?.id
       const parasutIdResolved =
         rawPid != null && String(rawPid).trim() !== ''
           ? String(rawPid).trim()
           : fromProduct != null && String(fromProduct).trim() !== ''
             ? String(fromProduct).trim()
-            : null
-      setParasutPreview({
-        parasut_id: parasutIdResolved,
-        parasut_product: d.parasut_product ?? null,
-        sku_used: String(d.sku_used ?? ''),
-        attributes_display: d.attributes_display ?? {},
-        has_photo: !!d.has_photo,
-        selected_fields: Array.isArray(d.selected_fields) ? d.selected_fields : [],
-      })
-      const disp = d.attributes_display ?? {}
-      const edits: Record<string, string> = {}
-      for (const [k, v] of Object.entries(disp)) {
-        if (v == null || v === '') edits[k] = ''
-        else if (typeof v === 'number') edits[k] = String(v)
-        else edits[k] = String(v)
+            : ''
+
+      const selected = Array.isArray(prevData.selected_fields) ? prevData.selected_fields : []
+      const disp = prevData.attributes_display ?? {}
+
+      if (!parasutIdResolved) {
+        setParasutTransferLoading(true)
+        try {
+          await executeParasutPush({
+            createNew: true,
+            selected_fields: selected,
+            attributes_display: disp,
+          })
+        } finally {
+          setParasutTransferLoading(false)
+        }
+        return
       }
-      setParasutFieldEdits(edits)
+
+      setParasutPending({
+        parasut_id: parasutIdResolved,
+        sku_used: String(prevData.sku_used ?? ''),
+        parasut_product: prevData.parasut_product ?? null,
+        attributes_display: disp,
+        selected_fields: selected,
+        has_photo: !!prevData.has_photo,
+      })
+      setParasutSyncProductInfo(true)
+      setParasutSyncPhoto(true)
+      setParasutSyncPrice(true)
+      setParasutTransferModalOpen(true)
     } catch (e) {
-      setParasutPreviewError(parasutFetchErrorMessage(e))
+      toastError('Paraşüt aktarımı', parasutFetchErrorMessage(e))
     } finally {
       setParasutPreviewLoading(false)
     }
-  }, [editingId])
+  }, [editingId, executeParasutPush])
 
-  const submitParasutTransfer = useCallback(async () => {
-    if (!editingId || !parasutPreview) return
-    const targetParasutId = (parasutManualId.trim() || String(parasutPreview.parasut_id ?? '').trim()).trim()
-    const createNew = !targetParasutId
-    const nameEd = parasutFieldEdits.name?.trim()
-    if (!nameEd) {
-      toastError('Hata', 'Ürün adı boş olamaz.')
+  const confirmParasutTransferModal = useCallback(async () => {
+    if (!editingId || !parasutPending) return
+    if (!parasutSyncProductInfo && !parasutSyncPhoto && !parasutSyncPrice) {
+      toastError('Paraşüt aktarımı', 'En az bir seçenek işaretleyin.')
       return
-    }
-    const numericKeys = new Set(['list_price', 'vat_rate', 'initial_stock_count', 'stock_count', 'buying_price'])
-    const overrides: Record<string, unknown> = {}
-    for (const [k, raw] of Object.entries(parasutFieldEdits)) {
-      const s = raw.trim()
-      if (s === '') {
-        overrides[k] = ''
-        continue
-      }
-      if (numericKeys.has(k)) {
-        const n = parseFloat(s.replace(',', '.'))
-        if (Number.isNaN(n)) {
-          toastError('Hata', `"${PARASUT_ATTR_LABELS[k] ?? k}" için geçerli bir sayı girin.`)
-          return
-        }
-        overrides[k] = n
-      } else {
-        overrides[k] = s
-      }
     }
     setParasutTransferLoading(true)
     try {
-      const res = await fetch(`${API_URL}/api/parasut/products/push`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...(targetParasutId ? { parasut_id: targetParasutId } : {}),
-          create_new: createNew,
-          product_id: editingId,
-          selected_fields: parasutPreview.selected_fields,
-          attribute_overrides: overrides,
-        }),
+      await executeParasutPush({
+        createNew: false,
+        parasutId: parasutPending.parasut_id,
+        selected_fields: parasutPending.selected_fields,
+        attributes_display: parasutPending.attributes_display,
+        sync: {
+          product: parasutSyncProductInfo,
+          photo: parasutSyncPhoto,
+          price: parasutSyncPrice,
+        },
       })
-      const data = await parseJsonResponse<{ error?: string; message?: string }>(res)
-      if (!res.ok) throw new Error(data.error || 'Aktarım başarısız')
-      toastSuccess(
-        'Tamam',
-        (data as { message?: string }).message ||
-          (createNew ? 'Paraşüt\'te yeni ürün oluşturuldu.' : 'Ürün Paraşüt\'e aktarıldı.')
-      )
-      setParasutTransferOpen(false)
-      setParasutPreview(null)
-      setParasutFieldEdits({})
-      setParasutManualId('')
+      setParasutTransferModalOpen(false)
+      setParasutPending(null)
     } catch (e) {
-      toastError('Hata', parasutFetchErrorMessage(e))
+      toastError('Paraşüt aktarımı', parasutFetchErrorMessage(e))
     } finally {
       setParasutTransferLoading(false)
     }
-  }, [editingId, parasutPreview, parasutFieldEdits, parasutManualId])
+  }, [
+    editingId,
+    parasutPending,
+    parasutSyncProductInfo,
+    parasutSyncPhoto,
+    parasutSyncPrice,
+    executeParasutPush,
+  ])
 
-  const submitIdeasoftTransfer = useCallback(async () => {
+  const openIdeasoftTransferModal = useCallback(() => {
+    setIdeasoftSyncGeneral(false)
+    setIdeasoftSyncPrice(false)
+    setIdeasoftSyncImages(false)
+    setIdeasoftSyncSeo(false)
+    setIdeasoftTransferStock('20')
+    setIdeasoftTransferDiscountPct('55')
+    setIdeasoftApplyTransferStock(true)
+    setIdeasoftApplyTransferDiscount(true)
+    setIdeasoftTransferModalOpen(true)
+  }, [])
+
+  const selectAllIdeasoftSyncSingle = useCallback(() => {
+    setIdeasoftSyncGeneral(true)
+    setIdeasoftSyncPrice(true)
+    setIdeasoftSyncImages(true)
+    setIdeasoftSyncSeo(true)
+    setIdeasoftApplyTransferStock(true)
+    setIdeasoftApplyTransferDiscount(true)
+  }, [])
+
+  const confirmIdeasoftTransfer = useCallback(async () => {
     if (!editingId) return
+    if (!ideasoftSyncGeneral && !ideasoftSyncPrice && !ideasoftSyncImages && !ideasoftSyncSeo) {
+      toastError('IdeaSoft', 'En az bir bilgi grubu seçin.')
+      return
+    }
+    let stockN: number | undefined
+    if (ideasoftApplyTransferStock) {
+      stockN = parseFloat(String(ideasoftTransferStock).replace(',', '.'))
+      if (!Number.isFinite(stockN) || stockN < 0) {
+        toastError('IdeaSoft', 'Stok miktarı 0 veya üzeri geçerli bir sayı olmalıdır.')
+        return
+      }
+    }
+    let discN: number | undefined
+    if (ideasoftApplyTransferDiscount) {
+      const rawDisc = String(ideasoftTransferDiscountPct).trim()
+      if (rawDisc !== '') {
+        const n = parseFloat(rawDisc.replace(',', '.'))
+        if (!Number.isFinite(n) || n < 0 || n > 100) {
+          toastError('IdeaSoft', 'İndirim yüzdesi 0,01–100 arasında olmalıdır (boş veya 0: indirim gönderilmez).')
+          return
+        }
+        if (n > 0) discN = n
+      }
+    }
     setIdeasoftTransferLoading(true)
     try {
+      const payload: Record<string, unknown> = {
+        sync_general: ideasoftSyncGeneral,
+        sync_price: ideasoftSyncPrice,
+        sync_images: ideasoftSyncImages,
+        sync_seo: ideasoftSyncSeo,
+      }
+      if (ideasoftApplyTransferStock && stockN !== undefined) payload.ideasoft_stock_amount = stockN
+      if (ideasoftApplyTransferDiscount && discN !== undefined && discN > 0)
+        payload.ideasoft_discount_percent = discN
       const res = await fetch(`${API_URL}/api/products/${editingId}/ideasoft-transfer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify(payload),
       })
       const data = await parseJsonResponse<{ error?: string; hint?: string; message?: string }>(res)
       if (!res.ok) {
@@ -898,12 +1031,23 @@ export function ProductsPage() {
         throw new Error(h ? `${msg}\n\n${h}` : msg)
       }
       toastSuccess('IdeaSoft', data.message || 'Ürün IdeaSoft’a aktarıldı.')
+      setIdeasoftTransferModalOpen(false)
     } catch (e) {
       toastError('Hata', parasutFetchErrorMessage(e))
     } finally {
       setIdeasoftTransferLoading(false)
     }
-  }, [editingId])
+  }, [
+    editingId,
+    ideasoftSyncGeneral,
+    ideasoftSyncPrice,
+    ideasoftSyncImages,
+    ideasoftSyncSeo,
+    ideasoftTransferStock,
+    ideasoftTransferDiscountPct,
+    ideasoftApplyTransferStock,
+    ideasoftApplyTransferDiscount,
+  ])
 
   const categoryPath = useMemo(
     () => getCategoryPath(categories, form.category_id),
@@ -1821,15 +1965,67 @@ export function ProductsPage() {
     quantity?: number | null
   }
 
+  const bulkIdeasoftSelectionHasAnyImage = useMemo(
+    () => data.some((p) => selectedIds.has(p.id) && hasProductImagePaths(p.image)),
+    [data, selectedIds]
+  )
+
+  const openIdeasoftBulkTransferModal = useCallback(() => {
+    if (selectedIds.size === 0) return
+    setIdeasoftBulkSyncGeneral(false)
+    setIdeasoftBulkSyncPrice(false)
+    setIdeasoftBulkSyncImages(false)
+    setIdeasoftBulkSyncSeo(false)
+    setIdeasoftBulkTransferStock('20')
+    setIdeasoftBulkTransferDiscountPct('55')
+    setIdeasoftBulkApplyTransferStock(true)
+    setIdeasoftBulkApplyTransferDiscount(true)
+    setIdeasoftBulkTransferModalOpen(true)
+  }, [selectedIds.size])
+
+  const selectAllIdeasoftSyncBulk = useCallback(() => {
+    setIdeasoftBulkSyncGeneral(true)
+    setIdeasoftBulkSyncPrice(true)
+    setIdeasoftBulkSyncImages(true)
+    setIdeasoftBulkSyncSeo(true)
+    setIdeasoftBulkApplyTransferStock(true)
+    setIdeasoftBulkApplyTransferDiscount(true)
+  }, [])
+
   const submitBulkIdeasoftTransfer = useCallback(async () => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
     if (
-      !window.confirm(
-        `${ids.length} ürün IdeaSoft’ta tek tek yeni kayıt olarak oluşturulacak (mevcut IdeaSoft ürün ID’si veya eşleşme kullanılmaz; ID’yi IdeaSoft atar). SKU boş olanlar hata verir. Devam edilsin mi?`
-      )
+      !ideasoftBulkSyncGeneral &&
+      !ideasoftBulkSyncPrice &&
+      !ideasoftBulkSyncImages &&
+      !ideasoftBulkSyncSeo
     ) {
+      toastError('IdeaSoft toplu aktarım', 'En az bir bilgi grubu seçin.')
       return
+    }
+    let stockN: number | undefined
+    if (ideasoftBulkApplyTransferStock) {
+      stockN = parseFloat(String(ideasoftBulkTransferStock).replace(',', '.'))
+      if (!Number.isFinite(stockN) || stockN < 0) {
+        toastError('IdeaSoft toplu aktarım', 'Stok miktarı 0 veya üzeri geçerli bir sayı olmalıdır.')
+        return
+      }
+    }
+    let discN: number | undefined
+    if (ideasoftBulkApplyTransferDiscount) {
+      const rawDisc = String(ideasoftBulkTransferDiscountPct).trim()
+      if (rawDisc !== '') {
+        const n = parseFloat(rawDisc.replace(',', '.'))
+        if (!Number.isFinite(n) || n < 0 || n > 100) {
+          toastError(
+            'IdeaSoft toplu aktarım',
+            'İndirim yüzdesi 0,01–100 arasında olmalıdır (boş veya 0: indirim gönderilmez).'
+          )
+          return
+        }
+        if (n > 0) discN = n
+      }
     }
     const labelById = new Map<number, { name: string; sku?: string }>()
     for (const p of data) labelById.set(p.id, { name: p.name, sku: p.sku })
@@ -1838,7 +2034,17 @@ export function ProductsPage() {
       const res = await fetch(`${API_URL}/api/products/bulk-ideasoft-transfer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({
+          ids,
+          sync_general: ideasoftBulkSyncGeneral,
+          sync_price: ideasoftBulkSyncPrice,
+          sync_images: ideasoftBulkSyncImages,
+          sync_seo: ideasoftBulkSyncSeo,
+          ...(ideasoftBulkApplyTransferStock && stockN !== undefined ? { ideasoft_stock_amount: stockN } : {}),
+          ...(ideasoftBulkApplyTransferDiscount && discN !== undefined && discN > 0
+            ? { ideasoft_discount_percent: discN }
+            : {}),
+        }),
       })
       const dataJson = await parseJsonResponse<{
         error?: string
@@ -1895,6 +2101,7 @@ export function ProductsPage() {
       } else {
         toastError('IdeaSoft toplu aktarım', 'Hiçbir ürün aktarılamadı — ayrıntılar pencerede.')
       }
+      setIdeasoftBulkTransferModalOpen(false)
       setSelectedIds(new Set())
       fetchData()
     } catch (e) {
@@ -1902,7 +2109,19 @@ export function ProductsPage() {
     } finally {
       setIdeasoftBulkLoading(false)
     }
-  }, [selectedIds, fetchData, data])
+  }, [
+    selectedIds,
+    fetchData,
+    data,
+    ideasoftBulkSyncGeneral,
+    ideasoftBulkSyncPrice,
+    ideasoftBulkSyncImages,
+    ideasoftBulkSyncSeo,
+    ideasoftBulkTransferStock,
+    ideasoftBulkTransferDiscountPct,
+    ideasoftBulkApplyTransferStock,
+    ideasoftBulkApplyTransferDiscount,
+  ])
 
   const applyBulkPatch = async (patch: BulkPatch) => {
     const ids = Array.from(selectedIds)
@@ -2078,9 +2297,9 @@ export function ProductsPage() {
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={ideasoftBulkLoading}
-                  onClick={() => void submitBulkIdeasoftTransfer()}
+                  onClick={() => openIdeasoftBulkTransferModal()}
                 >
-                  {ideasoftBulkLoading ? 'IdeaSoft’a aktarılıyor…' : 'IdeaSoft’a aktar (toplu)'}
+                  IdeaSoft’a aktar (toplu)
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -3315,8 +3534,8 @@ export function ProductsPage() {
                             variant="outline"
                             size="icon"
                             className="h-9 w-9 shrink-0"
-                            onClick={() => void openParasutTransferModal()}
-                            disabled={saving}
+                            onClick={() => void runParasutTransfer()}
+                            disabled={saving || parasutTransferLoading || parasutPreviewLoading}
                             aria-label="Paraşüte aktar"
                           >
                             {parasutIconSrc ? (
@@ -3343,22 +3562,17 @@ export function ProductsPage() {
                             variant="outline"
                             size="icon"
                             className="h-9 w-9 shrink-0"
-                            onClick={() => void submitIdeasoftTransfer()}
+                            onClick={() => openIdeasoftTransferModal()}
                             disabled={saving || ideasoftTransferLoading}
                             aria-label="IdeaSoft'a aktar"
                           >
-                            {ideasoftTransferLoading ? (
-                              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                            ) : (
-                              <Store className="h-4 w-4" />
-                            )}
+                            <Store className="h-4 w-4" />
                           </Button>
                         </span>
                       </TooltipTrigger>
                       <TooltipContent className="max-w-xs">
-                        IdeaSoft’a aktar — Veritabanındaki kayıt gönderilir (SKU zorunlu). Kayıtlı eşleştirmelerle marka/kategori/kur
-                        atanır; aynı SKU’lu IdeaSoft ürünü varsa güncellenir, yoksa yeni oluşturulur. Formdaki son değişiklikler için
-                        önce Kaydet.
+                        IdeaSoft’a aktar — Hangi bilgilerin gönderileceğini seçersiniz. Kayıtlı eşleştirmelerle marka/kategori/kur atanır;
+                        aynı SKU’lu IdeaSoft ürünü varsa seçtikleriniz güncellenir, yoksa yeni ürün tam içerikle oluşturulur. Önce Kaydet.
                       </TooltipContent>
                     </Tooltip>
                   </div>
@@ -3799,107 +4013,414 @@ export function ProductsPage() {
       </Dialog>
 
       <Dialog
-        open={parasutTransferOpen}
+        open={parasutTransferModalOpen}
         onOpenChange={(o) => {
           if (!o) {
-            setParasutTransferOpen(false)
-            setParasutPreview(null)
-            setParasutPreviewError(null)
-            setParasutFieldEdits({})
-            setParasutManualId('')
+            setParasutTransferModalOpen(false)
+            setParasutPending(null)
           }
         }}
       >
-        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Paraşüte aktar</DialogTitle>
+            <DialogTitle>Paraşüt&apos;e aktarım</DialogTitle>
             <DialogDescription>
-              SKU ile eşleşen Paraşüt ürünü güncellenir. Eşleşme yoksa <strong>Aktar</strong> yeni ürün oluşturur. Veriler kayıtlı ana üründen gelir; formdaki son değişiklikler için önce Kaydet.
+              Bu SKU ile Paraşüt&apos;te kayıtlı ürün bulundu. Hangi bilgilerin master üründen güncelleneceğini seçin.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
-            {parasutPreviewLoading && (
-              <p className="text-sm text-muted-foreground text-center py-6">Önizleme yükleniyor…</p>
-            )}
-            {!parasutPreviewLoading && parasutPreviewError && (
-              <p className="text-sm text-destructive">{parasutPreviewError}</p>
-            )}
-            {!parasutPreviewLoading && parasutPreview && (
-              <>
-                <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm space-y-1">
+          {parasutPending && (
+            <div className="space-y-4 py-2">
+              <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm space-y-1">
+                <div>
+                  <span className="text-muted-foreground">SKU: </span>
+                  <span className="font-mono">{parasutPending.sku_used}</span>
+                </div>
+                {parasutPending.parasut_product && (
                   <div>
-                    <span className="text-muted-foreground">Eşleşme SKU: </span>
-                    <span className="font-mono">{parasutPreview.sku_used}</span>
-                  </div>
-                  {parasutPreview.parasut_product && (
-                    <div>
-                      <span className="text-muted-foreground">Paraşüt ürünü: </span>
-                      <span>{parasutPreview.parasut_product.name || parasutPreview.parasut_product.code || '—'}</span>
-                      {parasutPreview.parasut_product.code && (
-                        <span className="text-muted-foreground font-mono ml-1">({parasutPreview.parasut_product.code})</span>
-                      )}
-                    </div>
-                  )}
-                </div>
-                {!parasutPreview.parasut_id && (
-                  <div className="space-y-2 rounded-md border border-emerald-600/30 bg-emerald-500/10 px-3 py-3">
-                    <p className="text-sm text-emerald-900 dark:text-emerald-100">
-                      Bu SKU ile mevcut Paraşüt ürünü bulunamadı. <strong>Aktar</strong> ile aynı alanlarla <strong>yeni ürün</strong> oluşturulur (kod = SKU). İsterseniz aşağıya Paraşüt ürün ID yazarak mevcut kaydı güncelleyebilirsiniz.
-                    </p>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="parasut-manual-id">Mevcut ürünü güncelle — Paraşüt ürün ID (isteğe bağlı)</Label>
-                      <Input
-                        id="parasut-manual-id"
-                        value={parasutManualId}
-                        onChange={(e) => setParasutManualId(e.target.value)}
-                        placeholder="Boş bırakırsanız yeni ürün oluşturulur"
-                        className="font-mono text-sm"
-                        autoComplete="off"
-                      />
-                    </div>
+                    <span className="text-muted-foreground">Paraşüt ürünü: </span>
+                    <span>
+                      {parasutPending.parasut_product.name || parasutPending.parasut_product.code || '—'}
+                    </span>
                   </div>
                 )}
-                {parasutPreview.has_photo && (
-                  <p className="text-sm text-muted-foreground">
-                    Ana görsel, kayıtlı ürün görsellerinden otomatik olarak Paraşüt&apos;e gönderilir (önizlemede gösterilmez).
-                  </p>
-                )}
-                <div className="space-y-3 max-h-[42vh] overflow-y-auto pr-1">
-                  {sortParasutAttributeKeys(Object.keys(parasutFieldEdits)).map((key) => (
-                    <div key={key} className="space-y-1.5">
-                      <Label htmlFor={`parasut-attr-${key}`}>{PARASUT_ATTR_LABELS[key] ?? key}</Label>
-                      <Input
-                        id={`parasut-attr-${key}`}
-                        value={parasutFieldEdits[key] ?? ''}
-                        onChange={(e) => setParasutFieldEdits((prev) => ({ ...prev, [key]: e.target.value }))}
-                        className="font-mono text-sm"
-                      />
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-          <DialogFooter>
+              </div>
+              {parasutPending.has_photo && (
+                <p className="text-xs text-muted-foreground">
+                  Görsel seçildiğinde ilk ürün görseli Paraşüt&apos;e gönderilir.
+                </p>
+              )}
+              <div className="space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <Checkbox
+                    checked={parasutSyncProductInfo}
+                    onCheckedChange={(v) => setParasutSyncProductInfo(!!v)}
+                    id="parasut-sync-product"
+                  />
+                  <span className="text-sm leading-tight">
+                    <span className="font-medium block">Ürün bilgileri</span>
+                    <span className="text-muted-foreground">Kod, ad, barkod, birim, KDV, stok, tedarikçi kodu, GTIP</span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <Checkbox
+                    checked={parasutSyncPhoto}
+                    onCheckedChange={(v) => setParasutSyncPhoto(!!v)}
+                    id="parasut-sync-photo"
+                    disabled={!parasutPending.has_photo}
+                  />
+                  <span className="text-sm leading-tight">
+                    <span className="font-medium block">Görsel</span>
+                    <span className="text-muted-foreground">
+                      {parasutPending.has_photo ? 'İlk görsel' : 'Bu üründe görsel yok'}
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <Checkbox
+                    checked={parasutSyncPrice}
+                    onCheckedChange={(v) => setParasutSyncPrice(!!v)}
+                    id="parasut-sync-price"
+                  />
+                  <span className="text-sm leading-tight">
+                    <span className="font-medium block">Fiyat</span>
+                    <span className="text-muted-foreground">Satış fiyatı ve para birimi</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:gap-0">
             <Button
               type="button"
               variant="outline"
               onClick={() => {
-                setParasutTransferOpen(false)
-                setParasutPreview(null)
-                setParasutPreviewError(null)
-                setParasutFieldEdits({})
-                setParasutManualId('')
+                setParasutTransferModalOpen(false)
+                setParasutPending(null)
               }}
+              disabled={parasutTransferLoading}
             >
               İptal
             </Button>
             <Button
               type="button"
-              onClick={() => void submitParasutTransfer()}
-              disabled={parasutPreviewLoading || parasutTransferLoading || !parasutPreview}
+              variant="save"
+              onClick={() => void confirmParasutTransferModal()}
+              disabled={
+                parasutTransferLoading ||
+                !parasutPending ||
+                (!parasutSyncProductInfo && !parasutSyncPhoto && !parasutSyncPrice)
+              }
             >
               {parasutTransferLoading ? 'Aktarılıyor…' : 'Aktar'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={ideasoftTransferModalOpen}
+        onOpenChange={(o) => {
+          if (!o) setIdeasoftTransferModalOpen(false)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>IdeaSoft’a aktarım</DialogTitle>
+            <DialogDescription>
+              Mevcut IdeaSoft ürününde yalnızca işaretlediğiniz bölümler master kayıttan güncellenir. Yeni ürün oluşturulacaksa tüm alanlar
+              gönderilir (seçimler yalnızca güncellemede uygulanır). Stok ve indirim yalnızca yanındaki kutucuk işaretliyken IdeaSoft’a
+              yazılır; indirim alanı boş veya 0 ise indirim güncellenmez.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-sync-general"
+                checked={ideasoftSyncGeneral}
+                onCheckedChange={(v) => setIdeasoftSyncGeneral(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">Genel bilgiler</span>
+                <span className="text-muted-foreground">
+                  Ad, SKU, barkod, stok, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-sync-price"
+                checked={ideasoftSyncPrice}
+                onCheckedChange={(v) => setIdeasoftSyncPrice(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">Fiyat</span>
+                <span className="text-muted-foreground">Liste fiyatı (price1)</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-sync-images"
+                checked={ideasoftSyncImages}
+                onCheckedChange={(v) => setIdeasoftSyncImages(!!v)}
+                disabled={!hasFormProductImages(form.images)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">Görseller</span>
+                <span className="text-muted-foreground">
+                  {hasFormProductImages(form.images)
+                    ? 'En fazla 8 görsel (sıra ile)'
+                    : 'Bu üründe kayıtlı görsel yok'}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-sync-seo"
+                checked={ideasoftSyncSeo}
+                onCheckedChange={(v) => setIdeasoftSyncSeo(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">SEO bilgileri</span>
+                <span className="text-muted-foreground">Slug, sayfa başlığı, meta açıklama, anahtar kelimeler, arama anahtarı</span>
+              </span>
+            </label>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border/60">
+            <div className="flex gap-3 items-start">
+              <Checkbox
+                id="ideasoft-apply-stock"
+                className="mt-2 shrink-0"
+                checked={ideasoftApplyTransferStock}
+                onCheckedChange={(v) => setIdeasoftApplyTransferStock(!!v)}
+                disabled={ideasoftTransferLoading}
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Label htmlFor="ideasoft-transfer-stock">IdeaSoft stok miktarı</Label>
+                <Input
+                  id="ideasoft-transfer-stock"
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={ideasoftTransferStock}
+                  onChange={(e) => setIdeasoftTransferStock(e.target.value)}
+                  disabled={ideasoftTransferLoading || !ideasoftApplyTransferStock}
+                />
+              </div>
+            </div>
+            <div className="flex gap-3 items-start">
+              <Checkbox
+                id="ideasoft-apply-discount"
+                className="mt-2 shrink-0"
+                checked={ideasoftApplyTransferDiscount}
+                onCheckedChange={(v) => setIdeasoftApplyTransferDiscount(!!v)}
+                disabled={ideasoftTransferLoading}
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Label htmlFor="ideasoft-transfer-discount">İndirim yüzdesi (%)</Label>
+                <Input
+                  id="ideasoft-transfer-discount"
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.01}
+                  inputMode="decimal"
+                  value={ideasoftTransferDiscountPct}
+                  onChange={(e) => setIdeasoftTransferDiscountPct(e.target.value)}
+                  disabled={ideasoftTransferLoading || !ideasoftApplyTransferDiscount}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end border-t border-border/60 pt-3 mt-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-primary"
+              onClick={() => selectAllIdeasoftSyncSingle()}
+              disabled={ideasoftTransferLoading}
+            >
+              Hepsini seç
+            </Button>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIdeasoftTransferModalOpen(false)}
+              disabled={ideasoftTransferLoading}
+            >
+              İptal
+            </Button>
+            <Button
+              type="button"
+              variant="save"
+              onClick={() => void confirmIdeasoftTransfer()}
+              disabled={
+                ideasoftTransferLoading ||
+                (!ideasoftSyncGeneral && !ideasoftSyncPrice && !ideasoftSyncImages && !ideasoftSyncSeo)
+              }
+            >
+              {ideasoftTransferLoading ? 'Aktarılıyor…' : 'Aktar'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={ideasoftBulkTransferModalOpen}
+        onOpenChange={(o) => {
+          if (!o) setIdeasoftBulkTransferModalOpen(false)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>IdeaSoft toplu aktarım</DialogTitle>
+            <DialogDescription>
+              <span className="block">
+                Seçili{' '}
+                <span className="font-medium text-foreground">{selectedIds.size}</span> ürün sırayla işlenir. SKU eşleşmesi veya
+                kayıtlı eşleştirme varsa yalnızca işaretlediğiniz bölümler güncellenir; IdeaSoft’ta kayıt yoksa ürün tam içerikle
+                oluşturulur. SKU boş olanlar hata verir. Stok ve indirim yalnızca yanındaki kutucuk işaretliyken tüm aktarımlara
+                aynı değerlerle yazılır; indirim boş veya 0 ise indirim güncellenmez.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-bulk-sync-general"
+                checked={ideasoftBulkSyncGeneral}
+                onCheckedChange={(v) => setIdeasoftBulkSyncGeneral(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">Genel bilgiler</span>
+                <span className="text-muted-foreground">
+                  Ad, SKU, barkod, stok, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-bulk-sync-price"
+                checked={ideasoftBulkSyncPrice}
+                onCheckedChange={(v) => setIdeasoftBulkSyncPrice(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">Fiyat</span>
+                <span className="text-muted-foreground">Liste fiyatı (price1)</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-bulk-sync-images"
+                checked={ideasoftBulkSyncImages}
+                onCheckedChange={(v) => setIdeasoftBulkSyncImages(!!v)}
+                disabled={!bulkIdeasoftSelectionHasAnyImage}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">Görseller</span>
+                <span className="text-muted-foreground">
+                  {bulkIdeasoftSelectionHasAnyImage
+                    ? 'Seçili ürünlerde kayıtlı görseller (ürün başına en fazla 8)'
+                    : 'Seçili ürünlerde görsel yok'}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-bulk-sync-seo"
+                checked={ideasoftBulkSyncSeo}
+                onCheckedChange={(v) => setIdeasoftBulkSyncSeo(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">SEO bilgileri</span>
+                <span className="text-muted-foreground">Slug, sayfa başlığı, meta açıklama, anahtar kelimeler, arama anahtarı</span>
+              </span>
+            </label>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border/60">
+            <div className="flex gap-3 items-start">
+              <Checkbox
+                id="ideasoft-bulk-apply-stock"
+                className="mt-2 shrink-0"
+                checked={ideasoftBulkApplyTransferStock}
+                onCheckedChange={(v) => setIdeasoftBulkApplyTransferStock(!!v)}
+                disabled={ideasoftBulkLoading}
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Label htmlFor="ideasoft-bulk-transfer-stock">IdeaSoft stok miktarı</Label>
+                <Input
+                  id="ideasoft-bulk-transfer-stock"
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={ideasoftBulkTransferStock}
+                  onChange={(e) => setIdeasoftBulkTransferStock(e.target.value)}
+                  disabled={ideasoftBulkLoading || !ideasoftBulkApplyTransferStock}
+                />
+              </div>
+            </div>
+            <div className="flex gap-3 items-start">
+              <Checkbox
+                id="ideasoft-bulk-apply-discount"
+                className="mt-2 shrink-0"
+                checked={ideasoftBulkApplyTransferDiscount}
+                onCheckedChange={(v) => setIdeasoftBulkApplyTransferDiscount(!!v)}
+                disabled={ideasoftBulkLoading}
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Label htmlFor="ideasoft-bulk-transfer-discount">İndirim yüzdesi (%)</Label>
+                <Input
+                  id="ideasoft-bulk-transfer-discount"
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.01}
+                  inputMode="decimal"
+                  value={ideasoftBulkTransferDiscountPct}
+                  onChange={(e) => setIdeasoftBulkTransferDiscountPct(e.target.value)}
+                  disabled={ideasoftBulkLoading || !ideasoftBulkApplyTransferDiscount}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end border-t border-border/60 pt-3 mt-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-primary"
+              onClick={() => selectAllIdeasoftSyncBulk()}
+              disabled={ideasoftBulkLoading}
+            >
+              Hepsini seç
+            </Button>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIdeasoftBulkTransferModalOpen(false)}
+              disabled={ideasoftBulkLoading}
+            >
+              İptal
+            </Button>
+            <Button
+              type="button"
+              variant="save"
+              onClick={() => void submitBulkIdeasoftTransfer()}
+              disabled={
+                ideasoftBulkLoading ||
+                (!ideasoftBulkSyncGeneral &&
+                  !ideasoftBulkSyncPrice &&
+                  !ideasoftBulkSyncImages &&
+                  !ideasoftBulkSyncSeo)
+              }
+            >
+              {ideasoftBulkLoading ? 'Aktarılıyor…' : 'Aktar'}
             </Button>
           </DialogFooter>
         </DialogContent>

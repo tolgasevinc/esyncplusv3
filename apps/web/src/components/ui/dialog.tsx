@@ -3,6 +3,26 @@ import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
+const SONNER_OUTSIDE_CLICK_IGNORE = '[data-sonner-toaster], [data-sonner-toast]'
+
+function domEventTouchesSonner(originalEvent: Event | undefined): boolean {
+  if (!originalEvent) return false
+  const { target } = originalEvent
+  const root =
+    target instanceof Element
+      ? target
+      : target instanceof Text
+        ? target.parentElement
+        : null
+  if (root?.closest(SONNER_OUTSIDE_CLICK_IGNORE)) return true
+  if (typeof originalEvent.composedPath === 'function') {
+    return originalEvent.composedPath().some(
+      (n) => n instanceof Element && Boolean(n.closest(SONNER_OUTSIDE_CLICK_IGNORE))
+    )
+  }
+  return false
+}
+
 const Dialog = DialogPrimitive.Root
 const DialogTrigger = DialogPrimitive.Trigger
 const DialogPortal = DialogPrimitive.Portal
@@ -38,9 +58,9 @@ const DialogContent = React.forwardRef<
         className
       )}
       onPointerDownOutside={(e) => {
-        const target = e.target as Element | null
+        const original = (e as unknown as { detail?: { originalEvent?: Event } }).detail?.originalEvent
         // Toast içindeki tıklamalar modal "outside click" olarak algılanmamalı.
-        if (target?.closest?.('[data-sonner-toaster], [data-sonner-toast]')) {
+        if (domEventTouchesSonner(original)) {
           e.preventDefault()
           return
         }
@@ -53,8 +73,8 @@ const DialogContent = React.forwardRef<
         onPointerDownOutside?.(e)
       }}
       onInteractOutside={(e) => {
-        const target = e.target as Element | null
-        if (target?.closest?.('[data-sonner-toaster], [data-sonner-toast]')) {
+        const original = (e as unknown as { detail?: { originalEvent?: Event } }).detail?.originalEvent
+        if (domEventTouchesSonner(original)) {
           e.preventDefault()
           return
         }
