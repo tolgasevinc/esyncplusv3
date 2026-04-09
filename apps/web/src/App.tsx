@@ -67,6 +67,15 @@ const IdeasoftProductsPage = lazy(() =>
 const IdeasoftUnitsPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftUnitsPage').then((m) => ({ default: m.IdeasoftUnitsPage }))
 )
+const IdeasoftProductImagesPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftProductImagesPage').then((m) => ({ default: m.IdeasoftProductImagesPage }))
+)
+const IdeasoftProductLabelsPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftProductLabelsPage').then((m) => ({ default: m.IdeasoftProductLabelsPage }))
+)
+const IdeasoftProductExtraFieldsPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftProductExtraFieldsPage').then((m) => ({ default: m.IdeasoftProductExtraFieldsPage }))
+)
 const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
 function App() {
   return (
@@ -97,6 +106,9 @@ function App() {
         <Route path="/ideasoft/kategoriler" element={<IdeasoftCategoriesPage />} />
         <Route path="/ideasoft/urunler" element={<IdeasoftProductsPage />} />
         <Route path="/ideasoft/birimler" element={<IdeasoftUnitsPage />} />
+        <Route path="/ideasoft/urun-resimleri" element={<IdeasoftProductImagesPage />} />
+        <Route path="/ideasoft/urun-etiketleri" element={<IdeasoftProductLabelsPage />} />
+        <Route path="/ideasoft/ekstra-ozellikler" element={<IdeasoftProductExtraFieldsPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />

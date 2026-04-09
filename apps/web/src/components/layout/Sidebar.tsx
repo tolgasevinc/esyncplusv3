@@ -51,6 +51,9 @@ export function Sidebar() {
       '/ideasoft/markalar',
       '/ideasoft/kategoriler',
       '/ideasoft/birimler',
+      '/ideasoft/urun-resimleri',
+      '/ideasoft/urun-etiketleri',
+      '/ideasoft/ekstra-ozellikler',
       '/ideasoft/urunler',
     ]
     if (collapsePaths.includes(location.pathname)) {
