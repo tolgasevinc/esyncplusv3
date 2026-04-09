@@ -1419,6 +1419,51 @@ function parseProductImageStoragePaths(imageField: string | null | undefined): s
   return [s];
 }
 
+/** IdeaSoft ürün yanıtındaki görsel URL’ini indirilebilir mutlak adrese çevirir. */
+function resolveIdeasoftImageAssetUrl(raw: string | undefined | null, storeBase: string): string | null {
+  const u = (raw ?? '').trim();
+  if (!u) return null;
+  if (/^https?:\/\//i.test(u)) return u;
+  if (u.startsWith('//')) return `https:${u}`;
+  const base = storeBase.replace(/\/+$/, '');
+  if (u.startsWith('/')) return `${base}${u}`;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}\//i.test(u)) return `https://${u}`;
+  return `${base}/${u.replace(/^\/+/, '')}`;
+}
+
+function extFromHttpContentTypeOrUrl(ct: string | null | undefined, url: string): string {
+  const c = (ct ?? '').toLowerCase();
+  if (c.includes('png')) return 'png';
+  if (c.includes('webp')) return 'webp';
+  if (c.includes('gif')) return 'gif';
+  if (c.includes('jpeg') || c.includes('jpg')) return 'jpg';
+  const path = url.split('?')[0]?.toLowerCase() ?? '';
+  const m = path.match(/\.(png|webp|gif|jpe?g)$/);
+  if (m) return m[1] === 'jpeg' ? 'jpg' : m[1]!;
+  return 'jpg';
+}
+
+/** Admin API Product.images — sortOrder 1–8; originalUrl öncelikli. */
+function extractIdeasoftProductImageFetchJobs(images: unknown): { sortOrder: number; url: string }[] {
+  if (!Array.isArray(images)) return [];
+  const byOrder = new Map<number, string>();
+  for (const item of images) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const so = Number(o.sortOrder);
+    if (!Number.isFinite(so) || so < 1 || so > 8) continue;
+    if (byOrder.has(so)) continue;
+    const orig = typeof o.originalUrl === 'string' ? o.originalUrl.trim() : '';
+    const thumb = typeof o.thumbUrl === 'string' ? o.thumbUrl.trim() : '';
+    const url = orig || thumb;
+    if (!url) continue;
+    byOrder.set(so, url);
+  }
+  return [...byOrder.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([sortOrder, url]) => ({ sortOrder, url }));
+}
+
 function invertIdeasoftIdMap(m: Record<string, string>, masterIdStr: string): string | null {
   for (const [isId, mid] of Object.entries(m)) {
     if (String(mid) === masterIdStr) return isId;
@@ -1578,23 +1623,31 @@ async function runSingleIdeasoftTransfer(
       seoKw.length > 0 ? (seoKw.split(/[,;]/)[0]?.trim() ?? '').slice(0, 255) : '';
 
     const paths = parseProductImageStoragePaths(row.image);
-    let firstImageSlot: Record<string, unknown> | null = null;
-    if (paths.length > 0) {
-      const dataUrl = await storagePathToDataUrl(storage, paths[0]!);
-      if (dataUrl?.startsWith('data:image/')) {
-        const ext =
-          dataUrl.includes('image/png') ? 'png' : dataUrl.includes('image/webp') ? 'webp' : dataUrl.includes('image/gif') ? 'gif' : 'jpg';
-        const fnBase = normalizeForSearch(sku)
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '')
-          .slice(0, 40) || 'urun';
-        firstImageSlot = {
-          filename: `${fnBase}-1`,
-          extension: ext,
-          sortOrder: 1,
-          attachment: dataUrl,
-        };
-      }
+    /** IdeaSoft Admin API: görsel sırası 1–8 (Product / ProductImage POST gövdesi). */
+    const ideasoftMaxImages = 8;
+    const fnBase =
+      normalizeForSearch(sku)
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 40) || 'urun';
+    const imageSlots: Record<string, unknown>[] = [];
+    for (let i = 0; i < paths.length && imageSlots.length < ideasoftMaxImages; i++) {
+      const dataUrl = await storagePathToDataUrl(storage, paths[i]!);
+      if (!dataUrl?.startsWith('data:image/')) continue;
+      const ext = dataUrl.includes('image/png')
+        ? 'png'
+        : dataUrl.includes('image/webp')
+          ? 'webp'
+          : dataUrl.includes('image/gif')
+            ? 'gif'
+            : 'jpg';
+      const sortOrder = imageSlots.length + 1;
+      imageSlots.push({
+        filename: `${fnBase}-${sortOrder}`,
+        extension: ext,
+        sortOrder,
+        attachment: dataUrl,
+      });
     }
 
     let targetIsId: number | null = null;
@@ -1659,7 +1712,7 @@ async function runSingleIdeasoftTransfer(
     if (isBrandId != null) baseFields.brand = { id: isBrandId };
     if (isCurId != null) baseFields.currency = { id: isCurId };
     if (isCatId != null) baseFields.categories = [{ id: isCatId }];
-    if (firstImageSlot) baseFields.images = [firstImageSlot];
+    if (imageSlots.length > 0) baseFields.images = imageSlots;
 
     let finalIsId: number | null = null;
     let created = false;
@@ -9007,6 +9060,177 @@ app.put('/api/ideasoft/product-mappings', async (c) => {
     return c.json({ ok: true, mappings: toSave });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Kaydetme hatası' }, 500);
+  }
+});
+
+/**
+ * Kayıtlı IdeaSoft ↔ master ürün eşlemesine göre, IdeaSoft ürün görsellerini indirip R2’ye yazar ve
+ * master `products.image` alanını bu yollarla günceller (sıra IdeaSoft sortOrder’a göre).
+ * Worker alt istek sınırı için `limit` ile toplu işlem boyutu sınırlanır (varsayılan 80).
+ */
+app.post('/api/ideasoft/sync-master-images-from-store', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    if (!c.env.STORAGE) return c.json({ error: 'R2 Storage bulunamadı' }, 500);
+
+    const body = await c.req.json<{ limit?: number; offset?: number }>().catch(() => ({}));
+    const limitRaw = body?.limit;
+    const limit = Math.min(200, Math.max(1, Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : 80));
+    const offRaw = body?.offset;
+    const offset = Math.min(1_000_000, Math.max(0, Number.isFinite(Number(offRaw)) ? Number(offRaw) : 0));
+
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+        },
+        400
+      );
+    }
+
+    const productMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_PRODUCT_MAPPINGS_KEY);
+    const allKeys = Object.keys(productMap).filter((k) => /^\d+$/.test(k));
+    const entries = allKeys
+      .map((k) => [k, String(productMap[k] ?? '').trim()] as const)
+      .filter(([, v]) => /^\d+$/.test(v))
+      .sort(([a], [b]) => parseInt(a, 10) - parseInt(b, 10))
+      .slice(offset, offset + limit);
+
+    type RowResult = {
+      ideasoft_product_id: number;
+      master_product_id: number;
+      ok: boolean;
+      images_saved?: number;
+      message?: string;
+      error?: string;
+    };
+    const results: RowResult[] = [];
+    const { storeBase } = auth;
+
+    for (const [isIdStr, masterIdStr] of entries) {
+      const ideasoft_product_id = parseInt(isIdStr, 10);
+      const master_product_id = parseInt(masterIdStr, 10);
+
+      const exists = await c.env.DB
+        .prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`)
+        .bind(master_product_id)
+        .first();
+      if (!exists) {
+        results.push({
+          ideasoft_product_id,
+          master_product_id,
+          ok: false,
+          error: 'Master ürün bulunamadı',
+        });
+        continue;
+      }
+
+      const getRes = await ideasoftDoAdminRequestWithRefresh(
+        c.env.DB,
+        `/products/${ideasoft_product_id}`,
+        { method: 'GET' },
+        settings,
+        auth
+      );
+      const getText = await getRes.text();
+      let prodJson: unknown = null;
+      try {
+        prodJson = getText ? JSON.parse(getText) : null;
+      } catch {
+        prodJson = null;
+      }
+      if (!getRes.ok) {
+        const parts = ideasoftProxyErrorParts(prodJson, getText, getRes.status);
+        results.push({
+          ideasoft_product_id,
+          master_product_id,
+          ok: false,
+          error: parts.error,
+        });
+        continue;
+      }
+
+      const prod =
+        prodJson && typeof prodJson === 'object' && !Array.isArray(prodJson)
+          ? (prodJson as Record<string, unknown>)
+          : {};
+      const jobs = extractIdeasoftProductImageFetchJobs(prod.images);
+      if (jobs.length === 0) {
+        results.push({
+          ideasoft_product_id,
+          master_product_id,
+          ok: true,
+          images_saved: 0,
+          message: 'IdeaSoft ürününde görsel yok',
+        });
+        continue;
+      }
+
+      const r2Paths: string[] = [];
+      for (let idx = 0; idx < jobs.length; idx++) {
+        const abs = resolveIdeasoftImageAssetUrl(jobs[idx]!.url, storeBase);
+        if (!abs) continue;
+        try {
+          const imgRes = await fetch(abs, { redirect: 'follow' });
+          if (!imgRes.ok) continue;
+          const buf = await imgRes.arrayBuffer();
+          if (buf.byteLength === 0) continue;
+          const ct = imgRes.headers.get('content-type');
+          const ext = extFromHttpContentTypeOrUrl(ct, abs);
+          const key = `images/products/is-${ideasoft_product_id}-m-${master_product_id}-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+          await c.env.STORAGE.put(key, buf, {
+            httpMetadata: { contentType: ct?.trim() || `image/${ext}` },
+          });
+          r2Paths.push(key);
+        } catch {
+          /* atla */
+        }
+      }
+
+      if (r2Paths.length === 0) {
+        results.push({
+          ideasoft_product_id,
+          master_product_id,
+          ok: false,
+          error: 'Görseller indirilemedi',
+        });
+        continue;
+      }
+
+      await c.env.DB
+        .prepare(`UPDATE products SET image = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+        .bind(JSON.stringify(r2Paths), master_product_id)
+        .run();
+
+      results.push({
+        ideasoft_product_id,
+        master_product_id,
+        ok: true,
+        images_saved: r2Paths.length,
+        message: `${r2Paths.length} görsel master ürüne kaydedildi`,
+      });
+    }
+
+    const okCount = results.filter((r) => r.ok).length;
+    const nextOffset = offset + entries.length;
+    const hasMore = nextOffset < allKeys.length;
+    return c.json({
+      ok: true,
+      processed: results.length,
+      total_mappings: allKeys.length,
+      offset,
+      limit,
+      next_offset: nextOffset,
+      has_more: hasMore,
+      succeeded: okCount,
+      failed: results.length - okCount,
+      results,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Senkronizasyon hatası' }, 500);
   }
 });
 

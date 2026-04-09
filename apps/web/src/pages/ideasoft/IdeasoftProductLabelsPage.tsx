@@ -440,7 +440,7 @@ export function IdeasoftProductLabelsPage() {
 
   return (
     <PageLayout
-      title="IdeaSoft — Ürün etiketleri"
+      title="IdeaSoft — Kişisel Etiketler"
       description="Ürün ↔ kişisel etiket bağları: label_to_products (ProductLabel Admin API PDF)."
       backTo="/ideasoft"
       contentRef={contentRef}

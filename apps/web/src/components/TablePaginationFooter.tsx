@@ -117,10 +117,12 @@ export function TablePaginationFooter({
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-4">
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
+        <span className="text-sm font-semibold tabular-nums text-red-600 dark:text-red-400 shrink-0">
+          Toplam: {total}
+        </span>
         <span className="text-sm">
           Kayıt: <span className="font-semibold text-foreground">{rangeText}</span>
-          <span className="text-muted-foreground"> / {total}</span>
           {hasFilter && <span className="text-muted-foreground"> (filtrelenmiş)</span>}
         </span>
         <span className="text-sm">
