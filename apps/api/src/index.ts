@@ -1097,6 +1097,7 @@ app.get('/api/products', async (c) => {
       ? (filter_type_id_raw as string[]).join(',')
       : (filter_type_id_raw ?? '');
     const filter_no_image = c.req.query('filter_no_image') === '1';
+    const filter_integration = (c.req.query('filter_integration') || '').trim().toLowerCase();
     const sort_by = (c.req.query('sort_by') || 'sort_order').trim();
     const sort_order = (c.req.query('sort_order') || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
@@ -1165,6 +1166,11 @@ app.get('/api/products', async (c) => {
     if (filter_no_image) {
       where += " AND (COALESCE(TRIM(p.image), '') = '' OR TRIM(p.image) = '[]')";
     }
+    if (filter_integration === 'ideasoft') {
+      where += ' AND COALESCE(p.ideasoft_product_id, 0) > 0';
+    } else if (filter_integration === 'parasut') {
+      where += " AND TRIM(COALESCE(p.parasut_product_id, '')) != ''";
+    }
     const validSortColumns: Record<string, string> = {
       name: 'p.name',
       sku: 'p.sku',
@@ -1187,6 +1193,7 @@ app.get('/api/products', async (c) => {
     const { results } = await c.env.DB.prepare(
       `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, ${currencyIdCol} as currency_id,
        ${priceCol} as price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
+       p.parasut_product_id, p.ideasoft_product_id,
        p.created_at, p.updated_at,
        b.name as brand_name, b.code as brand_code, b.image as brand_image,
        grp.code as group_code, grp.name as group_name, grp.color as group_color,
@@ -1516,6 +1523,52 @@ function invertIdeasoftIdMap(m: Record<string, string>, masterIdStr: string): st
   return null;
 }
 
+/** Master ürün ID’sine giden tüm IdeaSoft ürün eşleşmelerini kaldırır (silinmiş IS ürünü / eski ID). */
+function removeIdeasoftProductMappingsForMaster(productMap: Record<string, string>, masterIdStr: string): void {
+  for (const k of Object.keys(productMap)) {
+    if (String(productMap[k]) === masterIdStr) delete productMap[k];
+  }
+}
+
+async function ideasoftFetchFirstProductIdBySku(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  sku: string,
+): Promise<
+  | { ok: false; error: string; hint?: string }
+  | { ok: true; id: number | null }
+> {
+  const sp = new URLSearchParams({ page: '1', limit: '40', sort: 'id', s: sku });
+  const listRes = await ideasoftDoAdminRequestWithRefresh(
+    db,
+    `/products?${sp.toString()}`,
+    { method: 'GET' },
+    settings,
+    auth,
+  );
+  const listText = await listRes.text();
+  let listJson: unknown = null;
+  try {
+    listJson = listText ? JSON.parse(listText) : null;
+  } catch {
+    listJson = null;
+  }
+  if (!listRes.ok) {
+    const parts = ideasoftProxyErrorParts(listJson, listText, listRes.status);
+    return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
+  }
+  const skuNorm = normalizeForSearch(sku);
+  for (const r of ideasoftExtractProductListRows(listJson)) {
+    const rs = normalizeForSearch(String(r.sku ?? '').trim());
+    if (rs === skuNorm) {
+      const id = pickIdeasoftNumericId(r);
+      if (id != null) return { ok: true, id };
+    }
+  }
+  return { ok: true, id: null };
+}
+
 async function loadAppSettingsJsonMap(db: D1Database, category: string, key: string): Promise<Record<string, string>> {
   const { results } = await db
     .prepare(
@@ -1606,15 +1659,18 @@ function resolveIdeasoftPartialSyncFlags(
   };
 }
 
-/** Tekil aktarım modalından: IdeaSoft stok ve indirim % (discountType 0 = yüzde). */
+/** Tekil aktarım modalından: stok + indirim; indirim tipi istekte 0=yüzde, 1=sabit (IdeaSoft ürün gövdesinde kod ters yazılır). */
 type IdeasoftTransferFieldOverrides = {
   stockAmount?: number;
-  discountPercent?: number;
+  discountValue?: number;
+  /** İstek: 0 yüzde, 1 sabit tutar (applyIdeasoftDiscountToPayload IdeaSoft alanına ters kod yazar). */
+  discountType?: number;
 };
 
 function parseIdeasoftTransferFieldOverrides(body: {
   ideasoft_stock_amount?: number | string;
   ideasoft_discount_percent?: number | string;
+  ideasoft_discount_type?: number | string;
 }): IdeasoftTransferFieldOverrides | undefined {
   const out: IdeasoftTransferFieldOverrides = {};
   const sa = body.ideasoft_stock_amount;
@@ -1622,12 +1678,43 @@ function parseIdeasoftTransferFieldOverrides(body: {
     const n = typeof sa === 'number' ? sa : parseFloat(String(sa).replace(',', '.'));
     if (Number.isFinite(n) && n >= 0) out.stockAmount = Math.round(n);
   }
+  let discountType: 0 | 1 = 0;
+  const dtRaw = body.ideasoft_discount_type;
+  if (dtRaw !== undefined && dtRaw !== null && String(dtRaw).trim() !== '') {
+    const t = typeof dtRaw === 'number' ? dtRaw : parseInt(String(dtRaw).trim(), 10);
+    if (t === 1) discountType = 1;
+  }
   const dp = body.ideasoft_discount_percent;
   if (dp !== undefined && dp !== null && String(dp).trim() !== '') {
     const n = typeof dp === 'number' ? dp : parseFloat(String(dp).replace(',', '.'));
-    if (Number.isFinite(n) && n > 0) out.discountPercent = Math.min(100, n);
+    if (Number.isFinite(n) && n > 0) {
+      if (discountType === 1) {
+        out.discountValue = n;
+        out.discountType = 1;
+      } else {
+        out.discountValue = Math.min(100, n);
+        out.discountType = 0;
+      }
+    }
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function applyIdeasoftDiscountToPayload(
+  target: Record<string, unknown>,
+  overrides: IdeasoftTransferFieldOverrides,
+): void {
+  if (overrides.discountValue === undefined) return;
+  const v = overrides.discountValue;
+  /** Entegrasyonda 0 = yüzde, 1 = sabit tutar; IdeaSoft ürün API kodları bunun tersi (0 sabit, 1 yüzde). */
+  const semanticPercent = overrides.discountType === 0;
+  if (semanticPercent) {
+    target.discountType = 1;
+    target.discount = Math.max(0, Math.min(100, v));
+  } else {
+    target.discountType = 0;
+    target.discount = Math.max(0, v);
+  }
 }
 
 async function runSingleIdeasoftTransfer(
@@ -1731,43 +1818,104 @@ async function runSingleIdeasoftTransfer(
       }
 
       if (targetIsId == null) {
-        const sp = new URLSearchParams({ page: '1', limit: '40', sort: 'id', s: sku });
-        const listRes = await ideasoftDoAdminRequestWithRefresh(
-          db,
-          `/products?${sp.toString()}`,
-          { method: 'GET' },
-          settings,
-          auth
-        );
-        const listText = await listRes.text();
-        let listJson: unknown = null;
-        try {
-          listJson = listText ? JSON.parse(listText) : null;
-        } catch {
-          listJson = null;
+        const skuRes = await ideasoftFetchFirstProductIdBySku(db, settings, auth, sku);
+        if (!skuRes.ok) {
+          return { ok: false, error: skuRes.error, ...(skuRes.hint ? { hint: skuRes.hint } : {}) };
         }
-        if (!listRes.ok) {
-          const parts = ideasoftProxyErrorParts(listJson, listText, listRes.status);
-          return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
-        }
-        const skuNorm = normalizeForSearch(sku);
-        for (const r of ideasoftExtractProductListRows(listJson)) {
-          const rs = normalizeForSearch(String(r.sku ?? '').trim());
-          if (rs === skuNorm) {
-            const id = pickIdeasoftNumericId(r);
-            if (id != null) {
-              targetIsId = id;
-              break;
-            }
-          }
-        }
+        targetIsId = skuRes.id;
       }
     }
 
-    const isPartialUpdate = !createNewOnly && targetIsId != null;
+    type ResolvedIdeasoftTransfer =
+      | { mode: 'put'; ideasoftId: number; existing: Record<string, unknown> }
+      | { mode: 'post' };
+
+    let resolvedTarget: ResolvedIdeasoftTransfer;
+    const usedManualIdeasoftId = manualIdeasoftProductId != null && manualIdeasoftProductId > 0;
+
+    if (createNewOnly) {
+      resolvedTarget = { mode: 'post' };
+    } else if (targetIsId == null) {
+      resolvedTarget = { mode: 'post' };
+    } else {
+      let cand = targetIsId;
+      let recoveredStale404 = false;
+      let resolved: ResolvedIdeasoftTransfer | null = null;
+      for (;;) {
+        const getRes = await ideasoftDoAdminRequestWithRefresh(
+          db,
+          `/products/${cand}`,
+          { method: 'GET' },
+          settings,
+          auth,
+        );
+        const getText = await getRes.text();
+        let existingJson: unknown = null;
+        try {
+          existingJson = getText ? JSON.parse(getText) : null;
+        } catch {
+          existingJson = null;
+        }
+        if (
+          getRes.ok &&
+          existingJson &&
+          typeof existingJson === 'object' &&
+          !Array.isArray(existingJson)
+        ) {
+          resolved = {
+            mode: 'put',
+            ideasoftId: cand,
+            existing: existingJson as Record<string, unknown>,
+          };
+          break;
+        }
+        if (getRes.status === 404 && !usedManualIdeasoftId && !recoveredStale404) {
+          recoveredStale404 = true;
+          removeIdeasoftProductMappingsForMaster(productMap, masterIdStr);
+          await persistIdeasoftProductMappings(db, productMap);
+          const skuRes = await ideasoftFetchFirstProductIdBySku(db, settings, auth, sku);
+          if (!skuRes.ok) {
+            return { ok: false, error: skuRes.error, ...(skuRes.hint ? { hint: skuRes.hint } : {}) };
+          }
+          if (skuRes.id != null) {
+            cand = skuRes.id;
+            continue;
+          }
+          resolved = { mode: 'post' };
+          break;
+        }
+        const parts = ideasoftProxyErrorParts(existingJson, getText, getRes.status);
+        const manual404Hint =
+          getRes.status === 404 && usedManualIdeasoftId
+            ? `Gönderilen IdeaSoft ürün #${cand} mağazada yok (silinmiş veya yanlış ID). Alanı boş bırakıp kayıtlı SKU ile eşleşmeyi deneyin veya doğru ID’yi girin.`
+            : undefined;
+        const hint =
+          [parts.hint, manual404Hint].filter((x): x is string => Boolean(x && String(x).trim())).join('\n\n') ||
+          undefined;
+        return { ok: false, error: parts.error, ...(hint ? { hint } : {}) };
+      }
+      resolvedTarget = resolved ?? { mode: 'post' };
+    }
+
+    const isPartialUpdate = !createNewOnly && resolvedTarget.mode === 'put';
     const sync = resolveIdeasoftPartialSyncFlags(partialSync, isPartialUpdate);
-    if (isPartialUpdate && !sync.general && !sync.price && !sync.images && !sync.seo) {
-      return { ok: false, error: 'Güncellenecek en az bir bilgi grubu seçilmelidir (genel, fiyat, görsel veya SEO).' };
+    const hasFieldOverrides =
+      ideasoftTransferOverrides != null &&
+      (ideasoftTransferOverrides.stockAmount !== undefined ||
+        ideasoftTransferOverrides.discountValue !== undefined);
+    if (
+      isPartialUpdate &&
+      !sync.general &&
+      !sync.price &&
+      !sync.images &&
+      !sync.seo &&
+      !hasFieldOverrides
+    ) {
+      return {
+        ok: false,
+        error:
+          'Güncellenecek en az bir bilgi grubu seçilmeli veya stok / indirim değeri gönderilmelidir (genel, fiyat, görsel, SEO).',
+      };
     }
 
     const paths = parseProductImageStoragePaths(row.image);
@@ -1826,50 +1974,26 @@ async function runSingleIdeasoftTransfer(
       if (ideasoftTransferOverrides.stockAmount !== undefined) {
         baseFields.stockAmount = Math.max(0, Math.round(ideasoftTransferOverrides.stockAmount));
       }
-      if (ideasoftTransferOverrides.discountPercent !== undefined) {
-        baseFields.discount = Math.max(0, Math.min(100, ideasoftTransferOverrides.discountPercent));
-        baseFields.discountType = 0;
-      }
+      applyIdeasoftDiscountToPayload(baseFields, ideasoftTransferOverrides);
     }
 
     let finalIsId: number | null = null;
     let created = false;
 
-    if (targetIsId != null) {
-      const getRes = await ideasoftDoAdminRequestWithRefresh(
-        db,
-        `/products/${targetIsId}`,
-        { method: 'GET' },
-        settings,
-        auth
-      );
-      const getText = await getRes.text();
-      let existing: unknown = null;
-      try {
-        existing = getText ? JSON.parse(getText) : null;
-      } catch {
-        existing = null;
-      }
-      if (!getRes.ok) {
-        const parts = ideasoftProxyErrorParts(existing, getText, getRes.status);
-        return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
-      }
-      const ex =
-        existing && typeof existing === 'object' && !Array.isArray(existing)
-          ? { ...(existing as Record<string, unknown>) }
-          : {};
+    if (resolvedTarget.mode === 'put') {
+      const ex = { ...resolvedTarget.existing };
       for (const k of Object.keys(ex)) {
         if (k.startsWith('@') || k.startsWith('hydra:')) delete ex[k];
       }
       const merged: Record<string, unknown> = { ...ex };
       const partial: Record<string, unknown> = {};
       if (sync.general) {
+        /** Stok `stockAmount` yalnızca istekte `ideasoft_stock_amount` ile (modal “Stok gönder”) gelir; aksi halde PUT’ta mevcut mağaza stoğu korunur. */
         Object.assign(partial, {
           name: displayName,
           fullName: displayName,
           sku,
           barcode: (row.barcode ?? '').trim(),
-          stockAmount: Number(row.quantity) || 0,
           status: row.status ? 1 : 0,
           stockTypeLabel,
           detail: { details: (row.main_description ?? '').trim() },
@@ -1893,10 +2017,7 @@ async function runSingleIdeasoftTransfer(
         if (ideasoftTransferOverrides.stockAmount !== undefined) {
           partial.stockAmount = Math.max(0, Math.round(ideasoftTransferOverrides.stockAmount));
         }
-        if (ideasoftTransferOverrides.discountPercent !== undefined) {
-          partial.discount = Math.max(0, Math.min(100, ideasoftTransferOverrides.discountPercent));
-          partial.discountType = 0;
-        }
+        applyIdeasoftDiscountToPayload(partial, ideasoftTransferOverrides);
       }
       Object.assign(merged, partial);
       if (Array.isArray(ex.prices) && !Array.isArray(partial.prices)) merged.prices = ex.prices;
@@ -1906,7 +2027,7 @@ async function runSingleIdeasoftTransfer(
 
       const putRes = await ideasoftDoAdminRequestWithRefresh(
         db,
-        `/products/${targetIsId}`,
+        `/products/${resolvedTarget.ideasoftId}`,
         {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -1926,7 +2047,7 @@ async function runSingleIdeasoftTransfer(
         const parts = ideasoftProxyErrorParts(putJson, putText, putRes.status);
         return { ok: false, error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}) };
       }
-      finalIsId = pickIdeasoftNumericId(putJson) ?? targetIsId;
+      finalIsId = pickIdeasoftNumericId(putJson) ?? resolvedTarget.ideasoftId;
     } else {
       const postRes = await ideasoftDoAdminRequestWithRefresh(
         db,
@@ -1962,6 +2083,10 @@ async function runSingleIdeasoftTransfer(
     for (const k of Object.keys(productMap)) delete productMap[k];
     Object.assign(productMap, nextMap);
     await persistIdeasoftProductMappings(db, productMap);
+    await db
+      .prepare(`UPDATE products SET ideasoft_product_id = ? WHERE id = ? AND is_deleted = 0`)
+      .bind(finalIsId, masterId)
+      .run();
 
     return {
       ok: true,
@@ -1992,6 +2117,7 @@ app.post('/api/products/:id/ideasoft-transfer', async (c) => {
       sync_seo?: boolean;
       ideasoft_stock_amount?: number | string;
       ideasoft_discount_percent?: number | string;
+      ideasoft_discount_type?: number | string;
     } = {};
     try {
       reqBody = (await c.req.json()) as typeof reqBody;
@@ -2081,6 +2207,7 @@ app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
       sync_seo?: boolean;
       ideasoft_stock_amount?: number | string;
       ideasoft_discount_percent?: number | string;
+      ideasoft_discount_type?: number | string;
     }>().catch(() => ({}));
     const ids = Array.isArray(body.ids)
       ? body.ids.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0)
@@ -9258,10 +9385,182 @@ app.put('/api/ideasoft/product-mappings', async (c) => {
 });
 
 /**
- * Kayıtlı IdeaSoft ↔ master ürün eşlemesine göre, IdeaSoft ürün görsellerini indirip R2’ye yazar ve
- * master `products.image` alanını bu yollarla günceller (sıra IdeaSoft sortOrder’a göre).
- * Worker alt istek sınırı için `limit` ile toplu işlem boyutu sınırlanır (varsayılan 80).
+ * IdeaSoft ürün listesini sayfa sayfa tarar; SKU (normalizeForSearch) master `products.sku` ile eşleşenlere
+ * `ideasoft_product_id` yazar ve `ideasoft_product_mappings` ayarını günceller.
+ * Büyük kataloglar için `start_page` / `next_start_page` ile parça parça çağrın (Worker süre/alt istek sınırı).
  */
+app.post('/api/ideasoft/sync-master-by-sku-scan', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req
+      .json<{
+        start_page?: number;
+        limit?: number;
+        max_pages?: number;
+        dry_run?: boolean;
+        /** false ise yalnızca IdeaSoft status=1 (aktif) ürünler */
+        all_status?: boolean;
+      }>()
+      .catch(() => ({}));
+
+    const startPage = Math.max(1, Math.floor(Number(body.start_page) || 1));
+    const pageLimit = Math.min(100, Math.max(1, Math.floor(Number(body.limit) || 100)));
+    const maxPages = Math.min(50, Math.max(1, Math.floor(Number(body.max_pages) || 15)));
+    const dryRun = !!body.dry_run;
+    const allStatus = body.all_status !== false;
+
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+        },
+        400
+      );
+    }
+
+    let productMap = await loadAppSettingsJsonMap(c.env.DB, 'ideasoft', IDEASOFT_PRODUCT_MAPPINGS_KEY);
+    let page = startPage;
+    let pagesProcessed = 0;
+    let rowsScanned = 0;
+    let matched = 0;
+    let noSku = 0;
+    let noMaster = 0;
+    let duplicateSku = 0;
+    const samples: {
+      ideasoft_id: number;
+      sku: string;
+      master_id: number | null;
+      note?: string;
+    }[] = [];
+
+    let lastPageSize = 0;
+    let lastFetchedPage = startPage;
+    while (pagesProcessed < maxPages) {
+      lastFetchedPage = page;
+      const sp = new URLSearchParams({
+        page: String(page),
+        limit: String(pageLimit),
+        sort: 'id',
+      });
+      if (!allStatus) sp.set('status', '1');
+
+      const listRes = await ideasoftDoAdminRequestWithRefresh(
+        c.env.DB,
+        `/products?${sp.toString()}`,
+        { method: 'GET' },
+        settings,
+        auth
+      );
+      const listText = await listRes.text();
+      let listJson: unknown = null;
+      try {
+        listJson = listText ? JSON.parse(listText) : null;
+      } catch {
+        listJson = null;
+      }
+      if (!listRes.ok) {
+        const parts = ideasoftProxyErrorParts(listJson, listText, listRes.status);
+        return c.json(
+          {
+            error: parts.error,
+            ...(parts.hint ? { hint: parts.hint } : {}),
+            pages_processed: pagesProcessed,
+            next_start_page: page,
+          },
+          400
+        );
+      }
+
+      const rows = ideasoftExtractProductListRows(listJson);
+      lastPageSize = rows.length;
+      if (rows.length === 0) break;
+
+      const seenNormOnPage = new Set<string>();
+      for (const r of rows) {
+        rowsScanned += 1;
+        const isId = pickIdeasoftNumericId(r);
+        if (isId == null) continue;
+        const skuRaw = String((r as Record<string, unknown>).sku ?? '').trim();
+        if (!skuRaw) {
+          noSku += 1;
+          continue;
+        }
+        const skuNorm = normalizeForSearch(skuRaw);
+        if (seenNormOnPage.has(skuNorm)) {
+          duplicateSku += 1;
+          if (samples.length < 30) {
+            samples.push({ ideasoft_id: isId, sku: skuRaw, master_id: null, note: 'aynı sayfada yinelenen SKU' });
+          }
+          continue;
+        }
+        seenNormOnPage.add(skuNorm);
+
+        const masterRow = await c.env.DB
+          .prepare(
+            `SELECT id FROM products WHERE is_deleted = 0 AND ${sqlNormalizeCol("TRIM(COALESCE(sku, ''))")} = ? ORDER BY id DESC LIMIT 1`
+          )
+          .bind(skuNorm)
+          .first<{ id: number }>();
+        const masterId = masterRow?.id ?? null;
+        if (masterId == null) {
+          noMaster += 1;
+          continue;
+        }
+
+        matched += 1;
+        if (samples.length < 30) {
+          samples.push({ ideasoft_id: isId, sku: skuRaw, master_id: masterId });
+        }
+
+        if (!dryRun) {
+          await c.env.DB
+            .prepare(
+              `UPDATE products SET ideasoft_product_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`
+            )
+            .bind(isId, masterId)
+            .run();
+          productMap = applyIdeasoftProductMappingInvert(productMap, String(isId), String(masterId));
+        }
+      }
+
+      pagesProcessed += 1;
+      if (rows.length < pageLimit) break;
+      page += 1;
+    }
+
+    if (!dryRun && matched > 0) {
+      await persistIdeasoftProductMappings(c.env.DB, productMap);
+    }
+
+    const hitPageCap = pagesProcessed >= maxPages;
+    const hasMorePages = hitPageCap && lastPageSize === pageLimit;
+    const nextStartPage = hasMorePages ? page : null;
+    const catalogExhausted = lastPageSize === 0 || lastPageSize < pageLimit;
+
+    return c.json({
+      ok: true,
+      dry_run: dryRun,
+      start_page: startPage,
+      last_fetched_page: lastFetchedPage,
+      pages_processed: pagesProcessed,
+      rows_scanned: rowsScanned,
+      matched,
+      no_sku: noSku,
+      no_master: noMaster,
+      duplicate_sku_same_page: duplicateSku,
+      has_more: hasMorePages,
+      next_start_page: nextStartPage,
+      catalog_exhausted: catalogExhausted,
+      samples,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'SKU tarama hatası' }, 500);
+  }
+});
+
 app.post('/api/ideasoft/sync-master-images-from-store', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -10151,6 +10450,11 @@ app.post('/api/parasut/products/:id/add-as-master', async (c) => {
       return c.json({ error: `Master ürün oluşturuldu ancak Paraşüt güncellenemedi: ${errMsg}` }, 400);
     }
 
+    await c.env.DB
+      .prepare(`UPDATE products SET parasut_product_id = ? WHERE id = ? AND is_deleted = 0`)
+      .bind(String(parasutId).trim(), productId)
+      .run();
+
     return c.json({ ok: true, product_id: productId, message: 'Master ürün oluşturuldu ve Paraşüt güncellendi' });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İşlem hatası' }, 500);
@@ -10250,14 +10554,20 @@ app.post('/api/parasut/products/:id/pull', async (c) => {
       if (masterSet.has('gtip_code')) { updates.push('gtip_code = ?'); vals.push(gtip_code); }
       vals.push((existing as { id: number }).id);
       await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...vals).run();
-      return c.json({ ok: true, product_id: (existing as { id: number }).id, action: 'updated' });
+      const eid = (existing as { id: number }).id;
+      await c.env.DB
+        .prepare(`UPDATE products SET parasut_product_id = ? WHERE id = ? AND is_deleted = 0`)
+        .bind(String(parasutId ?? '').trim(), eid)
+        .run();
+      return c.json({ ok: true, product_id: eid, action: 'updated' });
     }
 
     const nextSort = await c.env.DB.prepare(`SELECT COALESCE(MAX(sort_order), 0) + 1 as n FROM products`).first();
     const sortOrder = (nextSort as { n: number } | null)?.n ?? 1;
+    const psId = String(parasutId ?? '').trim();
     await c.env.DB.prepare(
-      `INSERT INTO products (name, sku, barcode, price, quantity, tax_rate, unit_id, currency_id, supplier_code, gtip_code, sort_order, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
-    ).bind(name, sku ?? '', barcode ?? '', price, quantity, tax_rate ?? 0, unit_id, currency_id, supplier_code ?? '', gtip_code ?? '', sortOrder).run();
+      `INSERT INTO products (name, sku, barcode, price, quantity, tax_rate, unit_id, currency_id, supplier_code, gtip_code, sort_order, status, parasut_product_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+    ).bind(name, sku ?? '', barcode ?? '', price, quantity, tax_rate ?? 0, unit_id, currency_id, supplier_code ?? '', gtip_code ?? '', sortOrder, psId || null).run();
     const inserted = await c.env.DB.prepare(`SELECT id FROM products WHERE id = last_insert_rowid()`).first();
     return c.json({ ok: true, product_id: (inserted as { id: number }).id, action: 'created' });
   } catch (err: unknown) {
@@ -10785,6 +11095,15 @@ app.post('/api/parasut/products/push', async (c) => {
     ).bind(productId).first() as ProductRowForParasutPush | null;
     if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
 
+    const linkParasutToMasterProduct = async (psId: string) => {
+      const tid = String(psId).trim();
+      if (!tid) return;
+      await c.env.DB
+        .prepare(`UPDATE products SET parasut_product_id = ? WHERE id = ? AND is_deleted = 0`)
+        .bind(tid, productId)
+        .run();
+    };
+
     const auth = await getParasutAuth(c);
     if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz' }, 400);
 
@@ -10896,6 +11215,7 @@ app.post('/api/parasut/products/push', async (c) => {
         if (createRes.ok) {
           const newIdRaw = (createJson as { data?: { id?: string | number } }).data?.id;
           const newId = newIdRaw != null && String(newIdRaw).trim() !== '' ? String(newIdRaw).trim() : '';
+          await linkParasutToMasterProduct(newId);
           return c.json({
             ok: true,
             message:
@@ -10910,6 +11230,7 @@ app.post('/api/parasut/products/push', async (c) => {
       }
       const newIdRaw = (createJson as { data?: { id?: string | number } }).data?.id;
       const newId = newIdRaw != null && String(newIdRaw).trim() !== '' ? String(newIdRaw).trim() : '';
+      await linkParasutToMasterProduct(newId);
       return c.json({
         ok: true,
         message: 'Paraşüt\'te yeni ürün oluşturuldu',
@@ -10961,6 +11282,7 @@ app.post('/api/parasut/products/push', async (c) => {
       lastUpdateJson = updateJson;
       lastUpdateStatus = updateRes.status;
       if (updateRes.ok) {
+        await linkParasutToMasterProduct(parasutId);
         const msg =
           parasutFieldsOmitted.length > 0
             ? `Paraşüt'e gönderildi. Paraşüt reddettiği için çıkarılan alanlar: ${parasutFieldsOmitted.join(', ')}. Bu alanları Paraşüt üzerinden kontrol edin.`

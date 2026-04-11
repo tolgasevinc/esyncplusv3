@@ -101,6 +101,18 @@ export async function ideasoftAdminApiRequest(
 export function parseIdeasoftApiError(body: unknown, text: string, status: number): string {
   if (body && typeof body === 'object') {
     const o = body as Record<string, unknown>;
+    const errField = o.error;
+    if (typeof errField === 'string' && errField.trim().startsWith('{')) {
+      try {
+        const inner = JSON.parse(errField) as Record<string, unknown>;
+        const innerMsg =
+          (typeof inner.errorMessage === 'string' && inner.errorMessage.trim()) ||
+          (typeof inner.message === 'string' && inner.message);
+        if (innerMsg) return innerMsg;
+      } catch {
+        /* yut */
+      }
+    }
     const msg =
       (typeof o.error_description === 'string' && o.error_description.trim()) ||
       (typeof o.message === 'string' && o.message) ||
@@ -130,6 +142,13 @@ export function ideasoftProxyErrorParts(
   }
   if (status === 403) {
     return { error: error || `HTTP ${status}`, hint: ideasoftTokenHint() };
+  }
+  if (status === 404 && /product not found|ürün bulunamadı/i.test(error)) {
+    return {
+      error: error || `HTTP ${status}`,
+      hint:
+        'Bu IdeaSoft ürün ID’si mağazada yok (silinmiş veya yanlış eşleşme olabilir). Ayarlar › IdeaSoft ürün eşleşmelerini kontrol edin; tekrar aktarımda SKU ile bulunursa güncellenir, bulunamazsa yeni ürün oluşturulur.',
+    };
   }
   return { error: error || `HTTP ${status}` };
 }

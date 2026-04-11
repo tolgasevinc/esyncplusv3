@@ -83,11 +83,17 @@ function App() {
       <ThemeLoader />
       {createPortal(
         <Toaster
-          richColors
           position="top-center"
+          visibleToasts={4}
           className="!z-[2147483647] !pointer-events-auto"
           style={{ zIndex: 2147483647, pointerEvents: 'auto' }}
-          toastOptions={{ style: { zIndex: 2147483647, pointerEvents: 'auto' } }}
+          toastOptions={{
+            unstyled: true,
+            style: { zIndex: 2147483647, pointerEvents: 'auto', background: 'transparent' },
+            classNames: {
+              toast: 'w-full max-w-[min(100vw-2rem,420px)] !border-0 !bg-transparent !p-0 !shadow-none',
+            },
+          }}
         />,
         document.body
       )}

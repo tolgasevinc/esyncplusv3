@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  ScanLine,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -27,8 +28,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
 import { API_URL, parseJsonResponse } from '@/lib/api'
-import { toastError } from '@/lib/toast'
+import { toastError, toastSuccess } from '@/lib/toast'
 
 const primarySections: { id: string; title: string; icon: LucideIcon; to?: string }[] = [
   { id: 'urunler', title: 'Ürünler', icon: Package, to: '/ideasoft/urunler' },
@@ -145,10 +148,137 @@ function mergeSyncSummaries(prev: SyncImagesResponse, next: SyncImagesResponse):
   }
 }
 
+type SkuScanSample = {
+  ideasoft_id: number
+  sku: string
+  master_id: number | null
+  note?: string
+}
+
+type SkuScanApiResponse = {
+  ok?: boolean
+  error?: string
+  dry_run?: boolean
+  start_page?: number
+  last_fetched_page?: number
+  pages_processed?: number
+  rows_scanned?: number
+  matched?: number
+  no_sku?: number
+  no_master?: number
+  duplicate_sku_same_page?: number
+  has_more?: boolean
+  next_start_page?: number | null
+  catalog_exhausted?: boolean
+  samples?: SkuScanSample[]
+}
+
+type SkuScanTotals = {
+  batches: number
+  rows_scanned: number
+  matched: number
+  no_sku: number
+  no_master: number
+  duplicate_sku_same_page: number
+  last: SkuScanApiResponse
+  samples: SkuScanSample[]
+}
+
+function mergeSkuScanTotals(prev: SkuScanTotals | null, next: SkuScanApiResponse): SkuScanTotals {
+  if (!prev) {
+    return {
+      batches: 1,
+      rows_scanned: next.rows_scanned ?? 0,
+      matched: next.matched ?? 0,
+      no_sku: next.no_sku ?? 0,
+      no_master: next.no_master ?? 0,
+      duplicate_sku_same_page: next.duplicate_sku_same_page ?? 0,
+      last: next,
+      samples: [...(next.samples ?? [])].slice(-30),
+    }
+  }
+  const mergedSamples = [...prev.samples, ...(next.samples ?? [])].slice(-30)
+  return {
+    batches: prev.batches + 1,
+    rows_scanned: prev.rows_scanned + (next.rows_scanned ?? 0),
+    matched: prev.matched + (next.matched ?? 0),
+    no_sku: prev.no_sku + (next.no_sku ?? 0),
+    no_master: prev.no_master + (next.no_master ?? 0),
+    duplicate_sku_same_page: prev.duplicate_sku_same_page + (next.duplicate_sku_same_page ?? 0),
+    last: next,
+    samples: mergedSamples,
+  }
+}
+
 export function IdeasoftPage() {
   const [syncModalOpen, setSyncModalOpen] = useState(false)
   const [syncLoading, setSyncLoading] = useState(false)
   const [syncSummary, setSyncSummary] = useState<SyncImagesResponse | null>(null)
+
+  const [skuModalOpen, setSkuModalOpen] = useState(false)
+  const [skuLoading, setSkuLoading] = useState(false)
+  const [skuDryRunOnly, setSkuDryRunOnly] = useState(false)
+  const [skuTotals, setSkuTotals] = useState<SkuScanTotals | null>(null)
+  const [skuError, setSkuError] = useState<string | null>(null)
+
+  const runSkuScan = useCallback(
+    async (opts?: { startPage?: number; append?: boolean }) => {
+      const append = opts?.append ?? false
+      const startPage = opts?.startPage ?? 1
+      if (!append) {
+        setSkuTotals(null)
+        setSkuError(null)
+        setSkuModalOpen(true)
+      }
+      setSkuLoading(true)
+      try {
+        const res = await fetch(`${API_URL}/api/ideasoft/sync-master-by-sku-scan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start_page: startPage,
+            limit: 100,
+            max_pages: 15,
+            dry_run: skuDryRunOnly,
+          }),
+        })
+        const data = await parseJsonResponse<SkuScanApiResponse>(res)
+        if (!res.ok) {
+          const msg = data.error || 'İstek başarısız'
+          toastError('SKU taraması', msg)
+          if (!append) setSkuError(msg)
+          return
+        }
+        setSkuError(null)
+        setSkuTotals((prev) => {
+          const merged = mergeSkuScanTotals(append ? prev : null, data)
+          if (data.catalog_exhausted && !data.has_more) {
+            window.setTimeout(() => {
+              toastSuccess(
+                'SKU taraması',
+                `${merged.matched} eşleşme · ${merged.rows_scanned} taranan satır${skuDryRunOnly ? ' (yazılmadı)' : ''}`,
+              )
+            }, 0)
+          }
+          return merged
+        })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Ağ hatası'
+        toastError('SKU taraması', msg)
+        if (!append) setSkuError(msg)
+      } finally {
+        setSkuLoading(false)
+      }
+    },
+    [skuDryRunOnly],
+  )
+
+  useEffect(() => {
+    if (window.location.hash.replace(/^#/, '') !== 'sku-master-eslestir') return
+    window.setTimeout(() => {
+      document.getElementById('sku-master-eslestir')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 100)
+  }, [])
 
   const runSyncMasterImages = useCallback(async (opts?: { offset: number; append: boolean }) => {
     const offset = opts?.offset ?? 0
@@ -183,6 +313,58 @@ export function IdeasoftPage() {
   return (
     <PageLayout title="IdeaSoft" description="Mağaza entegrasyonu menüleri" backTo="/">
       <div className="space-y-8">
+        <Card id="sku-master-eslestir" className="scroll-mt-4">
+          <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:space-y-0">
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <ScanLine className="h-6 w-6 text-primary" />
+                <CardTitle>SKU ile master eşleştir</CardTitle>
+              </div>
+              <CardDescription>
+                IdeaSoft ürün listesini tarar; SKU’su master ürünle aynı olan kayıtlara{' '}
+                <code className="text-xs bg-muted px-1 py-0.5 rounded">ideasoft_product_id</code> yazar ve ürün eşleme
+                haritasını günceller. Bir turda en fazla 15 sayfa işlenir — katalog büyükse sonuç penceresinden
+                &quot;Devam&quot; ile sürdürün.
+              </CardDescription>
+              <div className="flex items-center gap-2 pt-1">
+                <Checkbox
+                  id="ideasoft-sku-dry"
+                  checked={skuDryRunOnly}
+                  onCheckedChange={(v) => setSkuDryRunOnly(v === true)}
+                />
+                <Label htmlFor="ideasoft-sku-dry" className="text-sm font-normal cursor-pointer">
+                  Sadece dene (veritabanına yazmaz)
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground pt-0.5">
+                Yer imi için adres çubuğuna{' '}
+                <code className="rounded bg-muted px-1 py-0.5 text-[11px]">#sku-master-eslestir</code> ekleyin; sayfa
+                açılınca bu kutuya kayar.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="default"
+              className="shrink-0"
+              disabled={skuLoading}
+              onClick={() => void runSkuScan()}
+              title="IdeaSoft ürün listesini SKU ile master ürünlerle eşleştirir"
+            >
+              {skuLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Taranıyor…
+                </>
+              ) : (
+                <>
+                  <ScanLine className="h-4 w-4 mr-2" />
+                  Taramayı çalıştır
+                </>
+              )}
+            </Button>
+          </CardHeader>
+        </Card>
+
         <Card>
           <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:space-y-0">
             <div className="space-y-1.5">
@@ -300,6 +482,112 @@ export function IdeasoftPage() {
                 className="w-full sm:w-auto order-1 sm:order-2"
                 onClick={() => setSyncModalOpen(false)}
                 disabled={syncLoading}
+              >
+                Kapat
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={skuModalOpen} onOpenChange={setSkuModalOpen}>
+          <DialogContent className="max-w-lg sm:max-w-xl" showClose={!skuLoading}>
+            <DialogHeader>
+              <DialogTitle>SKU taraması</DialogTitle>
+            </DialogHeader>
+            {skuLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-6 justify-center">
+                <Loader2 className="h-5 w-5 animate-spin" />
+                IdeaSoft ürün listesi okunuyor…
+              </div>
+            )}
+            {!skuLoading && skuError && !skuTotals && (
+              <p className="text-sm text-destructive py-2">{skuError}</p>
+            )}
+            {!skuLoading && skuTotals && (
+              <div className="space-y-3 text-sm">
+                {skuDryRunOnly && (
+                  <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-800 dark:text-amber-200">
+                    Deneme modu: master ürünler ve eşleme haritası güncellenmedi.
+                  </p>
+                )}
+                <p className="text-muted-foreground">
+                  {skuTotals.batches > 1 ? (
+                    <>
+                      <span className="font-medium text-foreground">{skuTotals.batches} tur</span> birleştirildi.{' '}
+                    </>
+                  ) : null}
+                  Son tur: sayfa {skuTotals.last.last_fetched_page ?? '—'}, işlenen sayfa{' '}
+                  {skuTotals.last.pages_processed ?? '—'}, taranan ürün {skuTotals.last.rows_scanned ?? '—'}.
+                </p>
+                <ul className="grid grid-cols-2 gap-x-4 gap-y-1 border rounded-md p-3 bg-muted/30">
+                  <li>
+                    <span className="text-muted-foreground">Eşleşen (bu oturum)</span>{' '}
+                    <span className="font-medium tabular-nums">{skuTotals.matched}</span>
+                  </li>
+                  <li>
+                    <span className="text-muted-foreground">Master yok</span>{' '}
+                    <span className="font-medium tabular-nums">{skuTotals.no_master}</span>
+                  </li>
+                  <li>
+                    <span className="text-muted-foreground">SKU yok</span>{' '}
+                    <span className="font-medium tabular-nums">{skuTotals.no_sku}</span>
+                  </li>
+                  <li>
+                    <span className="text-muted-foreground">Yinelenen SKU (sayfa içi)</span>{' '}
+                    <span className="font-medium tabular-nums">{skuTotals.duplicate_sku_same_page}</span>
+                  </li>
+                </ul>
+                {skuTotals.last.has_more ? (
+                  <p className="text-amber-600 dark:text-amber-500">
+                    Katalog tamamen bitmedi; aşağıdan &quot;Devam&quot; ile sonraki sayfaları tarayın.
+                  </p>
+                ) : skuTotals.last.catalog_exhausted ? (
+                  <p className="text-emerald-600 dark:text-emerald-500">IdeaSoft listesi bu turlarla tamamlandı.</p>
+                ) : null}
+                {skuTotals.samples.length > 0 && (
+                  <div>
+                    <p className="text-muted-foreground mb-2">Örnekler (son kayıtlar)</p>
+                    <ul className="max-h-[min(40vh,260px)] overflow-y-auto space-y-2 border rounded-md p-3 text-xs">
+                      {skuTotals.samples.map((s, idx) => (
+                        <li
+                          key={`${s.ideasoft_id}-${s.sku}-${idx}`}
+                          className="border-b border-border/60 last:border-0 pb-2 last:pb-0"
+                        >
+                          <span className="font-medium">IS #{s.ideasoft_id}</span>
+                          {s.master_id != null ? (
+                            <span className="text-muted-foreground"> → Master #{s.master_id}</span>
+                          ) : null}
+                          <div className="text-muted-foreground break-all">SKU: {s.sku}</div>
+                          {s.note ? <div className="text-amber-600 dark:text-amber-500">{s.note}</div> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            <DialogFooter className="flex-col sm:flex-row gap-2 sm:justify-end">
+              {skuTotals?.last?.has_more && !skuLoading ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full sm:w-auto order-2 sm:order-1"
+                  onClick={() =>
+                    void runSkuScan({
+                      append: true,
+                      startPage: skuTotals.last.next_start_page ?? 1,
+                    })
+                  }
+                >
+                  Devam (sayfa {skuTotals.last.next_start_page ?? '?'})
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                variant="close"
+                className="w-full sm:w-auto order-1 sm:order-2"
+                onClick={() => setSkuModalOpen(false)}
+                disabled={skuLoading}
               >
                 Kapat
               </Button>

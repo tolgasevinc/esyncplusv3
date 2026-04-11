@@ -2,13 +2,8 @@ import { toast as sonnerToast } from 'sonner'
 import { useState } from 'react'
 import { CheckCircle, XCircle, AlertTriangle, Copy, Check, X } from 'lucide-react'
 
-/** Olumlu işlem - yeşil */
-export function toastSuccess(title: string, description?: string) {
-  sonnerToast.success(title, {
-    description,
-    icon: <CheckCircle className="h-5 w-5 text-green-600" />,
-  })
-}
+const toastSurface =
+  'flex w-full max-w-[min(100vw-2rem,420px)] items-start gap-3 rounded-lg border bg-card p-4 text-card-foreground shadow-md ring-1 ring-black/5 dark:ring-white/10'
 
 function toToastDescription(d: unknown): string | undefined {
   if (d === undefined || d === null) return undefined
@@ -40,7 +35,7 @@ function CopyToastButton({ text, label }: { text: string; label: string }) {
       aria-label={label}
     >
       {copied ? (
-        <Check className="pointer-events-none h-4 w-4 text-green-600" aria-hidden />
+        <Check className="pointer-events-none h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-hidden />
       ) : (
         <Copy className="pointer-events-none h-4 w-4" aria-hidden />
       )}
@@ -68,57 +63,95 @@ function CloseToastButton({ toastId }: { toastId: string | number }) {
   )
 }
 
-/** Uyarı - turuncu; otomatik kaybolmaz ve kopyalanabilir */
+type ToastTone = 'success' | 'warning' | 'error'
+
+function ToastBody({
+  tone,
+  title,
+  description,
+  toastId,
+  fullText,
+}: {
+  tone: ToastTone
+  title: string
+  description?: string
+  /** Uyarı / hata: kapat ve kopyala */
+  toastId?: string | number
+  fullText: string
+}) {
+  const icon =
+    tone === 'success' ? (
+      <CheckCircle className="pointer-events-none h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+    ) : tone === 'warning' ? (
+      <AlertTriangle className="pointer-events-none h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+    ) : (
+      <XCircle className="pointer-events-none h-5 w-5 shrink-0 text-red-600 dark:text-red-400" aria-hidden />
+    )
+
+  const border =
+    tone === 'success'
+      ? 'border-emerald-500/25'
+      : tone === 'warning'
+        ? 'border-amber-500/30'
+        : 'border-red-500/25'
+
+  const showActions = tone !== 'success' && toastId !== undefined
+
+  return (
+    <div
+      className={`${toastSurface} ${border}`}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {icon}
+      <div className="min-w-0 flex-1 space-y-1">
+        <p className="text-sm font-semibold leading-snug text-card-foreground">{title}</p>
+        {description ? (
+          <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">{description}</p>
+        ) : null}
+      </div>
+      {showActions ? (
+        <div className="flex items-start gap-1">
+          <CopyToastButton
+            text={fullText}
+            label={tone === 'warning' ? 'Uyarı metnini kopyala' : 'Hata metnini kopyala'}
+          />
+          <CloseToastButton toastId={toastId} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** Olumlu işlem */
+export function toastSuccess(title: string, description?: string) {
+  const fullText = description ? `${title}\n\n${description}` : title
+  sonnerToast.custom(
+    () => <ToastBody tone="success" title={title} description={description} fullText={fullText} />,
+    { duration: 4000 }
+  )
+}
+
+/** Uyarı; otomatik kaybolmaz ve kopyalanabilir */
 export function toastWarning(title: string, description?: string | Error | unknown) {
   const desc = toToastDescription(description)
   const fullText = desc ? `${title}\n\n${desc}` : title
 
   sonnerToast.custom(
     (toastId) => (
-      <div
-        className="flex w-full max-w-[420px] items-start gap-3 rounded-lg border border-border bg-popover p-4 text-popover-foreground shadow-lg"
-        onPointerDown={(e) => e.stopPropagation()}
-      >
-        <AlertTriangle className="pointer-events-none h-5 w-5 shrink-0 text-orange-500" aria-hidden />
-        <div className="min-w-0 flex-1 space-y-1">
-          <p className="font-semibold leading-snug">{title}</p>
-          {desc ? (
-            <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">{desc}</p>
-          ) : null}
-        </div>
-        <div className="flex items-start gap-1">
-          <CopyToastButton text={fullText} label="Uyarı metnini kopyala" />
-          <CloseToastButton toastId={toastId} />
-        </div>
-      </div>
+      <ToastBody tone="warning" title={title} description={desc} toastId={toastId} fullText={fullText} />
     ),
     { duration: Infinity, dismissible: false }
   )
 }
 
-/** Başarısız işlem - kırmızı; başlık + açıklama panoya kopyalanır */
+/** Hata; başlık + açıklama panoya kopyalanır */
 export function toastError(title: string, description?: string | Error | unknown) {
   const desc = toToastDescription(description)
   const fullText = desc ? `${title}\n\n${desc}` : title
 
   sonnerToast.custom(
     (toastId) => (
-      <div
-        className="flex w-full max-w-[420px] items-start gap-3 rounded-lg border border-border bg-popover p-4 text-popover-foreground shadow-lg"
-        onPointerDown={(e) => e.stopPropagation()}
-      >
-        <XCircle className="pointer-events-none h-5 w-5 shrink-0 text-red-600" aria-hidden />
-        <div className="min-w-0 flex-1 space-y-1">
-          <p className="font-semibold leading-snug">{title}</p>
-          {desc ? (
-            <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">{desc}</p>
-          ) : null}
-        </div>
-        <div className="flex items-start gap-1">
-          <CopyToastButton text={fullText} label="Hata metnini kopyala" />
-          <CloseToastButton toastId={toastId} />
-        </div>
-      </div>
+      <ToastBody tone="error" title={title} description={desc} toastId={toastId} fullText={fullText} />
     ),
     { duration: Infinity, dismissible: false }
   )

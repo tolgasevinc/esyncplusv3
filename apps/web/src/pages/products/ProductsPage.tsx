@@ -1,9 +1,30 @@
 import { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
-import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent } from 'react'
+import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent, ChangeEvent } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Plus, X, Trash2, Copy, Save, ChevronDown, ChevronRight, Check, Link2, ArrowUpDown, ArrowUp, ArrowDown, Filter, Search, Calculator, Image, Send, Sparkles, Layers, Store, CheckCircle2, XCircle } from 'lucide-react'
+import {
+  Plus,
+  X,
+  Trash2,
+  Copy,
+  Save,
+  ChevronDown,
+  Check,
+  Link2,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  Filter,
+  Search,
+  Calculator,
+  Image,
+  Send,
+  Sparkles,
+  Layers,
+  Store,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { DecimalInput } from '@/components/DecimalInput'
@@ -25,14 +46,15 @@ import { PackageContentsTab } from '@/components/PackageContentsTab'
 import { getImageDisplayUrl } from '@/components/ImageInput'
 import { API_URL, parseJsonResponse } from '@/lib/api'
 import {
+  CategorySelect,
   getCategoryPath,
-  buildHierarchy,
   formatCategoryPathDisplay,
   splitCategoryPathForListColumn,
   type CategoryItem,
 } from '@/components/CategorySelect'
 import {
   fetchSidebarMenus,
+  getIdeasoftSidebarIconSrc,
   getParasutSidebarIconSrc,
   getSidebarMenus,
   SIDEBAR_MENUS_UPDATED_EVENT,
@@ -81,29 +103,6 @@ function DynamicBgFgButton({ bg, fg = '#fff', className, ...rest }: { bg: string
   return <button ref={refFn} className={cn('dynamic-bg-fg', className)} {...rest} />
 }
 
-/** Dinamik padding-left - style attribute yerine ref ile CSS değişkeni (Edge Tools / linter uyumlu) */
-function CategoryTreeDivPl({
-  paddingLeftPx,
-  className,
-  ...rest
-}: { paddingLeftPx: number } & ComponentPropsWithoutRef<'div'>) {
-  const refFn = useCallback((el: HTMLDivElement | null) => {
-    if (el) el.style.setProperty('--category-tree-pl', `${paddingLeftPx}px`)
-  }, [paddingLeftPx])
-  return <div ref={refFn} className={cn('category-tree-indent', className)} {...rest} />
-}
-
-function CategoryTreeButtonPl({
-  paddingLeftPx,
-  className,
-  ...rest
-}: { paddingLeftPx: number } & ComponentPropsWithoutRef<'button'>) {
-  const refFn = useCallback((el: HTMLButtonElement | null) => {
-    if (el) el.style.setProperty('--category-tree-pl', `${paddingLeftPx}px`)
-  }, [paddingLeftPx])
-  return <button ref={refFn} className={cn('category-tree-indent', className)} {...rest} />
-}
-
 interface Product {
   id: number
   name: string
@@ -145,6 +144,10 @@ interface Product {
   product_item_group_id?: number
   product_item_group_name?: string
   product_item_group_code?: string
+  /** Kayıtlı Paraşüt ürün ID (metin) */
+  parasut_product_id?: string | null
+  /** Kayıtlı IdeaSoft ürün ID */
+  ideasoft_product_id?: number | null
 }
 
 interface SelectOption {
@@ -160,6 +163,65 @@ interface CurrencyOption extends SelectOption {
 
 interface BrandOption extends SelectOption {
   code: string
+}
+
+/** IdeaSoft sütun ikonu — sidebar ikonu yoksa gösterilir */
+function IdeasoftMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={className} aria-hidden>
+      <rect width="32" height="32" rx="7" className="fill-sky-500" />
+      <text
+        x="16"
+        y="22"
+        textAnchor="middle"
+        fill="white"
+        fontSize="15"
+        fontWeight="700"
+        fontFamily="system-ui,Segoe UI,sans-serif"
+      >
+        i
+      </text>
+    </svg>
+  )
+}
+
+function normalizeCategoryColor(c: string | undefined | null): string | null {
+  const s = (c ?? '').trim()
+  if (!s) return null
+  if (/^#[0-9A-Fa-f]{6}$/i.test(s)) return s.toLowerCase()
+  if (/^#[0-9A-Fa-f]{3}$/i.test(s)) {
+    const x = s.slice(1)
+    return `#${x[0]}${x[0]}${x[1]}${x[1]}${x[2]}${x[2]}`.toLowerCase()
+  }
+  if (/^[0-9A-Fa-f]{6}$/i.test(s)) return `#${s}`.toLowerCase()
+  if (/^[0-9A-Fa-f]{3}$/i.test(s)) return `#${s[0]}${s[0]}${s[1]}${s[1]}${s[2]}${s[2]}`.toLowerCase()
+  return null
+}
+
+function textOnCategoryColor(bg: string): string {
+  const hex = normalizeCategoryColor(bg)
+  if (!hex || hex.length < 7) return '#171717'
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  const y = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+  return y > 0.55 ? '#171717' : '#ffffff'
+}
+
+function CategoryListCodeBadge({ code, color }: { code: string; color?: string | null }) {
+  const bg = normalizeCategoryColor(color ?? '')
+  const fg = bg ? textOnCategoryColor(bg) : ''
+  return (
+    <span
+      className={cn(
+        'inline-flex max-w-full min-w-0 items-center truncate rounded border border-transparent px-1.5 py-0.5 font-mono text-[11px] leading-none',
+        !bg && 'bg-secondary text-secondary-foreground'
+      )}
+      style={bg ? { backgroundColor: bg, color: fg } : undefined}
+    >
+      {code}
+    </span>
+  )
 }
 
 /** SKU/code karşılaştırması için normalize (Parasut eşleşme) */
@@ -206,228 +268,6 @@ function parasutFetchErrorMessage(e: unknown): string {
     return 'Sunucuya ulaşılamadı veya istek yarım kaldı (zaman aşımı / ağ / güvenlik duvarı). API veya Paraşüt yanıtı uzun sürdüyse tekrar deneyin. Yeni ürün oluşturmada görsel şimdilik atlanır; gerekirse Paraşüt › Ürünler’den güncelleyin.'
   }
   return msg
-}
-
-/** Gruplar ve kategoriler açılır liste - varsayılan kapalı, arama destekli */
-function CategoryTreeTab({
-  categories,
-  value,
-  onChange,
-  showSearch = true,
-}: {
-  categories: CategoryItem[]
-  value: number | ''
-  onChange: (id: number | '') => void
-  showSearch?: boolean
-}) {
-  const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set())
-  const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
-  const [search, setSearch] = useState('')
-
-  const groups = categories.filter((c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0))
-  const mainCats = categories.filter((c) => !c.category_id || c.category_id === 0)
-  const subCats = categories.filter((c) => c.category_id && c.category_id > 0)
-
-  const byGroup = new Map<number, CategoryItem[]>()
-  mainCats.forEach((c) => {
-    const gid = c.group_id ?? 0
-    if (gid > 0) {
-      if (!byGroup.has(gid)) byGroup.set(gid, [])
-      byGroup.get(gid)!.push(c)
-    }
-  })
-
-  const byParent = new Map<number, CategoryItem[]>()
-  subCats.forEach((c) => {
-    const pid = c.category_id!
-    if (!byParent.has(pid)) byParent.set(pid, [])
-    byParent.get(pid)!.push(c)
-  })
-
-  const noGroupCats = mainCats.filter((c) => c.group_id == null && !groups.some((g) => g.id === c.id))
-
-  const q = search.trim().toLowerCase()
-  const matches = (c: CategoryItem) =>
-    !q || (c.name || '').toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)
-  const categoryMatches = (cat: CategoryItem) => {
-    if (matches(cat)) return true
-    const subs = byParent.get(cat.id) || []
-    return subs.some((s) => matches(s))
-  }
-  const groupMatches = (group: CategoryItem) => {
-    const groupCats = byGroup.get(group.id) || []
-    return groupCats.some((cat) => categoryMatches(cat))
-  }
-
-  const toggleGroup = (id: number) => {
-    setExpandedGroups((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const toggleCategory = (id: number) => {
-    setExpandedCategories((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const sortedGroups = [...groups].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
-  const sortedNoGroup = [...noGroupCats].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
-
-  const renderCat = (cat: CategoryItem, group?: CategoryItem, indent: number = 0) => {
-    const subs = byParent.get(cat.id) || []
-    const filteredSubs = q ? subs.filter((s) => matches(s)) : subs
-    const hasSubs = filteredSubs.length > 0
-    const isExpanded = expandedCategories.has(cat.id) || (!!q && hasSubs)
-    const isSelected = value === cat.id
-    if (q && !matches(cat) && !hasSubs) return null
-
-    if (hasSubs) {
-      return (
-        <div key={`cat-${cat.id}`} className="space-y-0.5">
-          <CategoryTreeDivPl
-            paddingLeftPx={12 + indent * 16}
-            className={cn(
-              'flex items-center gap-2 px-3 py-2 text-sm rounded-md cursor-pointer',
-              indent === 0 ? 'bg-emerald-50 dark:bg-emerald-950/30' : 'bg-emerald-50/80 dark:bg-emerald-950/20',
-              isSelected && 'ring-2 ring-primary ring-offset-2'
-            )}
-          >
-            <button
-              type="button"
-              onClick={() => toggleCategory(cat.id)}
-              className="shrink-0 p-0.5 hover:bg-black/5 rounded"
-            >
-              {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            </button>
-            <button
-              type="button"
-              onClick={() => onChange(cat.id)}
-              className="flex-1 flex items-center gap-2 text-left min-w-0"
-            >
-              {cat.color ? (
-                <DynamicBgSpan color={cat.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
-              ) : (
-                <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              )}
-              <span className="break-words whitespace-normal">{group ? `${group.name} [${group.code}] > ` : ''}{cat.name} [{cat.code}]</span>
-            </button>
-          </CategoryTreeDivPl>
-          {isExpanded && (
-            <div className="space-y-0.5">
-              {[...filteredSubs].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)).map((sub) => (
-                <CategoryTreeButtonPl
-                  key={`sub-${sub.id}`}
-                  paddingLeftPx={28 + indent * 16}
-                  type="button"
-                  onClick={() => onChange(sub.id)}
-                  className={cn(
-                    'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-amber-50 dark:bg-amber-950/20 hover:opacity-90',
-                    value === sub.id && 'ring-2 ring-primary ring-offset-2'
-                  )}
-                >
-                  {sub.color ? (
-                    <DynamicBgSpan color={sub.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
-                  ) : (
-                    <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-amber-500" />
-                  )}
-                  <span className="break-words whitespace-normal">{cat.name} [{cat.code}] › {sub.name} [{sub.code}]</span>
-                </CategoryTreeButtonPl>
-              ))}
-            </div>
-          )}
-        </div>
-      )
-    }
-
-    return (
-      <CategoryTreeButtonPl
-        key={`cat-${cat.id}`}
-        paddingLeftPx={12 + indent * 16}
-        type="button"
-        onClick={() => onChange(cat.id)}
-        className={cn(
-          'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md',
-          indent === 0 ? 'bg-emerald-50 dark:bg-emerald-950/30' : 'bg-emerald-50/80 dark:bg-emerald-950/20',
-          'hover:opacity-90',
-          value === cat.id && 'ring-2 ring-primary ring-offset-2'
-        )}
-      >
-        {cat.color ? (
-          <DynamicBgSpan color={cat.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
-        ) : (
-          <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-emerald-500" />
-        )}
-        <span className="break-words whitespace-normal">{group ? `${group.name} [${group.code}] > ` : ''}{cat.name} [{cat.code}]</span>
-      </CategoryTreeButtonPl>
-    )
-  }
-
-  const filteredGroups = q ? sortedGroups.filter((g) => groupMatches(g)) : sortedGroups
-  const filteredNoGroup = q ? sortedNoGroup.filter((c) => categoryMatches(c)) : sortedNoGroup
-
-  return (
-    <div className="rounded-lg border bg-muted/30 overflow-hidden">
-      {showSearch && (
-        <div className="p-2 border-b bg-muted/50">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Kategori ara (ad veya kod)..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-8 h-9 text-sm"
-            />
-          </div>
-        </div>
-      )}
-      <div className="max-h-[55vh] overflow-y-auto p-2 space-y-0.5">
-        {filteredGroups.map((group) => {
-          const isExpanded = expandedGroups.has(group.id) || !!q
-          const groupCats = (byGroup.get(group.id) || [])
-            .filter((c) => !q || categoryMatches(c))
-            .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
-          if (q && groupCats.length === 0) return null
-          return (
-            <div key={`grp-${group.id}`} className="space-y-0.5">
-              <button
-                type="button"
-                onClick={() => toggleGroup(group.id)}
-                className={cn(
-                  'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-blue-100 dark:bg-blue-950/50 font-medium cursor-pointer hover:opacity-90'
-                )}
-              >
-                {isExpanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                {group.color ? (
-                  <DynamicBgSpan color={group.color} className="shrink-0 w-3.5 h-3.5 rounded border" />
-                ) : (
-                  <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500" />
-                )}
-                <span className="break-words whitespace-normal">{group.name} [{group.code}]</span>
-              </button>
-              {isExpanded && (
-                <div className="space-y-0.5 pl-1">
-                  {groupCats.map((cat) => renderCat(cat, group, 1))}
-                </div>
-              )}
-            </div>
-          )
-        })}
-        {filteredNoGroup.map((cat) => renderCat(cat, undefined, 0))}
-        {q && filteredGroups.length === 0 && filteredNoGroup.length === 0 && (
-          <div className="py-6 text-center text-sm text-muted-foreground">
-            &quot;{search}&quot; ile eşleşen kategori bulunamadı
-          </div>
-        )}
-      </div>
-    </div>
-  )
 }
 
 /** Bu tiplerde tedarikçi kodu aranmaz (paket, mamül, hizmet) */
@@ -620,6 +460,8 @@ const productsListDefaults = {
   filterGroupId: '' as string,
   filterTypeId: '' as string,
   filterNoImage: false,
+  /** Ürün listesi: eşleştirme sütunu sunucu filtresi */
+  filterIntegration: '' as '' | 'parasut' | 'ideasoft',
   sortBy: 'sort_order' as SortBy,
   sortOrder: 'asc' as SortOrder,
   page: 1,
@@ -627,9 +469,106 @@ const productsListDefaults = {
   fitLimit: 10,
 }
 
+/** Kategori filtresi paneli: grup → kategori → alt kategori ağacı */
+interface FilterCatNode {
+  cat: CategoryItem
+  subs: CategoryItem[]
+}
+
+interface FilterGroupNode {
+  group: CategoryItem
+  cats: FilterCatNode[]
+}
+
+interface CategoryFilterPanelModel {
+  groups: FilterGroupNode[]
+  orphans: FilterCatNode[]
+}
+
+function buildCategoryFilterPanelModel(categories: CategoryItem[]): CategoryFilterPanelModel {
+  const groups = categories.filter(
+    (c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0)
+  )
+  const cats = categories.filter((c) => !c.category_id || c.category_id === 0)
+  const subCats = categories.filter((c) => c.category_id && c.category_id > 0)
+
+  const byGroup = new Map<number, CategoryItem[]>()
+  cats.forEach((c) => {
+    const gid = c.group_id ?? 0
+    if (gid > 0) {
+      if (!byGroup.has(gid)) byGroup.set(gid, [])
+      byGroup.get(gid)!.push(c)
+    }
+  })
+
+  const byParent = new Map<number, CategoryItem[]>()
+  subCats.forEach((c) => {
+    const pid = c.category_id!
+    if (!byParent.has(pid)) byParent.set(pid, [])
+    byParent.get(pid)!.push(c)
+  })
+
+  const groupNodes: FilterGroupNode[] = groups
+    .slice()
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+    .map((group) => {
+      const groupCats = byGroup.get(group.id) || []
+      const catNodes: FilterCatNode[] = groupCats
+        .slice()
+        .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+        .map((cat) => ({
+          cat,
+          subs: (byParent.get(cat.id) || [])
+            .slice()
+            .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)),
+        }))
+      return { group, cats: catNodes }
+    })
+
+  const noGroupCats = cats.filter((c) => c.group_id == null && !groups.some((g) => g.id === c.id))
+  const orphans: FilterCatNode[] = noGroupCats
+    .slice()
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+    .map((cat) => ({
+      cat,
+      subs: (byParent.get(cat.id) || []).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+
+  return { groups: groupNodes, orphans }
+}
+
+/** Cascade 1. sütun: grupsuz kategoriler için sanal grup anahtarı */
+const CATEGORY_FILTER_ORPHAN_GROUP_KEY = '__orphans__'
+
+function resolveProductListCategoryCascade(
+  categories: CategoryItem[],
+  filterGroupId: string,
+  filterCategoryId: string
+): { groupKey: string; categoryId: string; subId: string } {
+  const empty = { groupKey: '', categoryId: '', subId: '' }
+  if (!filterCategoryId && !filterGroupId) return empty
+  if (filterGroupId && !filterCategoryId) {
+    return { groupKey: filterGroupId, categoryId: '', subId: '' }
+  }
+  const id = parseInt(filterCategoryId, 10)
+  if (Number.isNaN(id)) return empty
+  const row = categories.find((c) => c.id === id)
+  if (!row) return { groupKey: filterGroupId || '', categoryId: filterCategoryId, subId: '' }
+
+  if (row.category_id && row.category_id > 0) {
+    const parent = categories.find((c) => c.id === row.category_id)
+    const groupKey =
+      parent && (parent.group_id ?? 0) > 0 ? String(parent.group_id) : CATEGORY_FILTER_ORPHAN_GROUP_KEY
+    return { groupKey, categoryId: String(row.category_id), subId: String(id) }
+  }
+
+  const groupKey = (row.group_id ?? 0) > 0 ? String(row.group_id) : CATEGORY_FILTER_ORPHAN_GROUP_KEY
+  return { groupKey, categoryId: String(id), subId: '' }
+}
+
 export function ProductsPage() {
   const [listState, setListState] = usePersistedListState('products', productsListDefaults)
-  const { search, filterName, filterSku, filterBrandId, filterCategoryId, filterGroupId, filterTypeId, filterNoImage, sortBy, sortOrder, page, pageSize, fitLimit } = listState
+  const { search, filterName, filterSku, filterBrandId, filterCategoryId, filterGroupId, filterTypeId, filterNoImage, filterIntegration, sortBy, sortOrder, page, pageSize, fitLimit } = listState
   const [debouncedSearch, setDebouncedSearch] = useState(search)
   const [debouncedFilterName, setDebouncedFilterName] = useState(filterName)
   const [debouncedFilterSku, setDebouncedFilterSku] = useState(filterSku)
@@ -689,13 +628,22 @@ export function ProductsPage() {
   const [ideasoftSyncSeo, setIdeasoftSyncSeo] = useState(false)
   const [ideasoftTransferStock, setIdeasoftTransferStock] = useState('20')
   const [ideasoftTransferDiscountPct, setIdeasoftTransferDiscountPct] = useState('55')
+  /** API isteğinde 0=yüzde, 1=sabit; sunucu IdeaSoft ürün discountType değerini ters eşler */
+  const [ideasoftTransferDiscountType, setIdeasoftTransferDiscountType] = useState<0 | 1>(0)
   const [ideasoftApplyTransferStock, setIdeasoftApplyTransferStock] = useState(true)
   const [ideasoftApplyTransferDiscount, setIdeasoftApplyTransferDiscount] = useState(true)
-  const [filterCategorySearch, setFilterCategorySearch] = useState('')
+  /** Modal kategori: grupsuz zinciri ve alt seçimi bekleyen orta kategori */
+  const [modalCategoryOrphanBucket, setModalCategoryOrphanBucket] = useState(false)
+  const [modalCategoryMiddlePending, setModalCategoryMiddlePending] = useState<number | ''>('')
+  /** category_id boşken seçilen grup (liste filtresindeki filter_group_id ile aynı rol) */
+  const [modalCategoryGroupKey, setModalCategoryGroupKey] = useState('')
+  /** Liste: grupsuz kategoriler sanal grubu (sunucu parametresi yok; UI durumu) */
+  const [categoryFilterOrphanBucket, setCategoryFilterOrphanBucket] = useState(false)
   const [filterBrandSearch, setFilterBrandSearch] = useState('')
   const [matchedCodesByBrand, setMatchedCodesByBrand] = useState<Record<number, Set<string>>>({})
   const [matchedParasutSkus, setMatchedParasutSkus] = useState<Set<string>>(new Set())
   const [parasutIconSrc, setParasutIconSrc] = useState<string | undefined>()
+  const [ideasoftIconSrc, setIdeasoftIconSrc] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkModal, setBulkModal] = useState<
     'category' | 'type' | 'itemGroup' | 'brand' | 'unit' | 'tax' | 'quantity' | null
@@ -716,6 +664,7 @@ export function ProductsPage() {
   const [ideasoftBulkSyncSeo, setIdeasoftBulkSyncSeo] = useState(false)
   const [ideasoftBulkTransferStock, setIdeasoftBulkTransferStock] = useState('20')
   const [ideasoftBulkTransferDiscountPct, setIdeasoftBulkTransferDiscountPct] = useState('55')
+  const [ideasoftBulkTransferDiscountType, setIdeasoftBulkTransferDiscountType] = useState<0 | 1>(0)
   const [ideasoftBulkApplyTransferStock, setIdeasoftBulkApplyTransferStock] = useState(true)
   const [ideasoftBulkApplyTransferDiscount, setIdeasoftBulkApplyTransferDiscount] = useState(true)
   const [ideasoftBulkSummary, setIdeasoftBulkSummary] = useState<{
@@ -730,9 +679,64 @@ export function ProductsPage() {
       detail: string
     }[]
   } | null>(null)
+
+  const ideasoftSingleCanSubmit = useMemo(() => {
+    const hasSync =
+      ideasoftSyncGeneral || ideasoftSyncPrice || ideasoftSyncImages || ideasoftSyncSeo
+    if (hasSync) return true
+    if (ideasoftApplyTransferStock) return true
+    if (ideasoftApplyTransferDiscount) {
+      const raw = String(ideasoftTransferDiscountPct).trim()
+      if (!raw) return false
+      const n = parseFloat(raw.replace(',', '.'))
+      return Number.isFinite(n) && n > 0
+    }
+    return false
+  }, [
+    ideasoftSyncGeneral,
+    ideasoftSyncPrice,
+    ideasoftSyncImages,
+    ideasoftSyncSeo,
+    ideasoftApplyTransferStock,
+    ideasoftApplyTransferDiscount,
+    ideasoftTransferDiscountPct,
+  ])
+
+  const ideasoftBulkCanSubmit = useMemo(() => {
+    const hasSync =
+      ideasoftBulkSyncGeneral || ideasoftBulkSyncPrice || ideasoftBulkSyncImages || ideasoftBulkSyncSeo
+    if (hasSync) return true
+    if (ideasoftBulkApplyTransferStock) return true
+    if (ideasoftBulkApplyTransferDiscount) {
+      const raw = String(ideasoftBulkTransferDiscountPct).trim()
+      if (!raw) return false
+      const n = parseFloat(raw.replace(',', '.'))
+      return Number.isFinite(n) && n > 0
+    }
+    return false
+  }, [
+    ideasoftBulkSyncGeneral,
+    ideasoftBulkSyncPrice,
+    ideasoftBulkSyncImages,
+    ideasoftBulkSyncSeo,
+    ideasoftBulkApplyTransferStock,
+    ideasoftBulkApplyTransferDiscount,
+    ideasoftBulkTransferDiscountPct,
+  ])
+
   const imageUploadProductRef = useRef<Product | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const hasFilter = search.length > 0 || filterName.length > 0 || filterSku.length > 0 || filterBrandId !== '' || filterCategoryId !== '' || filterGroupId !== '' || filterTypeId !== '' || filterNoImage
+  const hasFilter =
+    search.length > 0 ||
+    filterName.length > 0 ||
+    filterSku.length > 0 ||
+    filterBrandId !== '' ||
+    filterCategoryId !== '' ||
+    filterGroupId !== '' ||
+    categoryFilterOrphanBucket ||
+    filterTypeId !== '' ||
+    filterNoImage ||
+    filterIntegration !== ''
 
   useEffect(() => {
     const t = setTimeout(() => { setDebouncedSearch(search); setListState({ page: 1 }) }, 300)
@@ -746,6 +750,9 @@ export function ProductsPage() {
     const t = setTimeout(() => { setDebouncedFilterSku(filterSku); setListState({ page: 1 }) }, 300)
     return () => clearTimeout(t)
   }, [filterSku])
+  useEffect(() => {
+    if (filterCategoryId || filterGroupId) setCategoryFilterOrphanBucket(false)
+  }, [filterCategoryId, filterGroupId])
   const limit = pageSize === 'fit' ? fitLimit : pageSize
 
   const handleSort = (col: SortBy) => {
@@ -757,12 +764,23 @@ export function ProductsPage() {
   }
 
   const handleResetFilters = () => {
-    setListState({ search: '', filterName: '', filterSku: '', filterBrandId: '', filterCategoryId: '', filterGroupId: '', filterTypeId: '', filterNoImage: false, page: 1 })
+    setListState({
+      search: '',
+      filterName: '',
+      filterSku: '',
+      filterBrandId: '',
+      filterCategoryId: '',
+      filterGroupId: '',
+      filterTypeId: '',
+      filterNoImage: false,
+      filterIntegration: '',
+      page: 1,
+    })
     setDebouncedSearch('')
     setDebouncedFilterName('')
     setDebouncedFilterSku('')
     setFilterBrandSearch('')
-    setFilterCategorySearch('')
+    setCategoryFilterOrphanBucket(false)
   }
 
   const handleEcommerceToggle = useCallback(async (productId: number, enabled: boolean) => {
@@ -968,6 +986,7 @@ export function ProductsPage() {
     setIdeasoftSyncSeo(false)
     setIdeasoftTransferStock('20')
     setIdeasoftTransferDiscountPct('55')
+    setIdeasoftTransferDiscountType(0)
     setIdeasoftApplyTransferStock(true)
     setIdeasoftApplyTransferDiscount(true)
     setIdeasoftTransferModalOpen(true)
@@ -984,10 +1003,6 @@ export function ProductsPage() {
 
   const confirmIdeasoftTransfer = useCallback(async () => {
     if (!editingId) return
-    if (!ideasoftSyncGeneral && !ideasoftSyncPrice && !ideasoftSyncImages && !ideasoftSyncSeo) {
-      toastError('IdeaSoft', 'En az bir bilgi grubu seçin.')
-      return
-    }
     let stockN: number | undefined
     if (ideasoftApplyTransferStock) {
       stockN = parseFloat(String(ideasoftTransferStock).replace(',', '.'))
@@ -1001,12 +1016,27 @@ export function ProductsPage() {
       const rawDisc = String(ideasoftTransferDiscountPct).trim()
       if (rawDisc !== '') {
         const n = parseFloat(rawDisc.replace(',', '.'))
-        if (!Number.isFinite(n) || n < 0 || n > 100) {
-          toastError('IdeaSoft', 'İndirim yüzdesi 0,01–100 arasında olmalıdır (boş veya 0: indirim gönderilmez).')
+        if (!Number.isFinite(n) || n <= 0) {
+          toastError('IdeaSoft', 'İndirim için 0’dan büyük geçerli bir sayı girin (boş: gönderilmez).')
           return
         }
-        if (n > 0) discN = n
+        if (ideasoftTransferDiscountType === 0 && n > 100) {
+          toastError('IdeaSoft', 'Yüzde indirim en fazla 100 olabilir.')
+          return
+        }
+        discN = n
       }
+    }
+    const hasSyncGroup =
+      ideasoftSyncGeneral || ideasoftSyncPrice || ideasoftSyncImages || ideasoftSyncSeo
+    const willSendStock = ideasoftApplyTransferStock
+    const willSendDiscount = ideasoftApplyTransferDiscount && discN !== undefined && discN > 0
+    if (!hasSyncGroup && !willSendStock && !willSendDiscount) {
+      toastError(
+        'IdeaSoft',
+        'En az bir bilgi grubu seçin veya “Stok gönder” / geçerli indirim ile güncelleme yapın.',
+      )
+      return
     }
     setIdeasoftTransferLoading(true)
     try {
@@ -1017,8 +1047,10 @@ export function ProductsPage() {
         sync_seo: ideasoftSyncSeo,
       }
       if (ideasoftApplyTransferStock && stockN !== undefined) payload.ideasoft_stock_amount = stockN
-      if (ideasoftApplyTransferDiscount && discN !== undefined && discN > 0)
+      if (ideasoftApplyTransferDiscount && discN !== undefined && discN > 0) {
         payload.ideasoft_discount_percent = discN
+        payload.ideasoft_discount_type = ideasoftTransferDiscountType
+      }
       const res = await fetch(`${API_URL}/api/products/${editingId}/ideasoft-transfer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1045,6 +1077,7 @@ export function ProductsPage() {
     ideasoftSyncSeo,
     ideasoftTransferStock,
     ideasoftTransferDiscountPct,
+    ideasoftTransferDiscountType,
     ideasoftApplyTransferStock,
     ideasoftApplyTransferDiscount,
   ])
@@ -1057,17 +1090,228 @@ export function ProductsPage() {
     () => (form.brand_id ? brands.find((b) => b.id === form.brand_id)?.code ?? '' : ''),
     [brands, form.brand_id]
   )
-  const categoryFilterHierarchy = useMemo(() => {
-    const hierarchy = buildHierarchy(categories)
-    const withGroups = hierarchy
-    if (!filterCategorySearch.trim()) return withGroups
-    const q = filterCategorySearch.toLowerCase()
-    return withGroups.filter(
-      (h) =>
-        h.label.toLowerCase().includes(q) ||
-        h.path.some((p) => p.name.toLowerCase().includes(q) || (p.code && p.code.toLowerCase().includes(q)))
-    )
-  }, [categories, filterCategorySearch])
+  const isPackageType = useMemo(() => {
+    if (!form.type_id) return false
+    const t = types.find((x) => x.id === form.type_id)
+    const code = (t?.code ?? '').toUpperCase()
+    return code === 'PAK' || code === 'PAKET'
+  }, [types, form.type_id])
+  const categoryFilterPanelModel = useMemo(() => buildCategoryFilterPanelModel(categories), [categories])
+
+  const listFilterCascadeUi = useMemo(
+    () => resolveProductListCategoryCascade(categories, filterGroupId, filterCategoryId),
+    [categories, filterGroupId, filterCategoryId]
+  )
+
+  const listFilterGroupSelectValue = useMemo(
+    () =>
+      listFilterCascadeUi.groupKey ||
+      (categoryFilterOrphanBucket ? CATEGORY_FILTER_ORPHAN_GROUP_KEY : ''),
+    [listFilterCascadeUi.groupKey, categoryFilterOrphanBucket]
+  )
+
+  const listFilterMiddleOptions = useMemo(() => {
+    const gk = listFilterGroupSelectValue
+    if (!gk) return [] as FilterCatNode[]
+    if (gk === CATEGORY_FILTER_ORPHAN_GROUP_KEY) return categoryFilterPanelModel.orphans
+    const gid = parseInt(gk, 10)
+    if (Number.isNaN(gid)) return []
+    return categoryFilterPanelModel.groups.find((x) => x.group.id === gid)?.cats ?? []
+  }, [listFilterGroupSelectValue, categoryFilterPanelModel])
+
+  const listFilterSubOptions = useMemo(() => {
+    if (!listFilterCascadeUi.categoryId) return [] as CategoryItem[]
+    const cid = parseInt(listFilterCascadeUi.categoryId, 10)
+    if (Number.isNaN(cid)) return []
+    return listFilterMiddleOptions.find((n) => n.cat.id === cid)?.subs ?? []
+  }, [listFilterCascadeUi.categoryId, listFilterMiddleOptions])
+
+  const onListCategoryGroupChange = useCallback(
+    (e: ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      if (!v) {
+        setCategoryFilterOrphanBucket(false)
+        setListState({ filterGroupId: '', filterCategoryId: '', page: 1 })
+        return
+      }
+      if (v === CATEGORY_FILTER_ORPHAN_GROUP_KEY) {
+        setCategoryFilterOrphanBucket(true)
+        setListState({ filterGroupId: '', filterCategoryId: '', page: 1 })
+        return
+      }
+      setCategoryFilterOrphanBucket(false)
+      setListState({ filterGroupId: v, filterCategoryId: '', page: 1 })
+    },
+    [setListState]
+  )
+
+  const onListCategoryCategoryChange = useCallback(
+    (e: ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      const gk = listFilterGroupSelectValue
+      if (!gk) return
+      if (!v) {
+        if (gk === CATEGORY_FILTER_ORPHAN_GROUP_KEY) {
+          setCategoryFilterOrphanBucket(false)
+          setListState({ filterGroupId: '', filterCategoryId: '', page: 1 })
+        } else {
+          setListState({ filterGroupId: gk, filterCategoryId: '', page: 1 })
+        }
+        return
+      }
+      setCategoryFilterOrphanBucket(false)
+      setListState({ filterGroupId: '', filterCategoryId: v, page: 1 })
+    },
+    [setListState, listFilterGroupSelectValue]
+  )
+
+  const onListCategorySubChange = useCallback(
+    (e: ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      const mid = listFilterCascadeUi.categoryId
+      if (!mid) return
+      setCategoryFilterOrphanBucket(false)
+      if (v) {
+        setListState({ filterGroupId: '', filterCategoryId: v, page: 1 })
+        return
+      }
+      setListState({ filterGroupId: '', filterCategoryId: mid, page: 1 })
+    },
+    [setListState, listFilterCascadeUi.categoryId]
+  )
+
+  const formCategoryCascadeUi = useMemo(
+    () =>
+      resolveProductListCategoryCascade(
+        categories,
+        form.category_id ? '' : modalCategoryGroupKey,
+        form.category_id ? String(form.category_id) : ''
+      ),
+    [categories, form.category_id, modalCategoryGroupKey]
+  )
+
+  const formCategoryGroupSelectValue = useMemo(
+    () =>
+      formCategoryCascadeUi.groupKey ||
+      (modalCategoryOrphanBucket ? CATEGORY_FILTER_ORPHAN_GROUP_KEY : ''),
+    [formCategoryCascadeUi.groupKey, modalCategoryOrphanBucket]
+  )
+
+  const formCascadeMiddleOptions = useMemo(() => {
+    const gk = formCategoryGroupSelectValue
+    if (!gk) return [] as FilterCatNode[]
+    if (gk === CATEGORY_FILTER_ORPHAN_GROUP_KEY) return categoryFilterPanelModel.orphans
+    const gid = parseInt(gk, 10)
+    if (Number.isNaN(gid)) return []
+    return categoryFilterPanelModel.groups.find((x) => x.group.id === gid)?.cats ?? []
+  }, [formCategoryGroupSelectValue, categoryFilterPanelModel])
+
+  const formMiddleSelectString = useMemo(() => {
+    if (formCategoryCascadeUi.categoryId) return formCategoryCascadeUi.categoryId
+    if (modalCategoryMiddlePending !== '') return String(modalCategoryMiddlePending)
+    return ''
+  }, [formCategoryCascadeUi.categoryId, modalCategoryMiddlePending])
+
+  const formCascadeSubOptions = useMemo(() => {
+    if (!formMiddleSelectString) return [] as CategoryItem[]
+    const cid = parseInt(formMiddleSelectString, 10)
+    if (Number.isNaN(cid)) return []
+    return formCascadeMiddleOptions.find((n) => n.cat.id === cid)?.subs ?? []
+  }, [formMiddleSelectString, formCascadeMiddleOptions])
+
+  const applyFormCategoryId = useCallback(
+    (id: number | '') => {
+      setModalCategoryMiddlePending('')
+      if (typeof id === 'number' && id > 0) {
+        setModalCategoryGroupKey('')
+      }
+      const newPath = getCategoryPath(categories, id)
+      setForm((f) => {
+        const newSku = buildProductCode(newPath, brandCode, isPackageType ? '' : (f.supplier_code ?? ''))
+        return { ...f, category_id: id, sku: newSku || f.sku }
+      })
+    },
+    [categories, brandCode, isPackageType]
+  )
+
+  const onFormCategoryGroupChange = useCallback(
+    (e: ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      setModalCategoryMiddlePending('')
+      if (!v) {
+        setModalCategoryOrphanBucket(false)
+        setModalCategoryGroupKey('')
+        applyFormCategoryId('')
+        return
+      }
+      if (v === CATEGORY_FILTER_ORPHAN_GROUP_KEY) {
+        setModalCategoryOrphanBucket(true)
+        setModalCategoryGroupKey('')
+        applyFormCategoryId('')
+        return
+      }
+      setModalCategoryOrphanBucket(false)
+      setModalCategoryGroupKey(v)
+      applyFormCategoryId('')
+    },
+    [applyFormCategoryId]
+  )
+
+  const onFormCategoryCategoryChange = useCallback(
+    (e: ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      const gk = formCategoryGroupSelectValue
+      if (!gk) return
+      if (!v) {
+        setModalCategoryMiddlePending('')
+        if (gk === CATEGORY_FILTER_ORPHAN_GROUP_KEY) {
+          setModalCategoryOrphanBucket(false)
+          setModalCategoryGroupKey('')
+        } else if (gk) {
+          setModalCategoryGroupKey(gk)
+        }
+        applyFormCategoryId('')
+        return
+      }
+      const catId = parseInt(v, 10)
+      const node = formCascadeMiddleOptions.find((n) => n.cat.id === catId)
+      if (node && node.subs.length > 0) {
+        setModalCategoryOrphanBucket(false)
+        setModalCategoryMiddlePending(catId)
+        if (gk && gk !== CATEGORY_FILTER_ORPHAN_GROUP_KEY) {
+          setModalCategoryGroupKey(gk)
+        }
+        setForm((f) => {
+          const newPath = getCategoryPath(categories, '')
+          const newSku = buildProductCode(newPath, brandCode, isPackageType ? '' : (f.supplier_code ?? ''))
+          return { ...f, category_id: '', sku: newSku || f.sku }
+        })
+        return
+      }
+      setModalCategoryOrphanBucket(false)
+      setModalCategoryMiddlePending('')
+      applyFormCategoryId(catId)
+    },
+    [applyFormCategoryId, formCategoryGroupSelectValue, formCascadeMiddleOptions, categories, brandCode, isPackageType]
+  )
+
+  const onFormCategorySubChange = useCallback(
+    (e: ChangeEvent<HTMLSelectElement>) => {
+      const v = e.target.value
+      const mid = formMiddleSelectString
+      if (!mid) return
+      if (v) {
+        setModalCategoryOrphanBucket(false)
+        setModalCategoryMiddlePending('')
+        applyFormCategoryId(parseInt(v, 10))
+        return
+      }
+      setModalCategoryOrphanBucket(false)
+      setModalCategoryMiddlePending('')
+      applyFormCategoryId(parseInt(mid, 10))
+    },
+    [applyFormCategoryId, formMiddleSelectString]
+  )
 
   const filteredBrands = useMemo(() => {
     if (!filterBrandSearch.trim()) return brands
@@ -1116,6 +1360,9 @@ export function ProductsPage() {
       if (filterGroupId) params.set('filter_group_id', filterGroupId)
       if (filterTypeId) params.set('filter_type_id', effectiveFilterTypeId)
       if (filterNoImage) params.set('filter_no_image', '1')
+      if (filterIntegration === 'parasut' || filterIntegration === 'ideasoft') {
+        params.set('filter_integration', filterIntegration)
+      }
       const res = await fetch(`${API_URL}/api/products?${params}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Yüklenemedi')
@@ -1129,14 +1376,32 @@ export function ProductsPage() {
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [page, limit, sortBy, sortOrder, debouncedSearch, debouncedFilterName, debouncedFilterSku, filterBrandId, filterCategoryId, filterGroupId, effectiveFilterTypeId, filterNoImage])
+  }, [
+    page,
+    limit,
+    sortBy,
+    sortOrder,
+    debouncedSearch,
+    debouncedFilterName,
+    debouncedFilterSku,
+    filterBrandId,
+    filterCategoryId,
+    filterGroupId,
+    effectiveFilterTypeId,
+    filterNoImage,
+    filterIntegration,
+  ])
 
   const lookupSupplierCodeRef = useRef<(() => Promise<void>) | null>(null)
+  /** Ürün düzenleme modalı açılınca tetiklenen ilk otomatik tedarikçi fiyat aramasında toast gösterme */
+  const suppressSupplierPriceLookupToastsRef = useRef(false)
   const lookupSupplierCode = useCallback(async () => {
+    const allowSupplierLookupToasts = !suppressSupplierPriceLookupToastsRef.current
     const code = form.supplier_code?.trim()
     const brandId = form.brand_id
     if (!code || !brandId || skipSupplierCode) {
       setSupplierCodeMatch(null)
+      suppressSupplierPriceLookupToastsRef.current = false
       return
     }
     setSupplierCodeLookupLoading(true)
@@ -1190,7 +1455,9 @@ export function ProductsPage() {
         const cur = currencies.find((c) => c.id === (newCurrencyId ?? currency_id))
         const priceStr = formatPrice(effectivePrice)
         const curLabel = cur?.name ?? ''
-        toastSuccess('Fiyat çekildi (tedarikçi kaynağı)', `${priceStr} ${curLabel}`.trim() || 'Fiyat ve para birimi otomatik dolduruldu.')
+        if (allowSupplierLookupToasts) {
+          toastSuccess('Fiyat çekildi (tedarikçi kaynağı)', `${priceStr} ${curLabel}`.trim() || 'Fiyat ve para birimi otomatik dolduruldu.')
+        }
         if (editingId) {
           const pricesPayload = Object.entries(prices).map(
             ([id, p]) => ({ price_type_id: Number(id), price: p.price, currency_id: p.currency_id, status: p.status })
@@ -1207,26 +1474,72 @@ export function ProductsPage() {
             } else {
               fetchData(true)
             }
-            toastSuccess('Fiyatlar kaydedildi', 'Genel fiyat ve hesaplanan fiyatlar tabloya kaydedildi.')
+            if (allowSupplierLookupToasts) {
+              toastSuccess('Fiyatlar kaydedildi', 'Genel fiyat ve hesaplanan fiyatlar tabloya kaydedildi.')
+            }
           }
         }
       } else {
         setSupplierCodeMatch(false)
       }
-    } catch {
+    } catch (e) {
       setSupplierCodeMatch(null)
+      if (allowSupplierLookupToasts) {
+        toastError(
+          'Tedarikçi fiyatı',
+          e instanceof Error ? e.message : 'Kaynak dosyası veya ağ hatası; tedarikçi listesi okunamadı.'
+        )
+      }
     } finally {
       setSupplierCodeLookupLoading(false)
+      suppressSupplierPriceLookupToastsRef.current = false
     }
   }, [form.supplier_code, form.brand_id, form.currency_id, form.prices, skipSupplierCode, currencies, computeEcommercePrice, calculationRules, priceTypes, editingId, fetchData])
   lookupSupplierCodeRef.current = lookupSupplierCode
 
-  const isPackageType = useMemo(() => {
-    if (!form.type_id) return false
-    const t = types.find((x) => x.id === form.type_id)
-    const code = (t?.code ?? '').toUpperCase()
-    return code === 'PAK' || code === 'PAKET'
-  }, [types, form.type_id])
+  /** Tedarikçi kodu / marka değişince (ürün kodu modalı dahil) debounce ile fiyat ara; yalnızca blur’da değil. */
+  const supplierLookupDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (supplierLookupDebounceRef.current) {
+      clearTimeout(supplierLookupDebounceRef.current)
+      supplierLookupDebounceRef.current = null
+    }
+    if (skipSupplierCode) return
+    const code = form.supplier_code?.trim()
+    const brandId = form.brand_id
+    if (!code || !brandId) return
+
+    supplierLookupDebounceRef.current = setTimeout(() => {
+      supplierLookupDebounceRef.current = null
+      void lookupSupplierCodeRef.current?.()
+    }, 450)
+
+    return () => {
+      if (supplierLookupDebounceRef.current) {
+        clearTimeout(supplierLookupDebounceRef.current)
+        supplierLookupDebounceRef.current = null
+      }
+    }
+  }, [form.supplier_code, form.brand_id, skipSupplierCode])
+
+  /** Modal açıkken otomatik arama yapılmayacaksa bastırma bayrağını sıfırla (aksi halde ref true kalır) */
+  useEffect(() => {
+    if (!modalOpen) {
+      suppressSupplierPriceLookupToastsRef.current = false
+      return
+    }
+    if (skipSupplierCode || !String(form.supplier_code ?? '').trim() || !form.brand_id) {
+      suppressSupplierPriceLookupToastsRef.current = false
+    }
+  }, [modalOpen, skipSupplierCode, form.supplier_code, form.brand_id])
+
+  useEffect(() => {
+    if (!modalOpen) {
+      setModalCategoryOrphanBucket(false)
+      setModalCategoryMiddlePending('')
+      setModalCategoryGroupKey('')
+    }
+  }, [modalOpen])
 
   const selectedTypeName = useMemo(
     () => (form.type_id ? types.find((t) => t.id === form.type_id)?.name ?? 'Ürün tipi' : 'Ürün tipi'),
@@ -1387,10 +1700,12 @@ export function ProductsPage() {
     const applySidebarIcons = () => {
       const menus = getSidebarMenus()
       setParasutIconSrc(getParasutSidebarIconSrc(menus))
+      setIdeasoftIconSrc(getIdeasoftSidebarIconSrc(menus))
     }
     applySidebarIcons()
     fetchSidebarMenus().then((menus) => {
       setParasutIconSrc(getParasutSidebarIconSrc(menus))
+      setIdeasoftIconSrc(getIdeasoftSidebarIconSrc(menus))
     })
     window.addEventListener(SIDEBAR_MENUS_UPDATED_EVENT, applySidebarIcons)
     window.addEventListener('storage', applySidebarIcons)
@@ -1489,6 +1804,9 @@ export function ProductsPage() {
   }, [])
 
   async function openNew() {
+    setModalCategoryOrphanBucket(false)
+    setModalCategoryMiddlePending('')
+    setModalCategoryGroupKey('')
     setEditingId(null)
     setModalTab('genel')
     const defCur = defaultCurrencyId ?? ''
@@ -1510,6 +1828,9 @@ export function ProductsPage() {
   }
 
   async function openEdit(item: Product, tab: string = 'genel') {
+    setModalCategoryOrphanBucket(false)
+    setModalCategoryMiddlePending('')
+    setModalCategoryGroupKey('')
     setEditingId(item.id)
     setModalTab(tab)
     setSupplierCodeMatch(null)
@@ -1543,6 +1864,7 @@ export function ProductsPage() {
           status: 1,
         }
       }
+      suppressSupplierPriceLookupToastsRef.current = true
       setForm({
         name: product?.name ?? item.name,
         sku: product?.sku ?? item.sku ?? '',
@@ -1612,6 +1934,9 @@ export function ProductsPage() {
   }
 
   function closeModal() {
+    setModalCategoryOrphanBucket(false)
+    setModalCategoryMiddlePending('')
+    setModalCategoryGroupKey('')
     setModalOpen(false)
     setModalTab('genel')
     setEditingId(null)
@@ -1829,7 +2154,7 @@ export function ProductsPage() {
     }
     if (!form.category_id) {
       setError('Kategori seçilmeden kayıt yapılamaz.')
-      setModalTab('kategori')
+      setModalTab('genel')
       return
     }
     setSaving(true)
@@ -1978,6 +2303,7 @@ export function ProductsPage() {
     setIdeasoftBulkSyncSeo(false)
     setIdeasoftBulkTransferStock('20')
     setIdeasoftBulkTransferDiscountPct('55')
+    setIdeasoftBulkTransferDiscountType(0)
     setIdeasoftBulkApplyTransferStock(true)
     setIdeasoftBulkApplyTransferDiscount(true)
     setIdeasoftBulkTransferModalOpen(true)
@@ -1995,15 +2321,6 @@ export function ProductsPage() {
   const submitBulkIdeasoftTransfer = useCallback(async () => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return
-    if (
-      !ideasoftBulkSyncGeneral &&
-      !ideasoftBulkSyncPrice &&
-      !ideasoftBulkSyncImages &&
-      !ideasoftBulkSyncSeo
-    ) {
-      toastError('IdeaSoft toplu aktarım', 'En az bir bilgi grubu seçin.')
-      return
-    }
     let stockN: number | undefined
     if (ideasoftBulkApplyTransferStock) {
       stockN = parseFloat(String(ideasoftBulkTransferStock).replace(',', '.'))
@@ -2017,15 +2334,33 @@ export function ProductsPage() {
       const rawDisc = String(ideasoftBulkTransferDiscountPct).trim()
       if (rawDisc !== '') {
         const n = parseFloat(rawDisc.replace(',', '.'))
-        if (!Number.isFinite(n) || n < 0 || n > 100) {
+        if (!Number.isFinite(n) || n <= 0) {
           toastError(
             'IdeaSoft toplu aktarım',
-            'İndirim yüzdesi 0,01–100 arasında olmalıdır (boş veya 0: indirim gönderilmez).'
+            'İndirim için 0’dan büyük geçerli bir sayı girin (boş: gönderilmez).'
           )
           return
         }
-        if (n > 0) discN = n
+        if (ideasoftBulkTransferDiscountType === 0 && n > 100) {
+          toastError('IdeaSoft toplu aktarım', 'Yüzde indirim en fazla 100 olabilir.')
+          return
+        }
+        discN = n
       }
+    }
+    const hasSyncGroup =
+      ideasoftBulkSyncGeneral ||
+      ideasoftBulkSyncPrice ||
+      ideasoftBulkSyncImages ||
+      ideasoftBulkSyncSeo
+    const willSendStock = ideasoftBulkApplyTransferStock
+    const willSendDiscount = ideasoftBulkApplyTransferDiscount && discN !== undefined && discN > 0
+    if (!hasSyncGroup && !willSendStock && !willSendDiscount) {
+      toastError(
+        'IdeaSoft toplu aktarım',
+        'En az bir bilgi grubu seçin veya “Stok gönder” / geçerli indirim ile güncelleme yapın.',
+      )
+      return
     }
     const labelById = new Map<number, { name: string; sku?: string }>()
     for (const p of data) labelById.set(p.id, { name: p.name, sku: p.sku })
@@ -2042,7 +2377,10 @@ export function ProductsPage() {
           sync_seo: ideasoftBulkSyncSeo,
           ...(ideasoftBulkApplyTransferStock && stockN !== undefined ? { ideasoft_stock_amount: stockN } : {}),
           ...(ideasoftBulkApplyTransferDiscount && discN !== undefined && discN > 0
-            ? { ideasoft_discount_percent: discN }
+            ? {
+                ideasoft_discount_percent: discN,
+                ideasoft_discount_type: ideasoftBulkTransferDiscountType,
+              }
             : {}),
         }),
       })
@@ -2119,6 +2457,7 @@ export function ProductsPage() {
     ideasoftBulkSyncSeo,
     ideasoftBulkTransferStock,
     ideasoftBulkTransferDiscountPct,
+    ideasoftBulkTransferDiscountType,
     ideasoftBulkApplyTransferStock,
     ideasoftBulkApplyTransferDiscount,
   ])
@@ -2159,6 +2498,55 @@ export function ProductsPage() {
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
             <div className="flex items-center gap-0">
+            <div className="flex items-center gap-1 shrink-0 pr-1 border-r border-border/60 mr-1">
+              <select
+                aria-label="Liste: ürün grubu"
+                title="Grup"
+                className="h-9 min-w-[5rem] max-w-[7.5rem] cursor-pointer truncate rounded-md border border-input bg-background px-1.5 py-0.5 text-xs text-foreground shadow-sm"
+                value={listFilterGroupSelectValue}
+                onChange={onListCategoryGroupChange}
+              >
+                <option value="">Grup</option>
+                {categoryFilterPanelModel.groups.map((g) => (
+                  <option key={g.group.id} value={String(g.group.id)}>
+                    {g.group.name}
+                  </option>
+                ))}
+                {categoryFilterPanelModel.orphans.length > 0 ? (
+                  <option value={CATEGORY_FILTER_ORPHAN_GROUP_KEY}>Grupsuz</option>
+                ) : null}
+              </select>
+              <select
+                aria-label="Liste: kategori"
+                title="Kategori"
+                className="h-9 min-w-[5rem] max-w-[7.5rem] cursor-pointer truncate rounded-md border border-input bg-background px-1.5 py-0.5 text-xs text-foreground shadow-sm disabled:cursor-not-allowed disabled:opacity-45"
+                value={listFilterCascadeUi.categoryId}
+                disabled={!listFilterGroupSelectValue}
+                onChange={onListCategoryCategoryChange}
+              >
+                <option value="">Kategori</option>
+                {listFilterMiddleOptions.map(({ cat }) => (
+                  <option key={cat.id} value={String(cat.id)}>
+                    {cat.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Liste: alt kategori"
+                title="Alt kategori"
+                className="h-9 min-w-[4.5rem] max-w-[7rem] cursor-pointer truncate rounded-md border border-input bg-background px-1.5 py-0.5 text-xs text-foreground shadow-sm disabled:cursor-not-allowed disabled:opacity-45"
+                value={listFilterCascadeUi.subId}
+                disabled={!listFilterCascadeUi.categoryId || listFilterSubOptions.length === 0}
+                onChange={onListCategorySubChange}
+              >
+                <option value="">Alt</option>
+                {listFilterSubOptions.map((s) => (
+                  <option key={s.id} value={String(s.id)}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
@@ -2484,18 +2872,71 @@ export function ProductsPage() {
                     </div>
                   </th>
                   <th className="text-center p-2 font-medium w-14">Tip</th>
-                  <th className="text-center p-2 font-medium w-14">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-flex items-center justify-center">
-                          <Link2 className="h-4 w-4" />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>Eşleşmeler</TooltipContent>
-                    </Tooltip>
+                  <th className="text-center p-2 font-medium w-[108px] min-w-[108px]">
+                    <div className="flex flex-col items-center gap-1">
+                      <div className="inline-flex items-center gap-1">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center justify-center">
+                              <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>Eşleştirme (tedarikçi / Paraşüt / IdeaSoft)</TooltipContent>
+                        </Tooltip>
+                        <span className="text-xs font-medium leading-none">Eşleştirme</span>
+                      </div>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className={cn(
+                              'rounded p-0.5 hover:bg-muted',
+                              filterIntegration ? 'text-primary' : 'text-muted-foreground'
+                            )}
+                            aria-label="Eşleştirme filtresi"
+                          >
+                            <Filter className="h-3.5 w-3.5" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="center" className="w-52 p-0">
+                          <div className="py-1">
+                            <button
+                              type="button"
+                              onClick={() => setListState({ filterIntegration: '', page: 1 })}
+                              className={cn(
+                                'w-full text-left px-3 py-2 text-sm hover:bg-muted',
+                                filterIntegration === '' && 'bg-accent'
+                              )}
+                            >
+                              Tümü
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setListState({ filterIntegration: 'parasut', page: 1 })}
+                              className={cn(
+                                'w-full text-left px-3 py-2 text-sm hover:bg-muted',
+                                filterIntegration === 'parasut' && 'bg-accent'
+                              )}
+                            >
+                              Paraşüt
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setListState({ filterIntegration: 'ideasoft', page: 1 })}
+                              className={cn(
+                                'w-full text-left px-3 py-2 text-sm hover:bg-muted',
+                                filterIntegration === 'ideasoft' && 'bg-accent'
+                              )}
+                            >
+                              IdeaSoft
+                            </button>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </div>
                   </th>
-                  <th className="text-center p-2 font-medium min-w-[180px]">
-                    <div className="inline-flex items-center gap-1">
+                  <th className="p-2 font-medium w-[1%] max-w-[9rem] align-top">
+                    <div className="flex justify-center">
                       <button
                         type="button"
                         onClick={() => handleSort('category_name')}
@@ -2504,99 +2945,6 @@ export function ProductsPage() {
                         {sortBy === 'category_name' ? (sortOrder === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         Kategori
                       </button>
-                      <Popover onOpenChange={(open) => !open && setFilterCategorySearch('')}>
-                        <PopoverTrigger asChild>
-                          <button
-                            type="button"
-                            className={`rounded p-0.5 hover:bg-muted ${(filterCategoryId || filterGroupId) ? 'text-primary' : 'text-muted-foreground'}`}
-                            aria-label="Kategori filtresi"
-                          >
-                            <Filter className="h-3.5 w-3.5" />
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent align="start" className="w-80 p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
-                          <div className="p-2 border-b">
-                            <Label className="text-xs">Kategori</Label>
-                            <Input
-                              placeholder="Kategori veya alt kategori ara..."
-                              value={filterCategorySearch}
-                              onChange={(e) => setFilterCategorySearch(e.target.value)}
-                              className="h-8 text-sm mt-1.5"
-                            />
-                          </div>
-                          <div className="max-h-[260px] overflow-y-auto py-1">
-                            <button
-                              type="button"
-                              onClick={() => setListState({ filterCategoryId: '', filterGroupId: '', page: 1 })}
-                              className={cn(
-                                'w-full text-left px-3 py-2 text-sm hover:bg-muted',
-                                !filterCategoryId && !filterGroupId && 'bg-accent'
-                              )}
-                            >
-                              Tümü
-                            </button>
-                            {(() => {
-                              const byGroup = new Map<string, typeof categoryFilterHierarchy>()
-                              categoryFilterHierarchy.forEach((h) => {
-                                const groupLabel = h.path[0]?.name ?? 'Diğer'
-                                if (!byGroup.has(groupLabel)) byGroup.set(groupLabel, [])
-                                byGroup.get(groupLabel)!.push(h)
-                              })
-                              const groupItems = categoryFilterHierarchy.filter((h) => h.level === 'group')
-                              return Array.from(byGroup.entries()).map(([groupName, items]) => {
-                                const groupItem = groupItems.find((g) => g.path[0]?.name === groupName)
-                                return (
-                                  <div key={groupName}>
-                                    {groupItem ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => setListState({ filterGroupId: String(groupItem.id), filterCategoryId: '', page: 1 })}
-                                        className={cn(
-                                          'w-full text-left px-3 py-2 text-sm hover:bg-muted flex items-center gap-2',
-                                          filterGroupId === String(groupItem.id) && 'bg-accent'
-                                        )}
-                                      >
-                                        {groupItem.color ? (
-                                          <DynamicBgSpan color={groupItem.color} className="shrink-0 w-3 h-3 rounded border" />
-                                        ) : null}
-                                        <span className="truncate font-medium">{groupName}</span>
-                                      </button>
-                                    ) : (
-                                      <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted/50">
-                                        {groupName}
-                                      </div>
-                                    )}
-                                    {items.filter((h) => h.level !== 'group').map((h) => (
-                                      <button
-                                        key={h.id}
-                                        type="button"
-                                        onClick={() => setListState({ filterCategoryId: String(h.id), filterGroupId: '', page: 1 })}
-                                        className={cn(
-                                          'w-full text-left px-3 py-2 text-sm hover:bg-muted flex items-center gap-2',
-                                          h.level === 'subcategory' && 'pl-5',
-                                          filterCategoryId === String(h.id) && 'bg-accent'
-                                        )}
-                                      >
-                                        {h.color ? (
-                                          <DynamicBgSpan color={h.color} className="shrink-0 w-3 h-3 rounded border" />
-                                        ) : null}
-                                        <span className="truncate">
-                                          {h.path.length > 1 ? h.path.slice(1).map((p) => p.name).join(' › ') : h.path[0]?.name ?? h.label}
-                                        </span>
-                                      </button>
-                                    ))}
-                                  </div>
-                                )
-                              })
-                            })()}
-                            {categoryFilterHierarchy.length === 0 && (
-                              <div className="px-3 py-4 text-sm text-muted-foreground text-center">
-                                {categories.length === 0 ? 'Kategori bulunamadı.' : 'Sonuç bulunamadı'}
-                              </div>
-                            )}
-                          </div>
-                        </PopoverContent>
-                      </Popover>
                     </div>
                   </th>
                   <th className="text-center p-2 font-medium min-w-[80px]">Birim</th>
@@ -2762,8 +3110,16 @@ export function ProductsPage() {
                           const code = item.supplier_code?.trim()
                           const bid = item.brand_id
                           const isSupplierMatched = code && bid && matchedCodesByBrand[bid]?.has(code)
-                          const isParasutMatched = item.sku?.trim() && matchedParasutSkus.has(normalizeSku(item.sku))
-                          if (!isSupplierMatched && !isParasutMatched) return <span className="text-muted-foreground">—</span>
+                          const hasDbParasut = Boolean(item.parasut_product_id?.trim())
+                          const hasLiveParasut =
+                            Boolean(item.sku?.trim()) && matchedParasutSkus.has(normalizeSku(item.sku))
+                          const showParasut = hasDbParasut || hasLiveParasut
+                          const hasIdeasoft =
+                            item.ideasoft_product_id != null &&
+                            Number(item.ideasoft_product_id) > 0
+                          if (!isSupplierMatched && !showParasut && !hasIdeasoft) {
+                            return <span className="text-muted-foreground">—</span>
+                          }
                           return (
                             <div className="flex items-center justify-center gap-1.5 flex-wrap">
                               {isSupplierMatched && (
@@ -2788,7 +3144,7 @@ export function ProductsPage() {
                                   </TooltipContent>
                                 </Tooltip>
                               )}
-                              {isParasutMatched && (
+                              {showParasut && (
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <div className="flex items-center justify-center shrink-0">
@@ -2805,14 +3161,36 @@ export function ProductsPage() {
                                       )}
                                     </div>
                                   </TooltipTrigger>
-                                  <TooltipContent>Paraşüt ile eşleşmiş</TooltipContent>
+                                  <TooltipContent>
+                                    {hasDbParasut
+                                      ? `Paraşüt bağlı (ürün #${item.parasut_product_id})`
+                                      : 'Paraşüt ile SKU eşleşmesi'}
+                                  </TooltipContent>
+                                </Tooltip>
+                              )}
+                              {hasIdeasoft && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <div className="flex items-center justify-center shrink-0">
+                                      {ideasoftIconSrc ? (
+                                        <img
+                                          src={ideasoftIconSrc}
+                                          alt="IdeaSoft"
+                                          className="h-8 w-8 object-contain rounded-md"
+                                        />
+                                      ) : (
+                                        <IdeasoftMark className="h-8 w-8 shrink-0" />
+                                      )}
+                                    </div>
+                                  </TooltipTrigger>
+                                  <TooltipContent>IdeaSoft ürün #{item.ideasoft_product_id}</TooltipContent>
                                 </Tooltip>
                               )}
                             </div>
                           )
                         })()}
                       </td>
-                      <td className="p-3">
+                      <td className="p-2 align-top w-[1%] max-w-[9rem]">
                         {(() => {
                           const pathFromHierarchy = getCategoryPath(categories, item.category_id ?? '')
                           const split =
@@ -2841,22 +3219,29 @@ export function ProductsPage() {
                             if (!groupCode && !categoryCode && !subLabel) {
                               return <span className="text-muted-foreground">—</span>
                             }
+                            const subLabelColor =
+                              subLabel &&
+                              (normalizeCategoryColor(item.subcategory_color) ??
+                                (!groupCode && !categoryCode
+                                  ? normalizeCategoryColor(item.category_color) ?? normalizeCategoryColor(item.group_color)
+                                  : null))
                             return (
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <div className="flex flex-wrap items-center gap-1.5 text-left min-w-0 max-w-[min(420px,100%)]">
-                                    {groupCode ? (
-                                      <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
-                                        {groupCode}
-                                      </Badge>
-                                    ) : null}
-                                    {categoryCode ? (
-                                      <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
-                                        {categoryCode}
-                                      </Badge>
-                                    ) : null}
+                                  <div className="flex flex-col items-stretch gap-1 text-left min-w-0 max-w-full">
+                                    <div className="flex flex-wrap items-center gap-1 min-w-0">
+                                      {groupCode ? (
+                                        <CategoryListCodeBadge code={groupCode} color={item.group_color} />
+                                      ) : null}
+                                      {categoryCode ? (
+                                        <CategoryListCodeBadge code={categoryCode} color={item.category_color} />
+                                      ) : null}
+                                    </div>
                                     {subLabel ? (
-                                      <span className="text-sm text-foreground break-words min-w-0 leading-snug">
+                                      <span
+                                        className="text-xs text-foreground break-words min-w-0 leading-snug line-clamp-3"
+                                        style={subLabelColor ? { color: subLabelColor } : undefined}
+                                      >
                                         {subLabel}
                                       </span>
                                     ) : null}
@@ -2875,22 +3260,27 @@ export function ProductsPage() {
                           if (!gc && !cc && !subn) {
                             return <span className="text-muted-foreground">—</span>
                           }
+                          const fbSubColor =
+                            subn &&
+                            (normalizeCategoryColor(item.subcategory_color) ??
+                              (!gc && !cc
+                                ? normalizeCategoryColor(item.category_color) ?? normalizeCategoryColor(item.group_color)
+                                : null))
                           return (
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-[min(420px,100%)]">
-                                  {gc ? (
-                                    <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
-                                      {gc}
-                                    </Badge>
-                                  ) : null}
-                                  {cc ? (
-                                    <Badge variant="secondary" className="font-mono text-[11px] px-1.5 py-0 shrink-0">
-                                      {cc}
-                                    </Badge>
-                                  ) : null}
+                                <div className="flex flex-col items-stretch gap-1 min-w-0 max-w-full">
+                                  <div className="flex flex-wrap items-center gap-1 min-w-0">
+                                    {gc ? <CategoryListCodeBadge code={gc} color={item.group_color} /> : null}
+                                    {cc ? <CategoryListCodeBadge code={cc} color={item.category_color} /> : null}
+                                  </div>
                                   {subn ? (
-                                    <span className="text-sm text-foreground break-words min-w-0 leading-snug">{subn}</span>
+                                    <span
+                                      className="text-xs break-words min-w-0 leading-snug line-clamp-3"
+                                      style={fbSubColor ? { color: fbSubColor } : undefined}
+                                    >
+                                      {subn}
+                                    </span>
                                   ) : null}
                                 </div>
                               </TooltipTrigger>
@@ -2988,9 +3378,8 @@ export function ProductsPage() {
             {error && <p className="text-sm text-destructive shrink-0">{error}</p>}
             <div className="flex-1 min-h-0 overflow-y-auto">
             <Tabs value={modalTab} onValueChange={setModalTab} className="w-full">
-              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-7' : 'grid-cols-6'}`}>
+              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-6' : 'grid-cols-5'}`}>
                 <TabsTrigger value="genel">Genel</TabsTrigger>
-                <TabsTrigger value="kategori">Kategori</TabsTrigger>
                 <TabsTrigger value="fiyat">Fiyat</TabsTrigger>
                 <TabsTrigger value="gorsel">Görsel</TabsTrigger>
                 {isPackageType && (
@@ -3002,7 +3391,7 @@ export function ProductsPage() {
               <TabsContent value="genel" className="space-y-4 mt-4 min-h-[55vh]">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                      <Label htmlFor="product_item_group">Ürün Grubu</Label>
+                    <Label htmlFor="product_item_group">Ürün Grubu</Label>
                     <select
                       id="product_item_group"
                       aria-label="Ürün grubu seçin"
@@ -3016,8 +3405,6 @@ export function ProductsPage() {
                       ))}
                     </select>
                   </div>
-                </div>
-                <div className="grid grid-cols-3 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="brand">Marka</Label>
                     <select
@@ -3033,6 +3420,8 @@ export function ProductsPage() {
                       ))}
                     </select>
                   </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="unit">Birim</Label>
                     <select
@@ -3049,19 +3438,17 @@ export function ProductsPage() {
                     </select>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="tax_rate">Vergi (KDV %)</Label>
-                    <select
-                      id="tax_rate"
-                      aria-label="Vergi oranı seçin"
-                      value={form.tax_rate != null ? form.tax_rate : ''}
-                      onChange={(e) => setForm((f) => ({ ...f, tax_rate: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
-                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    >
-                      <option value="">Seçin</option>
-                      {taxRates.map((tr) => (
-                        <option key={tr.id} value={tr.value}>{tr.name} ({tr.value}%)</option>
-                      ))}
-                    </select>
+                    <Label htmlFor="quantity">Miktar</Label>
+                    <Input
+                      id="quantity"
+                      type="number"
+                      step={1}
+                      min="0"
+                      value={form.quantity || ''}
+                      onChange={(e) => setForm((f) => ({ ...f, quantity: parseFloat(e.target.value) || 0 }))}
+                      placeholder="0"
+                      className="text-right tabular-nums"
+                    />
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -3088,7 +3475,7 @@ export function ProductsPage() {
                           return { ...f, supplier_code: v ?? '', sku: newSku || f.sku }
                         })
                       }
-                      supplierCodeEditable={true}
+                      supplierCodeEditable={!skipSupplierCode}
                       sku={form.sku}
                       placeholder="Kategori, marka ve tedarikçi kodu seçin"
                     />
@@ -3101,7 +3488,13 @@ export function ProductsPage() {
                           id="supplier_code"
                           value={form.supplier_code}
                           onChange={(e) => setForm((f) => ({ ...f, supplier_code: e.target.value }))}
-                          onBlur={() => setTimeout(() => lookupSupplierCodeRef.current?.(), 0)}
+                          onBlur={() => {
+                            if (supplierLookupDebounceRef.current) {
+                              clearTimeout(supplierLookupDebounceRef.current)
+                              supplierLookupDebounceRef.current = null
+                            }
+                            setTimeout(() => void lookupSupplierCodeRef.current?.(), 0)
+                          }}
                           placeholder="Tedarikçi ürün kodu (son kısım)"
                           className="pr-9"
                         />
@@ -3124,39 +3517,90 @@ export function ProductsPage() {
                     />
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="quantity">Miktar</Label>
-                  <Input
-                    id="quantity"
-                    type="number"
-                    step={1}
-                    min="0"
-                    value={form.quantity || ''}
-                    onChange={(e) => setForm((f) => ({ ...f, quantity: parseFloat(e.target.value) || 0 }))}
-                    placeholder="0"
-                    className="text-right tabular-nums"
-                  />
+                <div className="w-full min-w-0 space-y-2 pt-4 mt-2 border-t border-border/60">
+                  <Label className="text-base">Kategori *</Label>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="space-y-1.5 min-w-0">
+                      <Label htmlFor="product-category-group" className="text-xs text-muted-foreground">
+                        Grup
+                      </Label>
+                      <select
+                        id="product-category-group"
+                        aria-label="Ürün grubu"
+                        value={formCategoryGroupSelectValue}
+                        onChange={onFormCategoryGroupChange}
+                        className="flex h-10 w-full min-w-0 cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm truncate"
+                      >
+                        <option value="">Grup seçin</option>
+                        {categoryFilterPanelModel.groups.map((g) => (
+                          <option key={g.group.id} value={String(g.group.id)}>
+                            {g.group.name}
+                          </option>
+                        ))}
+                        {categoryFilterPanelModel.orphans.length > 0 ? (
+                          <option value={CATEGORY_FILTER_ORPHAN_GROUP_KEY}>Grupsuz</option>
+                        ) : null}
+                      </select>
+                    </div>
+                    <div className="space-y-1.5 min-w-0">
+                      <Label htmlFor="product-category-mid" className="text-xs text-muted-foreground">
+                        Kategori
+                      </Label>
+                      <select
+                        id="product-category-mid"
+                        aria-label="Kategori"
+                        value={formMiddleSelectString}
+                        disabled={!formCategoryGroupSelectValue}
+                        onChange={onFormCategoryCategoryChange}
+                        className="flex h-10 w-full min-w-0 cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm truncate disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        <option value="">Kategori seçin</option>
+                        {formCascadeMiddleOptions.map(({ cat }) => (
+                          <option key={cat.id} value={String(cat.id)}>
+                            {cat.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1.5 min-w-0">
+                      <Label htmlFor="product-category-sub" className="text-xs text-muted-foreground">
+                        Alt kategori
+                      </Label>
+                      <select
+                        id="product-category-sub"
+                        aria-label="Alt kategori"
+                        value={formCategoryCascadeUi.subId}
+                        disabled={!formMiddleSelectString || formCascadeSubOptions.length === 0}
+                        onChange={onFormCategorySubChange}
+                        className="flex h-10 w-full min-w-0 cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm truncate disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        <option value="">Alt kategori</option>
+                        {formCascadeSubOptions.map((s) => (
+                          <option key={s.id} value={String(s.id)}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
                 </div>
               </TabsContent>
-              <TabsContent value="kategori" className="mt-4 min-h-[55vh]">
-                <CategoryTreeTab
-                  categories={categories}
-                  value={form.category_id}
-                  onChange={(id) => {
-                    const newPath = getCategoryPath(categories, id)
-                    setForm((f) => {
-                      const newSku = buildProductCode(newPath, brandCode, isPackageType ? '' : (f.supplier_code ?? ''))
-                      return { ...f, category_id: id, sku: newSku || f.sku }
-                    })
-                  }}
-                />
-                {form.category_id && (
-                  <p className="mt-3 text-sm text-muted-foreground break-words">
-                    Seçili: {formatCategoryPathDisplay(getCategoryPath(categories, form.category_id))}
-                  </p>
-                )}
-              </TabsContent>
               <TabsContent value="fiyat" className="space-y-4 mt-4 min-h-[55vh]">
+                <div className="space-y-2 w-full pb-2 border-b border-border/60">
+                  <Label htmlFor="tax_rate">Vergi (KDV %)</Label>
+                  <select
+                    id="tax_rate"
+                    aria-label="Vergi oranı seçin"
+                    value={form.tax_rate != null ? form.tax_rate : ''}
+                    onChange={(e) => setForm((f) => ({ ...f, tax_rate: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="">Seçin</option>
+                    {taxRates.map((tr) => (
+                      <option key={tr.id} value={tr.value}>{tr.name} ({tr.value}%)</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="space-y-3">
                   {/* Genel Fiyat - tek satır */}
                   {(() => {
@@ -3769,15 +4213,17 @@ export function ProductsPage() {
               {selectedIds.size} ürünün kategori bilgisini değiştireceksiniz.
             </DialogDescription>
           </DialogHeader>
-          <div className="py-4">
-            <Label>Yeni kategori</Label>
-            <div className="mt-2 max-h-[280px] overflow-y-auto border rounded-md p-2">
-              <CategoryTreeTab
-                categories={categories}
-                value={bulkCategoryId}
-                onChange={setBulkCategoryId}
-              />
-            </div>
+          <div className="py-4 space-y-2">
+            <Label htmlFor="bulk-category-select">Yeni kategori</Label>
+            <CategorySelect
+              id="bulk-category-select"
+              variant="badge"
+              className="w-full"
+              categories={categories}
+              value={bulkCategoryId}
+              placeholder="Kategori seçin…"
+              onChange={setBulkCategoryId}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBulkModal(null)}>İptal</Button>
@@ -4129,7 +4575,8 @@ export function ProductsPage() {
             <DialogDescription>
               Mevcut IdeaSoft ürününde yalnızca işaretlediğiniz bölümler master kayıttan güncellenir. Yeni ürün oluşturulacaksa tüm alanlar
               gönderilir (seçimler yalnızca güncellemede uygulanır). Stok ve indirim yalnızca yanındaki kutucuk işaretliyken IdeaSoft’a
-              yazılır; indirim alanı boş veya 0 ise indirim güncellenmez.
+              yazılır; indirim alanı boş veya 0 ise indirim güncellenmez. İndirim tipi (yüzde / sabit tutar) IdeaSoft’taki{' '}
+              <span className="whitespace-nowrap">discountType</span> ile birlikte gönderilir.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
@@ -4142,7 +4589,7 @@ export function ProductsPage() {
               <span className="text-sm leading-tight">
                 <span className="font-medium block">Genel bilgiler</span>
                 <span className="text-muted-foreground">
-                  Ad, SKU, barkod, stok, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi
+                  Ad, SKU, barkod, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi (stok aşağıdaki kutucuktan)
                 </span>
               </span>
             </label>
@@ -4217,12 +4664,26 @@ export function ProductsPage() {
                 disabled={ideasoftTransferLoading}
               />
               <div className="min-w-0 flex-1 space-y-2">
-                <Label htmlFor="ideasoft-transfer-discount">İndirim yüzdesi (%)</Label>
+                <Label htmlFor="ideasoft-transfer-discount-type">İndirim tipi</Label>
+                <select
+                  id="ideasoft-transfer-discount-type"
+                  aria-label="IdeaSoft indirim tipi"
+                  value={ideasoftTransferDiscountType}
+                  onChange={(e) => setIdeasoftTransferDiscountType(e.target.value === '1' ? 1 : 0)}
+                  disabled={ideasoftTransferLoading || !ideasoftApplyTransferDiscount}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value={0}>Yüzde (%)</option>
+                  <option value={1}>Sabit tutar</option>
+                </select>
+                <Label htmlFor="ideasoft-transfer-discount">
+                  {ideasoftTransferDiscountType === 0 ? 'İndirim yüzdesi' : 'İndirim tutarı'}
+                </Label>
                 <Input
                   id="ideasoft-transfer-discount"
                   type="number"
                   min={0}
-                  max={100}
+                  max={ideasoftTransferDiscountType === 0 ? 100 : undefined}
                   step={0.01}
                   inputMode="decimal"
                   value={ideasoftTransferDiscountPct}
@@ -4257,10 +4718,7 @@ export function ProductsPage() {
               type="button"
               variant="save"
               onClick={() => void confirmIdeasoftTransfer()}
-              disabled={
-                ideasoftTransferLoading ||
-                (!ideasoftSyncGeneral && !ideasoftSyncPrice && !ideasoftSyncImages && !ideasoftSyncSeo)
-              }
+              disabled={ideasoftTransferLoading || !ideasoftSingleCanSubmit}
             >
               {ideasoftTransferLoading ? 'Aktarılıyor…' : 'Aktar'}
             </Button>
@@ -4283,7 +4741,8 @@ export function ProductsPage() {
                 <span className="font-medium text-foreground">{selectedIds.size}</span> ürün sırayla işlenir. SKU eşleşmesi veya
                 kayıtlı eşleştirme varsa yalnızca işaretlediğiniz bölümler güncellenir; IdeaSoft’ta kayıt yoksa ürün tam içerikle
                 oluşturulur. SKU boş olanlar hata verir. Stok ve indirim yalnızca yanındaki kutucuk işaretliyken tüm aktarımlara
-                aynı değerlerle yazılır; indirim boş veya 0 ise indirim güncellenmez.
+                aynı değerlerle yazılır; indirim boş veya 0 ise indirim güncellenmez. İndirim tipi (yüzde / sabit tutar) tüm
+                satırlarda aynı şekilde gönderilir.
               </span>
             </DialogDescription>
           </DialogHeader>
@@ -4297,7 +4756,7 @@ export function ProductsPage() {
               <span className="text-sm leading-tight">
                 <span className="font-medium block">Genel bilgiler</span>
                 <span className="text-muted-foreground">
-                  Ad, SKU, barkod, stok, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi
+                  Ad, SKU, barkod, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi (stok aşağıdaki kutucuktan)
                 </span>
               </span>
             </label>
@@ -4372,12 +4831,26 @@ export function ProductsPage() {
                 disabled={ideasoftBulkLoading}
               />
               <div className="min-w-0 flex-1 space-y-2">
-                <Label htmlFor="ideasoft-bulk-transfer-discount">İndirim yüzdesi (%)</Label>
+                <Label htmlFor="ideasoft-bulk-transfer-discount-type">İndirim tipi</Label>
+                <select
+                  id="ideasoft-bulk-transfer-discount-type"
+                  aria-label="IdeaSoft toplu indirim tipi"
+                  value={ideasoftBulkTransferDiscountType}
+                  onChange={(e) => setIdeasoftBulkTransferDiscountType(e.target.value === '1' ? 1 : 0)}
+                  disabled={ideasoftBulkLoading || !ideasoftBulkApplyTransferDiscount}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value={0}>Yüzde (%)</option>
+                  <option value={1}>Sabit tutar</option>
+                </select>
+                <Label htmlFor="ideasoft-bulk-transfer-discount">
+                  {ideasoftBulkTransferDiscountType === 0 ? 'İndirim yüzdesi' : 'İndirim tutarı'}
+                </Label>
                 <Input
                   id="ideasoft-bulk-transfer-discount"
                   type="number"
                   min={0}
-                  max={100}
+                  max={ideasoftBulkTransferDiscountType === 0 ? 100 : undefined}
                   step={0.01}
                   inputMode="decimal"
                   value={ideasoftBulkTransferDiscountPct}
@@ -4412,13 +4885,7 @@ export function ProductsPage() {
               type="button"
               variant="save"
               onClick={() => void submitBulkIdeasoftTransfer()}
-              disabled={
-                ideasoftBulkLoading ||
-                (!ideasoftBulkSyncGeneral &&
-                  !ideasoftBulkSyncPrice &&
-                  !ideasoftBulkSyncImages &&
-                  !ideasoftBulkSyncSeo)
-              }
+              disabled={ideasoftBulkLoading || !ideasoftBulkCanSubmit}
             >
               {ideasoftBulkLoading ? 'Aktarılıyor…' : 'Aktar'}
             </Button>

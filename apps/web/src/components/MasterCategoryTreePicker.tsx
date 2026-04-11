@@ -66,7 +66,7 @@ export interface MasterCategoryTreePickerProps {
 
 /**
  * Parametreler › Kategoriler (product_categories) hiyerarşisi: grup → ana kategori → alt kategori.
- * Ürünler sayfası CategoryTreeTab ile aynı veri modeli (CategoryItem).
+ * Ürünler sayfasındaki `CategorySelect` ile aynı veri modeli (CategoryItem).
  */
 export function MasterCategoryTreePicker({
   categories,
