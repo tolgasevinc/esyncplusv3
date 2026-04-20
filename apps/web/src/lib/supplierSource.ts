@@ -55,6 +55,8 @@ export async function fetchSourceRecordBySupplierCode(
     const headerLine = lines[rowIndex] || ''
     const headers = headerLine.split(/[,;\t]/).map((s) => s.trim().replace(/^["']|["']$/g, ''))
     const colIndexes = sourceCols.map((col) => headers.indexOf(col))
+    let best: Record<string, string> | null = null
+    let bestPrice = -1
     for (let i = rowIndex + 1; i < Math.min(lines.length, rowIndex + 1 + MAX_SEARCH_ROWS); i++) {
       const vals = lines[i].split(/[,;\t]/).map((s) => s.trim().replace(/^["']|["']$/g, ''))
       const rec: Record<string, string> = {}
@@ -63,13 +65,20 @@ export async function fetchSourceRecordBySupplierCode(
         if (productCol) rec[productCol] = vals[colIndexes[idx]] ?? ''
       })
       const recCode = (rec.supplier_code ?? rec.erpcode ?? '').trim().toLowerCase()
-      if (recCode === code.toLowerCase()) return rec
+      if (recCode !== code.toLowerCase()) continue
+      const p = parsePriceFromString(rec.price)
+      if (p > 0 && p > bestPrice) {
+        bestPrice = p
+        best = rec
+      }
     }
-    return null
+    return best
   }
 
   if (sourceType === 'excel' || sourceType === 'xlsx' || sourceType === 'xls') {
     const wb = XLSX.read(buf, { type: 'array' })
+    let best: Record<string, string> | null = null
+    let bestPrice = -1
     for (const sheetName of wb.SheetNames) {
       const sheet = wb.Sheets[sheetName]
       if (!sheet) continue
@@ -84,10 +93,15 @@ export async function fetchSourceRecordBySupplierCode(
           if (productCol) rec[productCol] = String(row[colIndexes[idx]] ?? '').trim()
         })
         const recCode = (rec.supplier_code ?? rec.erpcode ?? '').trim().toLowerCase()
-        if (recCode === code.toLowerCase()) return rec
+        if (recCode !== code.toLowerCase()) continue
+        const p = parsePriceFromString(rec.price)
+        if (p > 0 && p > bestPrice) {
+          bestPrice = p
+          best = rec
+        }
       }
     }
-    return null
+    return best
   }
 
   if (sourceType === 'xml') {
@@ -95,6 +109,8 @@ export async function fetchSourceRecordBySupplierCode(
     const parser = new DOMParser()
     const doc = parser.parseFromString(text, 'text/xml')
     const rows = doc.querySelectorAll('row, Row, record, Record, item, Item, product, Product, DataRow')
+    let best: Record<string, string> | null = null
+    let bestPrice = -1
     for (let r = 0; r < Math.min(rows.length, MAX_SEARCH_ROWS); r++) {
       const el = rows[r] as Element
       const rec: Record<string, string> = {}
@@ -106,9 +122,14 @@ export async function fetchSourceRecordBySupplierCode(
         rec[productCol] = val
       })
       const recCode = (rec.supplier_code ?? rec.erpcode ?? '').trim().toLowerCase()
-      if (recCode === code.toLowerCase()) return rec
+      if (recCode !== code.toLowerCase()) continue
+      const p = parsePriceFromString(rec.price)
+      if (p > 0 && p > bestPrice) {
+        bestPrice = p
+        best = rec
+      }
     }
-    return null
+    return best
   }
 
   return null
@@ -240,6 +261,7 @@ export async function lookupFromSupplierSource(
   const res = await fetch(`${apiUrl}/api/suppliers?brand_id=${brandId}&limit=9999`)
   const json = await res.json()
   const suppliers = json?.data ?? []
+  let best: { price: number; currency_id: number | null } | null = null
   for (const s of suppliers) {
     const sourceFile = s.source_file
     const sourceType = s.source_type || 'excel'
@@ -274,12 +296,12 @@ export async function lookupFromSupplierSource(
         const parsedCur = parseInt(String(rec.currency_id), 10)
         if (!isNaN(parsedCur)) currencyId = parsedCur
       }
-      return { price, currency_id: currencyId }
+      if (!best || price > best.price) best = { price, currency_id: currencyId }
     } catch {
       continue
     }
   }
-  return null
+  return best
 }
 
 /** Tek bir tedarikçi kaynağından tedarikçi koduna göre fiyat ara */

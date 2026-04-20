@@ -55,6 +55,11 @@ export function Sidebar() {
       '/ideasoft/urun-etiketleri',
       '/ideasoft/ekstra-ozellikler',
       '/ideasoft/urunler',
+      '/ideasoft/blog',
+      '/okm/blog',
+      '/okm/products',
+      '/trendyol/kategoriler',
+      '/trendyol/urunler',
     ]
     if (collapsePaths.includes(location.pathname)) {
       setCollapsed(true)

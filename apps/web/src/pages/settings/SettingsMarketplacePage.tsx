@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Store, Play, List, Save } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -24,7 +25,11 @@ import {
 } from '@/lib/marketplace-settings'
 
 export function SettingsMarketplacePage() {
-  const [activeId, setActiveId] = useState<string>(MARKETPLACES[0].id)
+  const [searchParams] = useSearchParams()
+  const tabFromUrl = searchParams.get('m')?.trim().toLowerCase()
+  const initialTab =
+    tabFromUrl && MARKETPLACES.some((m) => m.id === tabFromUrl) ? tabFromUrl : MARKETPLACES[0].id
+  const [activeId, setActiveId] = useState<string>(initialTab)
   const [settingsByCategory, setSettingsByCategory] = useState<Record<string, MarketplaceSettings>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -61,6 +66,11 @@ export function SettingsMarketplacePage() {
     }
     load()
   }, [loadSettings])
+
+  useEffect(() => {
+    const raw = searchParams.get('m')?.trim().toLowerCase()
+    if (raw && MARKETPLACES.some((m) => m.id === raw)) setActiveId(raw)
+  }, [searchParams])
 
   useEffect(() => {
     if (category && !(category in settingsByCategory)) loadSettings(category)

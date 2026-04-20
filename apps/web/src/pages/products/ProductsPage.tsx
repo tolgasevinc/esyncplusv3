@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
-import type { ComponentPropsWithoutRef, MutableRefObject, FormEvent, ChangeEvent } from 'react'
+import type { ComponentPropsWithoutRef, MutableRefObject, ChangeEvent } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
 import {
   Plus,
@@ -18,11 +18,12 @@ import {
   Calculator,
   Image,
   Send,
-  Sparkles,
   Layers,
   Store,
   CheckCircle2,
   XCircle,
+  Sparkles,
+  ScrollText,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -47,8 +48,8 @@ import { getImageDisplayUrl } from '@/components/ImageInput'
 import { API_URL, parseJsonResponse } from '@/lib/api'
 import {
   CategorySelect,
-  getCategoryPath,
   formatCategoryPathDisplay,
+  getCategoryPath,
   splitCategoryPathForListColumn,
   type CategoryItem,
 } from '@/components/CategorySelect'
@@ -69,6 +70,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { toastSuccess, toastError, toastWarning } from '@/lib/toast'
@@ -118,6 +120,8 @@ interface Product {
   ecommerce_price?: number
   ecommerce_currency_id?: number
   ecommerce_enabled?: number
+  ecommerce_discount_type?: number
+  ecommerce_discount_value?: number
   image?: string
   tax_rate?: number
   supplier_code?: string
@@ -148,6 +152,39 @@ interface Product {
   parasut_product_id?: string | null
   /** Kayıtlı IdeaSoft ürün ID */
   ideasoft_product_id?: number | null
+}
+
+/** Kayıt sonrası GET /api/products/:id yanıtını liste satırına çevirir; eksik marka/tip adlarını seçeneklerden tamamlar. */
+function buildListRowFromProductDetail(
+  detail: Record<string, unknown>,
+  productId: number,
+  brands: BrandOption[],
+  types: { id: number; name: string; color?: string }[]
+): Product {
+  const merged: Record<string, unknown> = { ...detail, id: productId }
+  const bid = merged.brand_id != null ? Number(merged.brand_id) : undefined
+  if (bid != null && Number.isFinite(bid) && !(merged.brand_name as string | undefined)?.trim()) {
+    const b = brands.find((x) => x.id === bid)
+    if (b) {
+      merged.brand_name = b.name
+      merged.brand_code = b.code
+    }
+  }
+  const tid = merged.type_id != null ? Number(merged.type_id) : undefined
+  if (tid != null && Number.isFinite(tid) && !(merged.type_name as string | undefined)?.trim()) {
+    const t = types.find((x) => x.id === tid)
+    if (t) {
+      merged.type_name = t.name
+      merged.type_color = t.color
+    }
+  }
+  return {
+    ...merged,
+    name: String(merged.name ?? ''),
+    price: Number(merged.price) || 0,
+    quantity: Number(merged.quantity) || 0,
+    sort_order: Number(merged.sort_order) || 0,
+  } as Product
 }
 
 interface SelectOption {
@@ -425,6 +462,8 @@ const emptyForm = {
   ecommerce_price: 0 as number,
   ecommerce_currency_id: '' as number | '',
   ecommerce_enabled: true,
+  ecommerce_discount_type: 0 as 0 | 1,
+  ecommerce_discount_value: 55,
   prices: {} as Record<number, { price: number; currency_id: number | null; status: number }>,
   images: [] as string[],
   tax_rate: 20,
@@ -440,6 +479,33 @@ const emptyForm = {
   seo_keywords: '',
 }
 
+/** `seo_keywords`: ilk virgüle kadar hedef kelime, sonrası diğer anahtar kelimeler */
+function splitSeoTargetAndKeywords(raw: string | undefined): { target: string; rest: string } {
+  const s = (raw ?? '').trim()
+  if (!s) return { target: '', rest: '' }
+  const idx = s.indexOf(',')
+  if (idx === -1) return { target: s, rest: '' }
+  return { target: s.slice(0, idx).trim(), rest: s.slice(idx + 1).trim() }
+}
+
+function joinSeoTargetAndKeywords(target: string, rest: string): string {
+  const t = target.trim()
+  const r = rest.trim()
+  if (t && r) return `${t}, ${r}`
+  return t || r
+}
+
+/** Genel fiyat üzerinden e-ticaret liste fiyatı: `discountType` 0=yüzde (0–100), 1=sabit tutar düşümü */
+function computeEcommerceListPriceFromGeneral(base: number, discountType: 0 | 1, discountValue: number): number {
+  const b = Number.isFinite(base) ? Math.max(0, base) : 0
+  const dv = Number.isFinite(discountValue) ? discountValue : 0
+  if (discountType === 1) {
+    return Math.max(0, Math.round((b - Math.max(0, dv)) * 100 + 1e-9) / 100)
+  }
+  const pct = Math.min(100, Math.max(0, dv))
+  return Math.max(0, Math.round(b * (1 - pct / 100) * 100 + 1e-9) / 100)
+}
+
 interface PackageItem {
   item_product_id: number
   quantity: number
@@ -450,6 +516,8 @@ interface PackageItem {
 
 type SortBy = 'name' | 'sku' | 'brand_name' | 'category_name' | 'price' | 'sort_order'
 type SortOrder = 'asc' | 'desc'
+
+const ECOMMERCE_AI_RULES_LS_KEY = 'esyncplus_ecommerce_ai_rules'
 
 const productsListDefaults = {
   search: '',
@@ -583,6 +651,9 @@ export function ProductsPage() {
   const [deleting, setDeleting] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; id: number | null; onSuccess?: () => void }>({ open: false, id: null })
   const [error, setError] = useState<string | null>(null)
+  const [ecommerceAiRulesOpen, setEcommerceAiRulesOpen] = useState(false)
+  const [ecommerceAiRulesDraft, setEcommerceAiRulesDraft] = useState('')
+  const [ecommerceAiLoading, setEcommerceAiLoading] = useState(false)
 
   const [brands, setBrands] = useState<BrandOption[]>([])
   const [taxRates, setTaxRates] = useState<{ id: number; name: string; value: number }[]>([])
@@ -601,9 +672,6 @@ export function ProductsPage() {
   const [imageUploadImages, setImageUploadImages] = useState<string[]>([])
   const [imageUploadSaving, setImageUploadSaving] = useState(false)
   const [publishLoading, setPublishLoading] = useState<string | null>(null)
-  const [aiSeoLoading, setAiSeoLoading] = useState(false)
-  const [aiEcommerceLoading, setAiEcommerceLoading] = useState(false)
-  const [competitorUrlsText, setCompetitorUrlsText] = useState('')
   const [openCartPublishOpen, setOpenCartPublishOpen] = useState(false)
   const [openCartUpdateOptions, setOpenCartUpdateOptions] = useState({ update_price: true, update_description: true, update_images: true })
   const [parasutTransferLoading, setParasutTransferLoading] = useState(false)
@@ -626,12 +694,6 @@ export function ProductsPage() {
   const [ideasoftSyncPrice, setIdeasoftSyncPrice] = useState(false)
   const [ideasoftSyncImages, setIdeasoftSyncImages] = useState(false)
   const [ideasoftSyncSeo, setIdeasoftSyncSeo] = useState(false)
-  const [ideasoftTransferStock, setIdeasoftTransferStock] = useState('20')
-  const [ideasoftTransferDiscountPct, setIdeasoftTransferDiscountPct] = useState('55')
-  /** API isteğinde 0=yüzde, 1=sabit; sunucu IdeaSoft ürün discountType değerini ters eşler */
-  const [ideasoftTransferDiscountType, setIdeasoftTransferDiscountType] = useState<0 | 1>(0)
-  const [ideasoftApplyTransferStock, setIdeasoftApplyTransferStock] = useState(true)
-  const [ideasoftApplyTransferDiscount, setIdeasoftApplyTransferDiscount] = useState(true)
   /** Modal kategori: grupsuz zinciri ve alt seçimi bekleyen orta kategori */
   const [modalCategoryOrphanBucket, setModalCategoryOrphanBucket] = useState(false)
   const [modalCategoryMiddlePending, setModalCategoryMiddlePending] = useState<number | ''>('')
@@ -646,7 +708,7 @@ export function ProductsPage() {
   const [ideasoftIconSrc, setIdeasoftIconSrc] = useState<string | undefined>()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkModal, setBulkModal] = useState<
-    'category' | 'type' | 'itemGroup' | 'brand' | 'unit' | 'tax' | 'quantity' | null
+    'category' | 'type' | 'itemGroup' | 'brand' | 'unit' | 'tax' | 'quantity' | 'seoAi' | null
   >(null)
   const [bulkCategoryId, setBulkCategoryId] = useState<number | ''>('')
   const [bulkTypeId, setBulkTypeId] = useState<number | ''>('')
@@ -683,28 +745,27 @@ export function ProductsPage() {
   const ideasoftSingleCanSubmit = useMemo(() => {
     const hasSync =
       ideasoftSyncGeneral || ideasoftSyncPrice || ideasoftSyncImages || ideasoftSyncSeo
+    const stockN = Number(form.quantity) || 0
+    const discVal = Number(form.ecommerce_discount_value) || 0
     if (hasSync) return true
-    if (ideasoftApplyTransferStock) return true
-    if (ideasoftApplyTransferDiscount) {
-      const raw = String(ideasoftTransferDiscountPct).trim()
-      if (!raw) return false
-      const n = parseFloat(raw.replace(',', '.'))
-      return Number.isFinite(n) && n > 0
-    }
+    if (discVal > 0) return true
+    if (stockN > 0) return true
     return false
   }, [
     ideasoftSyncGeneral,
     ideasoftSyncPrice,
     ideasoftSyncImages,
     ideasoftSyncSeo,
-    ideasoftApplyTransferStock,
-    ideasoftApplyTransferDiscount,
-    ideasoftTransferDiscountPct,
+    form.quantity,
+    form.ecommerce_discount_value,
   ])
 
   const ideasoftBulkCanSubmit = useMemo(() => {
     const hasSync =
-      ideasoftBulkSyncGeneral || ideasoftBulkSyncPrice || ideasoftBulkSyncImages || ideasoftBulkSyncSeo
+      ideasoftBulkSyncGeneral ||
+      ideasoftBulkSyncPrice ||
+      ideasoftBulkSyncImages ||
+      ideasoftBulkSyncSeo
     if (hasSync) return true
     if (ideasoftBulkApplyTransferStock) return true
     if (ideasoftBulkApplyTransferDiscount) {
@@ -984,11 +1045,6 @@ export function ProductsPage() {
     setIdeasoftSyncPrice(false)
     setIdeasoftSyncImages(false)
     setIdeasoftSyncSeo(false)
-    setIdeasoftTransferStock('20')
-    setIdeasoftTransferDiscountPct('55')
-    setIdeasoftTransferDiscountType(0)
-    setIdeasoftApplyTransferStock(true)
-    setIdeasoftApplyTransferDiscount(true)
     setIdeasoftTransferModalOpen(true)
   }, [])
 
@@ -997,44 +1053,28 @@ export function ProductsPage() {
     setIdeasoftSyncPrice(true)
     setIdeasoftSyncImages(true)
     setIdeasoftSyncSeo(true)
-    setIdeasoftApplyTransferStock(true)
-    setIdeasoftApplyTransferDiscount(true)
   }, [])
 
   const confirmIdeasoftTransfer = useCallback(async () => {
     if (!editingId) return
-    let stockN: number | undefined
-    if (ideasoftApplyTransferStock) {
-      stockN = parseFloat(String(ideasoftTransferStock).replace(',', '.'))
-      if (!Number.isFinite(stockN) || stockN < 0) {
-        toastError('IdeaSoft', 'Stok miktarı 0 veya üzeri geçerli bir sayı olmalıdır.')
+    const stockN = Math.max(0, Math.round(Number(form.quantity) || 0))
+    const discType = form.ecommerce_discount_type === 1 ? 1 : 0
+    const rawDisc = Number(form.ecommerce_discount_value) || 0
+    let discN: number | undefined
+    if (rawDisc > 0) {
+      if (discType === 0 && rawDisc > 100) {
+        toastError('IdeaSoft', 'E-Ticaret sekmesinde yüzde iskontosu en fazla 100 olabilir.')
         return
       }
-    }
-    let discN: number | undefined
-    if (ideasoftApplyTransferDiscount) {
-      const rawDisc = String(ideasoftTransferDiscountPct).trim()
-      if (rawDisc !== '') {
-        const n = parseFloat(rawDisc.replace(',', '.'))
-        if (!Number.isFinite(n) || n <= 0) {
-          toastError('IdeaSoft', 'İndirim için 0’dan büyük geçerli bir sayı girin (boş: gönderilmez).')
-          return
-        }
-        if (ideasoftTransferDiscountType === 0 && n > 100) {
-          toastError('IdeaSoft', 'Yüzde indirim en fazla 100 olabilir.')
-          return
-        }
-        discN = n
-      }
+      discN = rawDisc
     }
     const hasSyncGroup =
       ideasoftSyncGeneral || ideasoftSyncPrice || ideasoftSyncImages || ideasoftSyncSeo
-    const willSendStock = ideasoftApplyTransferStock
-    const willSendDiscount = ideasoftApplyTransferDiscount && discN !== undefined && discN > 0
-    if (!hasSyncGroup && !willSendStock && !willSendDiscount) {
+    const willSendDiscount = discN !== undefined && discN > 0
+    if (!hasSyncGroup && stockN <= 0 && !willSendDiscount) {
       toastError(
         'IdeaSoft',
-        'En az bir bilgi grubu seçin veya “Stok gönder” / geçerli indirim ile güncelleme yapın.',
+        'En az bir senkron grubu seçin veya ürün miktarı / E-Ticaret iskontosu ile güncelleme yapın.',
       )
       return
     }
@@ -1045,11 +1085,11 @@ export function ProductsPage() {
         sync_price: ideasoftSyncPrice,
         sync_images: ideasoftSyncImages,
         sync_seo: ideasoftSyncSeo,
+        ideasoft_stock_amount: stockN,
       }
-      if (ideasoftApplyTransferStock && stockN !== undefined) payload.ideasoft_stock_amount = stockN
-      if (ideasoftApplyTransferDiscount && discN !== undefined && discN > 0) {
+      if (willSendDiscount && discN !== undefined) {
         payload.ideasoft_discount_percent = discN
-        payload.ideasoft_discount_type = ideasoftTransferDiscountType
+        payload.ideasoft_discount_type = discType
       }
       const res = await fetch(`${API_URL}/api/products/${editingId}/ideasoft-transfer`, {
         method: 'POST',
@@ -1071,25 +1111,92 @@ export function ProductsPage() {
     }
   }, [
     editingId,
+    form.quantity,
+    form.ecommerce_discount_type,
+    form.ecommerce_discount_value,
     ideasoftSyncGeneral,
     ideasoftSyncPrice,
     ideasoftSyncImages,
     ideasoftSyncSeo,
-    ideasoftTransferStock,
-    ideasoftTransferDiscountPct,
-    ideasoftTransferDiscountType,
-    ideasoftApplyTransferStock,
-    ideasoftApplyTransferDiscount,
   ])
 
   const categoryPath = useMemo(
     () => getCategoryPath(categories, form.category_id),
     [categories, form.category_id]
   )
+  const categoryPathDisplayStr = useMemo(() => formatCategoryPathDisplay(categoryPath), [categoryPath])
   const brandCode = useMemo(
     () => (form.brand_id ? brands.find((b) => b.id === form.brand_id)?.code ?? '' : ''),
     [brands, form.brand_id]
   )
+  const seoTargetKeywords = useMemo(() => splitSeoTargetAndKeywords(form.seo_keywords), [form.seo_keywords])
+
+  const openEcommerceAiRules = useCallback(() => {
+    try {
+      setEcommerceAiRulesDraft(
+        typeof localStorage !== 'undefined' ? localStorage.getItem(ECOMMERCE_AI_RULES_LS_KEY) ?? '' : ''
+      )
+    } catch {
+      setEcommerceAiRulesDraft('')
+    }
+    setEcommerceAiRulesOpen(true)
+  }, [])
+
+  const saveEcommerceAiRules = useCallback(() => {
+    try {
+      localStorage.setItem(ECOMMERCE_AI_RULES_LS_KEY, ecommerceAiRulesDraft)
+      toastSuccess('Kurallar kaydedildi', 'AI metin üretiminde kullanılacak.')
+      setEcommerceAiRulesOpen(false)
+    } catch {
+      toastError('Kaydedilemedi', 'Tarayıcı depolamasına yazılamadı.')
+    }
+  }, [ecommerceAiRulesDraft])
+
+  const handleAiEcommerceFull = useCallback(async () => {
+    const product_name = (form.name ?? '').trim()
+    if (!product_name) {
+      toastError('Ürün adı gerekli', 'Genel sekmesindeki ana ürün adını doldurun.')
+      return
+    }
+    let user_rules = ''
+    try {
+      user_rules = typeof localStorage !== 'undefined' ? localStorage.getItem(ECOMMERCE_AI_RULES_LS_KEY) ?? '' : ''
+    } catch {
+      user_rules = ''
+    }
+    setEcommerceAiLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/ai/generate-ecommerce-full`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product_name,
+          brand_name: typeof form.brand_id === 'number' ? (brands.find((b) => b.id === form.brand_id)?.name ?? '') : '',
+          category_path: categoryPathDisplayStr,
+          category_id: typeof form.category_id === 'number' ? form.category_id : null,
+          exclude_product_id: editingId ?? null,
+          user_rules,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
+      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'İstek başarısız')
+      setForm((f) => ({
+        ...f,
+        ecommerce_name: typeof data.ecommerce_name === 'string' ? data.ecommerce_name : f.ecommerce_name,
+        seo_keywords: typeof data.seo_keywords === 'string' ? data.seo_keywords : f.seo_keywords,
+        main_description: typeof data.main_description === 'string' ? data.main_description : f.main_description,
+        seo_title: typeof data.seo_title === 'string' ? data.seo_title : f.seo_title,
+        seo_description: typeof data.seo_description === 'string' ? data.seo_description : f.seo_description,
+        seo_slug: typeof data.seo_slug === 'string' ? data.seo_slug : f.seo_slug,
+      }))
+      toastSuccess('AI metinleri oluşturuldu', 'Alanları kontrol edip kaydedebilirsiniz.')
+    } catch (e) {
+      toastError('AI hatası', e instanceof Error ? e.message : 'Oluşturulamadı')
+    } finally {
+      setEcommerceAiLoading(false)
+    }
+  }, [form.name, form.brand_id, form.category_id, categoryPathDisplayStr, brands, editingId])
+
   const isPackageType = useMemo(() => {
     if (!form.type_id) return false
     const t = types.find((x) => x.id === form.type_id)
@@ -1340,14 +1447,6 @@ export function ProductsPage() {
     return filterTypeId
   }, [filterTypeId, types])
 
-  const computeEcommercePrice = useCallback((price: number, brandId?: number | null) => {
-    const rule = findRuleForBrand(calculationRules, '1', brandId)
-    if (!rule || !rule.operations?.length) {
-      return price
-    }
-    return applyCalculation(price, rule.operations)
-  }, [calculationRules])
-
   const fetchData = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -1442,13 +1541,20 @@ export function ProductsPage() {
         const ecomCurrencyId = ecomRule?.result_currency_id != null && ecomRule.result_currency_id > 0
           ? Number(ecomRule.result_currency_id)
           : (newCurrencyId ? Number(newCurrencyId) : null)
-        const computed = prices[1]?.price ?? computeEcommercePrice(effectivePrice, brandId)
-        prices[1] = { ...(prices[1] ?? { price: 0, currency_id: null, status: 1 }), price: computed, currency_id: ecomCurrencyId, status: form.prices[1]?.status ?? 1 }
+        const discType = form.ecommerce_discount_type === 1 ? 1 : 0
+        const discVal = Number(form.ecommerce_discount_value) || 0
+        const ecomFromDisc = computeEcommerceListPriceFromGeneral(effectivePrice, discType, discVal)
+        prices[1] = {
+          ...(prices[1] ?? { price: 0, currency_id: null, status: 1 }),
+          price: ecomFromDisc,
+          currency_id: ecomCurrencyId,
+          status: form.prices[1]?.status ?? 1,
+        }
         setForm((f) => ({
           ...f,
           price: effectivePrice,
           currency_id: newCurrencyId ?? f.currency_id,
-          ecommerce_price: computed,
+          ecommerce_price: ecomFromDisc,
           ecommerce_currency_id: newCurrencyId ?? f.ecommerce_currency_id,
           prices,
         }))
@@ -1494,7 +1600,20 @@ export function ProductsPage() {
       setSupplierCodeLookupLoading(false)
       suppressSupplierPriceLookupToastsRef.current = false
     }
-  }, [form.supplier_code, form.brand_id, form.currency_id, form.prices, skipSupplierCode, currencies, computeEcommercePrice, calculationRules, priceTypes, editingId, fetchData])
+  }, [
+    form.supplier_code,
+    form.brand_id,
+    form.currency_id,
+    form.prices,
+    form.ecommerce_discount_type,
+    form.ecommerce_discount_value,
+    skipSupplierCode,
+    currencies,
+    calculationRules,
+    priceTypes,
+    editingId,
+    fetchData,
+  ])
   lookupSupplierCodeRef.current = lookupSupplierCode
 
   /** Tedarikçi kodu / marka değişince (ürün kodu modalı dahil) debounce ile fiyat ara; yalnızca blur’da değil. */
@@ -1555,6 +1674,67 @@ export function ProductsPage() {
     }, 0)
     return total
   }, [isPackageType, packageItems])
+
+  const ecommerceGeneralBasePrice = useMemo(() => {
+    if (isPackageType) return calculatedPackagePrice != null ? calculatedPackagePrice : 0
+    return Number(form.price) || 0
+  }, [isPackageType, calculatedPackagePrice, form.price])
+
+  const ecommerceComputedListPrice = useMemo(
+    () =>
+      computeEcommerceListPriceFromGeneral(
+        ecommerceGeneralBasePrice,
+        form.ecommerce_discount_type === 1 ? 1 : 0,
+        Number(form.ecommerce_discount_value) || 0
+      ),
+    [ecommerceGeneralBasePrice, form.ecommerce_discount_type, form.ecommerce_discount_value]
+  )
+
+  /** E-ticaret liste fiyatı (genel + iskonto) ile `prices[1]` / `ecommerce_price` alanlarını modalda hizala */
+  useEffect(() => {
+    if (!modalOpen) return
+    setForm((f) => {
+      const base = isPackageType ? (calculatedPackagePrice ?? 0) : (Number(f.price) || 0)
+      const listed = computeEcommerceListPriceFromGeneral(
+        base,
+        f.ecommerce_discount_type === 1 ? 1 : 0,
+        Number(f.ecommerce_discount_value) || 0
+      )
+      const cur =
+        f.ecommerce_currency_id !== '' && f.ecommerce_currency_id != null ? Number(f.ecommerce_currency_id) : null
+      const p1 = f.prices[1]
+      const close = (a: number, b: number) => Math.abs(a - b) < 0.005
+      if (
+        p1 &&
+        close(p1.price, listed) &&
+        close(f.ecommerce_price ?? 0, listed) &&
+        (p1.currency_id ?? null) === (cur ?? p1.currency_id ?? null)
+      ) {
+        return f
+      }
+      return {
+        ...f,
+        ecommerce_price: listed,
+        prices: {
+          ...f.prices,
+          1: {
+            ...(p1 ?? { price: 0, currency_id: null, status: 1 }),
+            price: listed,
+            currency_id: cur ?? p1?.currency_id ?? null,
+            status: p1?.status ?? 1,
+          },
+        },
+      }
+    })
+  }, [
+    modalOpen,
+    isPackageType,
+    calculatedPackagePrice,
+    form.price,
+    form.ecommerce_discount_type,
+    form.ecommerce_discount_value,
+    form.ecommerce_currency_id,
+  ])
 
   const defaultCurrencyId = useMemo(() => {
     const def = currencies.find((c) => c.is_default)
@@ -1769,16 +1949,28 @@ export function ProductsPage() {
           }
         }
       }
-      const ecomPrice = prices[1]?.price ?? computeEcommercePrice(effectivePrice, brandId)
+      const discType = f.ecommerce_discount_type === 1 ? 1 : 0
+      const discVal = Number(f.ecommerce_discount_value) || 0
+      const ecomFromDisc = computeEcommerceListPriceFromGeneral(effectivePrice, discType, discVal)
+      const ecomCur =
+        f.ecommerce_currency_id !== '' && f.ecommerce_currency_id != null
+          ? Number(f.ecommerce_currency_id)
+          : (prices[1]?.currency_id ?? (curId ? Number(curId) : null))
+      prices[1] = {
+        ...(prices[1] ?? { price: 0, currency_id: null, status: 1 }),
+        price: ecomFromDisc,
+        currency_id: ecomCur,
+        status: prices[1]?.status ?? 1,
+      }
       return {
         ...f,
         price: effectivePrice,
-        ecommerce_price: ecomPrice,
+        ecommerce_price: ecomFromDisc,
         ecommerce_currency_id: curId,
         prices,
       }
     })
-  }, [calculationRules, computeEcommercePrice, priceTypes])
+  }, [calculationRules, priceTypes])
 
   const handlePriceBlur = useCallback(() => {
     const el = document.getElementById('price') as HTMLInputElement | null
@@ -1810,7 +2002,6 @@ export function ProductsPage() {
     setEditingId(null)
     setModalTab('genel')
     const defCur = defaultCurrencyId ?? ''
-    setCompetitorUrlsText('')
     setForm({
       ...emptyForm,
       currency_id: defCur as number | '',
@@ -1834,7 +2025,6 @@ export function ProductsPage() {
     setEditingId(item.id)
     setModalTab(tab)
     setSupplierCodeMatch(null)
-    setCompetitorUrlsText('')
     const itemTypeCode = types.find((t) => t.id === item.type_id)?.code?.toUpperCase() ?? ''
     const itemIsPackage = itemTypeCode === 'PAK' || itemTypeCode === 'PAKET'
     const defCur = defaultCurrencyId ?? item.currency_id ?? ''
@@ -1847,8 +2037,8 @@ export function ProductsPage() {
         itemIsPackage ? fetch(`${API_URL}/api/products/${item.id}/recalculate-package-price`, { method: 'POST' }) : null,
       ])
       const product = await productRes.json()
-      const itemEcomPrice = product?.ecommerce_price ?? product?.prices?.find((p: { price_type_id: number }) => p.price_type_id === 1)?.price
       const itemEcomCur = product?.ecommerce_currency_id ?? product?.prices?.find((p: { price_type_id: number }) => p.price_type_id === 1)?.currency_id
+      const itemEcomPrice = product?.ecommerce_price ?? product?.prices?.find((p: { price_type_id: number }) => p.price_type_id === 1)?.price
       const pricesMap: Record<number, { price: number; currency_id: number | null; status: number }> = {}
       for (const p of product?.prices ?? []) {
         pricesMap[p.price_type_id] = {
@@ -1864,6 +2054,18 @@ export function ProductsPage() {
           status: 1,
         }
       }
+      const discTypeOpen = (product?.ecommerce_discount_type === 1 ? 1 : 0) as 0 | 1
+      const discValOpen =
+        typeof product?.ecommerce_discount_value === 'number' && Number.isFinite(product.ecommerce_discount_value)
+          ? product.ecommerce_discount_value
+          : parseFloat(String(product?.ecommerce_discount_value ?? '0')) || 0
+      const listedOpen = computeEcommerceListPriceFromGeneral(basePrice, discTypeOpen, discValOpen)
+      pricesMap[1] = {
+        ...(pricesMap[1] ?? { price: 0, currency_id: null, status: 1 }),
+        price: listedOpen,
+        currency_id: pricesMap[1]?.currency_id ?? itemEcomCur ?? null,
+        status: pricesMap[1]?.status ?? 1,
+      }
       suppressSupplierPriceLookupToastsRef.current = true
       setForm({
         name: product?.name ?? item.name,
@@ -1877,7 +2079,9 @@ export function ProductsPage() {
         currency_id: product?.currency_id ?? item.currency_id ?? defCur,
         price: product?.price ?? basePrice,
         quantity: product?.quantity ?? item.quantity ?? 0,
-        ecommerce_price: itemEcomPrice ?? computeEcommercePrice(basePrice, product?.brand_id ?? item.brand_id ?? null),
+        ecommerce_discount_type: discTypeOpen,
+        ecommerce_discount_value: discValOpen,
+        ecommerce_price: listedOpen,
         ecommerce_currency_id: (itemEcomCur ?? item.currency_id ?? defCur) || null,
         prices: pricesMap,
         images: parseImageToArray(product?.image ?? item.image),
@@ -1943,7 +2147,6 @@ export function ProductsPage() {
     setForm(emptyForm)
     setPackageItems([])
     setSupplierCodeMatch(null)
-    setCompetitorUrlsText('')
   }
 
   function openImageUploadModal(item: Product) {
@@ -1987,78 +2190,6 @@ export function ProductsPage() {
       setImageUploadSaving(false)
     }
   }, [])
-
-  async function handleGenerateSeo() {
-    const name = form.name?.trim()
-    if (!name) {
-      toastError('Ürün adı gerekli', 'Önce ürün adını girin.')
-      return
-    }
-    setAiSeoLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ai/generate-seo`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
-          category_path: categoryPath.length > 0 ? formatCategoryPathDisplay(categoryPath) : '',
-        }),
-      })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error ?? 'İstek başarısız')
-      setForm((f) => ({
-        ...f,
-        seo_slug: json.seo_slug ?? '',
-        seo_title: json.seo_title ?? '',
-        seo_description: json.seo_description ?? '',
-        seo_keywords: json.seo_keywords ?? '',
-      }))
-      toastSuccess('SEO oluşturuldu', 'Bağlantı, meta ve anahtar kelimeler ürün adından üretildi.')
-    } catch (err) {
-      toastError('Oluşturulamadı', err instanceof Error ? err.message : 'SEO üretilemedi')
-    } finally {
-      setAiSeoLoading(false)
-    }
-  }
-
-  async function handleGenerateEcommerce() {
-    const name = form.name?.trim()
-    if (!name) {
-      toastError('Ürün adı gerekli', 'Önce ürün adını girin.')
-      return
-    }
-    const competitor_urls = competitorUrlsText
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    setAiEcommerceLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/ai/generate-ecommerce`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          brand_name: form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '' : '',
-          category_path: categoryPath.length > 0 ? formatCategoryPathDisplay(categoryPath) : '',
-          sku: form.sku ?? '',
-          ...(competitor_urls.length > 0 ? { competitor_urls } : {}),
-        }),
-      })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error ?? 'İstek başarısız')
-      setForm((f) => ({
-        ...f,
-        ecommerce_name: json.ecommerce_name ?? '',
-        main_description: json.main_description ?? '',
-      }))
-      toastSuccess('E-ticaret metinleri', 'Ad ve açıklama rakip / mağaza referanslarıyla üretildi.')
-    } catch (err) {
-      toastError('Oluşturulamadı', err instanceof Error ? err.message : 'Metinler üretilemedi')
-    } finally {
-      setAiEcommerceLoading(false)
-    }
-  }
 
   async function handlePublish(platform: 'opencart' | 'okm' | 'trendyol', opencartOptions?: { update_price: boolean; update_description: boolean; update_images: boolean }) {
     const productId = editingId
@@ -2145,8 +2276,8 @@ export function ProductsPage() {
     }
   }
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault()
+  /** Master ürün modalı: `closeAfter` false iken kaydeder, modal açık kalır (yeni üründe düzenleme moduna geçer). */
+  async function persistProductModal(closeAfter: boolean) {
     if (!form.name.trim()) return
     if (!form.type_id) {
       setError('Ürün tipi seçilmeden kayıt yapılamaz.')
@@ -2157,23 +2288,43 @@ export function ProductsPage() {
       setModalTab('genel')
       return
     }
+    const prevEditingId = editingId
     setSaving(true)
     setError(null)
     try {
-      const url = editingId ? `${API_URL}/api/products/${editingId}` : `${API_URL}/api/products`
-      const method = editingId ? 'PUT' : 'POST'
+      const url = prevEditingId ? `${API_URL}/api/products/${prevEditingId}` : `${API_URL}/api/products`
+      const method = prevEditingId ? 'PUT' : 'POST'
       const generatedSku = buildProductCode(categoryPath, brandCode, isPackageType ? '' : (form.supplier_code ?? ''))
       const effectiveSku = (form.sku?.trim()) || generatedSku || undefined
       const imageValue = serializeImagesToImage(form.images)
       const { images: _images, prices: _prices, ...formRest } = form
-      const pricesPayload = Object.keys(form.prices || {}).length > 0
-        ? Object.entries(form.prices).map(([priceTypeId, p]) => ({
-            price_type_id: Number(priceTypeId),
-            price: p.price,
-            currency_id: p.currency_id,
-            status: p.status,
-          }))
-        : undefined
+      const generalBaseForSubmit = isPackageType ? (calculatedPackagePrice ?? 0) : (Number(form.price) || 0)
+      const discountTypeSubmit = form.ecommerce_discount_type === 1 ? 1 : 0
+      const discountValSubmit = Number(form.ecommerce_discount_value) || 0
+      const computedEcommercePrice = computeEcommerceListPriceFromGeneral(
+        generalBaseForSubmit,
+        discountTypeSubmit,
+        discountValSubmit
+      )
+      const ecomCurSubmit =
+        form.ecommerce_currency_id !== '' && form.ecommerce_currency_id != null
+          ? Number(form.ecommerce_currency_id)
+          : undefined
+      const mergedPrices: Record<number, { price: number; currency_id: number | null; status: number }> = {
+        ...(form.prices || {}),
+      }
+      mergedPrices[1] = {
+        ...(mergedPrices[1] ?? { price: 0, currency_id: null, status: 1 }),
+        price: computedEcommercePrice,
+        currency_id: ecomCurSubmit ?? null,
+        status: mergedPrices[1]?.status ?? 1,
+      }
+      const pricesPayload = Object.entries(mergedPrices).map(([priceTypeId, p]) => ({
+        price_type_id: Number(priceTypeId),
+        price: p.price,
+        currency_id: p.currency_id,
+        status: p.status,
+      }))
       const body = {
         ...formRest,
         image: imageValue,
@@ -2186,11 +2337,11 @@ export function ProductsPage() {
         currency_id: (form.currency_id !== '' && form.currency_id != null) ? form.currency_id : undefined,
         price: isPackageType ? (calculatedPackagePrice ?? 0) : (form.price ?? 0),
         supplier_code: isPackageType ? null : (form.supplier_code ?? undefined),
+        ecommerce_price: computedEcommercePrice,
+        ecommerce_currency_id: ecomCurSubmit,
+        ecommerce_discount_type: discountTypeSubmit,
+        ecommerce_discount_value: discountValSubmit,
         prices: pricesPayload,
-        ...(pricesPayload == null && {
-          ecommerce_price: form.ecommerce_price ?? undefined,
-          ecommerce_currency_id: (form.ecommerce_currency_id !== '' && form.ecommerce_currency_id != null) ? form.ecommerce_currency_id : undefined,
-        }),
       }
       const res = await fetch(url, {
         method,
@@ -2199,7 +2350,14 @@ export function ProductsPage() {
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Kaydedilemedi')
-      const productId = editingId ?? json?.id
+      const productIdRaw = prevEditingId ?? json?.id
+      const productId =
+        typeof productIdRaw === 'number' && Number.isFinite(productIdRaw)
+          ? productIdRaw
+          : parseInt(String(productIdRaw ?? ''), 10)
+      if (!Number.isFinite(productId) || productId <= 0) {
+        throw new Error('Kayıt yanıtında ürün ID bulunamadı')
+      }
       if (productId && isPackageType) {
         const pkgRes = await fetch(`${API_URL}/api/products/${productId}/package-items`, {
           method: 'PUT',
@@ -2216,19 +2374,48 @@ export function ProductsPage() {
           throw new Error(pkgJson.error || 'Paket içeriği kaydedilemedi')
         }
       }
-      closeModal()
-      if (editingId) {
-        const res = await fetch(`${API_URL}/api/products/${productId}`)
-        const updated = await res.json()
-        if (res.ok && updated && !updated.error) {
-          setData((prev) => prev.map((p) => (p.id === productId ? { ...p, ...updated } : p)))
+      if (closeAfter) {
+        closeModal()
+      } else if (!prevEditingId) {
+        setEditingId(productId)
+      }
+      if (closeAfter) {
+        if (prevEditingId) {
+          const resRef = await fetch(`${API_URL}/api/products/${productId}`)
+          const updated = await resRef.json()
+          if (resRef.ok && updated && !updated.error) {
+            setData((prev) =>
+              prev.map((p) =>
+                p.id === productId
+                  ? buildListRowFromProductDetail({ ...p, ...updated }, productId, brands, types)
+                  : p
+              )
+            )
+          } else {
+            fetchData(true)
+          }
         } else {
           fetchData(true)
         }
       } else {
-        fetchData(true)
+        const resRef = await fetch(`${API_URL}/api/products/${productId}`)
+        const updated = await resRef.json()
+        if (resRef.ok && updated && !updated.error) {
+          const detail = updated as Record<string, unknown>
+          setData((prev) => {
+            const exists = prev.some((p) => p.id === productId)
+            if (exists) {
+              return prev.map((p) =>
+                p.id === productId ? buildListRowFromProductDetail({ ...p, ...detail }, productId, brands, types) : p
+              )
+            }
+            return [buildListRowFromProductDetail(detail, productId, brands, types), ...prev]
+          })
+        } else {
+          fetchData(true)
+        }
       }
-      toastSuccess(editingId ? 'Ürün güncellendi' : 'Ürün eklendi', 'Değişiklikler başarıyla kaydedildi.')
+      toastSuccess(prevEditingId ? 'Ürün güncellendi' : 'Ürün eklendi', 'Değişiklikler başarıyla kaydedildi.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Kaydedilemedi'
       setError(msg)
@@ -2375,6 +2562,7 @@ export function ProductsPage() {
           sync_price: ideasoftBulkSyncPrice,
           sync_images: ideasoftBulkSyncImages,
           sync_seo: ideasoftBulkSyncSeo,
+          generate_seo_ai: false,
           ...(ideasoftBulkApplyTransferStock && stockN !== undefined ? { ideasoft_stock_amount: stockN } : {}),
           ...(ideasoftBulkApplyTransferDiscount && discN !== undefined && discN > 0
             ? {
@@ -2461,6 +2649,49 @@ export function ProductsPage() {
     ideasoftBulkApplyTransferStock,
     ideasoftBulkApplyTransferDiscount,
   ])
+
+  const submitBulkSeoAiOnly = useCallback(async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    let seoAiUserRules = ''
+    try {
+      seoAiUserRules =
+        typeof localStorage !== 'undefined' ? localStorage.getItem(ECOMMERCE_AI_RULES_LS_KEY) ?? '' : ''
+    } catch {
+      seoAiUserRules = ''
+    }
+    setBulkSaving(true)
+    try {
+      const res = await fetch(`${API_URL}/api/products/bulk-generate-seo-ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, seo_ai_user_rules: seoAiUserRules }),
+      })
+      const data = await parseJsonResponse<{
+        ok?: boolean
+        error?: string
+        succeeded?: number
+        failed?: number
+      }>(res)
+      if (!res.ok) throw new Error(data.error || 'İstek başarısız')
+      const succ = data.succeeded ?? 0
+      const fail = data.failed ?? 0
+      setBulkModal(null)
+      setSelectedIds(new Set())
+      fetchData()
+      if (fail === 0) {
+        toastSuccess('Toplu SEO AI', `${succ} ürünün SEO alanları güncellendi.`)
+      } else if (succ > 0) {
+        toastWarning('Toplu SEO AI', `${succ} başarılı, ${fail} başarısız.`)
+      } else {
+        toastError('Toplu SEO AI', 'Hiçbir ürün güncellenemedi.')
+      }
+    } catch (e) {
+      toastError('Toplu SEO AI', e instanceof Error ? e.message : 'Hata')
+    } finally {
+      setBulkSaving(false)
+    }
+  }, [selectedIds, fetchData])
 
   const applyBulkPatch = async (patch: BulkPatch) => {
     const ids = Array.from(selectedIds)
@@ -2683,6 +2914,15 @@ export function ProductsPage() {
                 <DropdownMenuItem onClick={() => { setBulkQuantity('0'); setBulkModal('quantity') }}>
                   Miktar değiştir
                 </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={bulkSaving}
+                  onClick={() => setBulkModal('seoAi')}
+                  className="gap-2"
+                >
+                  <Sparkles className="h-4 w-4 shrink-0 text-amber-600" />
+                  SEO metinlerini AI ile oluştur
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={ideasoftBulkLoading}
                   onClick={() => openIdeasoftBulkTransferModal()}
@@ -2743,69 +2983,39 @@ export function ProductsPage() {
                     />
                   </th>
                   <th className="text-center p-2 font-medium w-16">Görsel</th>
-                  <th className="text-center p-2 font-medium min-w-[140px]">
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleSort('name')}
-                        className="inline-flex items-center gap-1 hover:text-foreground"
-                        aria-label="Ürün adına göre sırala"
-                      >
-                        {sortBy === 'name' ? (sortOrder === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
-                        Ürün Adı
-                      </button>
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <button
-                            type="button"
-                            className={`rounded p-0.5 hover:bg-muted ${filterName ? 'text-primary' : 'text-muted-foreground'}`}
-                            aria-label="Ürün adı filtresi"
-                          >
-                            <Filter className="h-3.5 w-3.5" />
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent align="start" className="w-56 p-3">
-                          <Label className="text-xs">Ürün Adı</Label>
-                          <Input
-                            placeholder="Filtrele..."
-                            value={filterName}
-                            onChange={(e) => setListState({ filterName: e.target.value })}
-                            className="h-8 text-sm mt-1.5"
-                          />
-                        </PopoverContent>
-                      </Popover>
-                    </div>
-                  </th>
-                  <th className="text-center p-2 font-medium min-w-[100px]">
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleSort('sku')}
-                        className="inline-flex items-center gap-1 hover:text-foreground"
-                      >
-                        {sortBy === 'sku' ? (sortOrder === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
-                        SKU
-                      </button>
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <button
-                            type="button"
-                            className={`rounded p-0.5 hover:bg-muted ${filterSku ? 'text-primary' : 'text-muted-foreground'}`}
-                            aria-label="SKU filtresi"
-                          >
-                            <Filter className="h-3.5 w-3.5" />
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent align="start" className="w-56 p-3">
-                          <Label className="text-xs">SKU</Label>
-                          <Input
-                            placeholder="Filtrele..."
-                            value={filterSku}
-                            onChange={(e) => setListState({ filterSku: e.target.value })}
-                            className="h-8 text-sm font-mono mt-1.5"
-                          />
-                        </PopoverContent>
-                      </Popover>
+                  <th className="text-left p-2 font-medium min-w-[180px]">
+                    <div className="flex flex-col gap-1.5 items-start">
+                      <div className="inline-flex items-center gap-1 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleSort('name')}
+                          className="inline-flex items-center gap-1 hover:text-foreground"
+                          aria-label="Ürün adına göre sırala"
+                        >
+                          {sortBy === 'name' ? (sortOrder === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                          Ürün Adı
+                        </button>
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className={`rounded p-0.5 hover:bg-muted ${filterName ? 'text-primary' : 'text-muted-foreground'}`}
+                              aria-label="Ürün adı filtresi"
+                            >
+                              <Filter className="h-3.5 w-3.5" />
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent align="start" className="w-56 p-3">
+                            <Label className="text-xs">Ürün Adı</Label>
+                            <Input
+                              placeholder="Filtrele..."
+                              value={filterName}
+                              onChange={(e) => setListState({ filterName: e.target.value })}
+                              className="h-8 text-sm mt-1.5"
+                            />
+                          </PopoverContent>
+                        </Popover>
+                      </div>
                     </div>
                   </th>
                   <th className="text-center p-2 font-medium min-w-[100px]">
@@ -2971,13 +3181,13 @@ export function ProductsPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={10} className="p-8 text-center text-muted-foreground">
                       Yükleniyor...
                     </td>
                   </tr>
                 ) : data.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="p-8 text-center text-muted-foreground">
+                    <td colSpan={10} className="p-8 text-center text-muted-foreground">
                       {error || 'Henüz ürün kaydı yok. Yeni ürün eklemek için + butonunu kullanın.'}
                     </td>
                   </tr>
@@ -3017,52 +3227,52 @@ export function ProductsPage() {
                           />
                         </button>
                       </td>
-                      <td className="p-3 font-medium">
-                        <div className="flex items-center gap-1">
-                          <span className="truncate">{item.name}</span>
-                          {item.name && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7 shrink-0"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    copyToClipboard(item.name || '', 'Ürün adı')
-                                  }}
-                                >
-                                  <Copy className="h-3.5 w-3.5" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>Panoya kopyala</TooltipContent>
-                            </Tooltip>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-3 font-mono text-sm">
-                        <div className="flex items-center gap-1">
-                          <span className="truncate">{item.sku || '—'}</span>
-                          {item.sku && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7 shrink-0"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    copyToClipboard(item.sku || '', 'SKU')
-                                  }}
-                                >
-                                  <Copy className="h-3.5 w-3.5" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>Panoya kopyala</TooltipContent>
-                            </Tooltip>
-                          )}
+                      <td className="p-3 text-left align-top">
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          <div className="flex items-center gap-1 min-w-0">
+                            <span className="truncate font-medium">{item.name}</span>
+                            {item.name && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7 shrink-0"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      copyToClipboard(item.name || '', 'Ürün adı')
+                                    }}
+                                  >
+                                    <Copy className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Panoya kopyala</TooltipContent>
+                              </Tooltip>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 min-w-0 font-mono text-xs text-muted-foreground">
+                            <span className="truncate">{item.sku?.trim() ? item.sku : '—'}</span>
+                            {item.sku?.trim() && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6 shrink-0"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      copyToClipboard(item.sku || '', 'SKU')
+                                    }}
+                                  >
+                                    <Copy className="h-3 w-3" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>SKU kopyala</TooltipContent>
+                              </Tooltip>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td className="p-3">
@@ -3374,11 +3584,17 @@ export function ProductsPage() {
               </DialogDescription>
             </div>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 gap-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void persistProductModal(false)
+            }}
+            className="flex flex-col flex-1 min-h-0 gap-4"
+          >
             {error && <p className="text-sm text-destructive shrink-0">{error}</p>}
-            <div className="flex-1 min-h-0 overflow-y-auto">
-            <Tabs value={modalTab} onValueChange={setModalTab} className="w-full">
-              <TabsList className={`grid w-full ${isPackageType ? 'grid-cols-6' : 'grid-cols-5'}`}>
+            <div className="flex flex-1 min-h-0 flex-col">
+            <Tabs value={modalTab} onValueChange={setModalTab} className="w-full flex flex-col flex-1 min-h-0">
+              <TabsList className={`grid w-full shrink-0 ${isPackageType ? 'grid-cols-6' : 'grid-cols-5'}`}>
                 <TabsTrigger value="genel">Genel</TabsTrigger>
                 <TabsTrigger value="fiyat">Fiyat</TabsTrigger>
                 <TabsTrigger value="gorsel">Görsel</TabsTrigger>
@@ -3388,7 +3604,8 @@ export function ProductsPage() {
                 <TabsTrigger value="e-ticaret">E-Ticaret</TabsTrigger>
                 <TabsTrigger value="diger">Diğer</TabsTrigger>
               </TabsList>
-              <TabsContent value="genel" className="space-y-4 mt-4 min-h-[55vh]">
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain mt-4">
+              <TabsContent value="genel" className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="product_item_group">Ürün Grubu</Label>
@@ -3475,7 +3692,7 @@ export function ProductsPage() {
                           return { ...f, supplier_code: v ?? '', sku: newSku || f.sku }
                         })
                       }
-                      supplierCodeEditable={!skipSupplierCode}
+                      supplierCodeEditable
                       sku={form.sku}
                       placeholder="Kategori, marka ve tedarikçi kodu seçin"
                     />
@@ -3585,7 +3802,7 @@ export function ProductsPage() {
                   </div>
                 </div>
               </TabsContent>
-              <TabsContent value="fiyat" className="space-y-4 mt-4 min-h-[55vh]">
+              <TabsContent value="fiyat" className="space-y-4">
                 <div className="space-y-2 w-full pb-2 border-b border-border/60">
                   <Label htmlFor="tax_rate">Vergi (KDV %)</Label>
                   <select
@@ -3759,7 +3976,7 @@ export function ProductsPage() {
                   })}
                 </div>
               </TabsContent>
-              <TabsContent value="gorsel" className="space-y-4 mt-4 min-h-[55vh]">
+              <TabsContent value="gorsel" className="space-y-4">
                 <div>
                   <ProductImagesGrid
                     images={form.images}
@@ -3774,7 +3991,7 @@ export function ProductsPage() {
                 </div>
               </TabsContent>
               {isPackageType && (
-                <TabsContent value="paket" className="space-y-4 mt-4 min-h-[55vh]">
+                <TabsContent value="paket" className="space-y-4">
                   <PackageContentsTab
                     packageItems={packageItems}
                     onChange={setPackageItems}
@@ -3782,152 +3999,187 @@ export function ProductsPage() {
                   />
                 </TabsContent>
               )}
-              <TabsContent value="e-ticaret" className="space-y-4 mt-4 min-h-[55vh]">
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void handleGenerateSeo()}
-                      disabled={aiSeoLoading || !form.name?.trim()}
-                      className="gap-2"
-                    >
-                      <Sparkles className="h-4 w-4" />
-                      {aiSeoLoading ? 'SEO…' : 'SEO metinleri (ürün adı)'}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void handleGenerateEcommerce()}
-                      disabled={aiEcommerceLoading || !form.name?.trim()}
-                      className="gap-2"
-                    >
-                      <Sparkles className="h-4 w-4" />
-                      {aiEcommerceLoading ? 'Üretiliyor…' : 'E-ticaret adı ve açıklama (rakip analizi)'}
-                    </Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    SEO alanları yalnızca ürün adından üretilir. E-ticaret adı ve açıklama için aynı SKU ile mağaza ürün sayfası ve isteğe bağlı rakip URL’ler analiz edilir.
-                  </p>
+              <TabsContent value="e-ticaret" className="space-y-4">
+                <div className="space-y-4 max-w-3xl">
                   <div className="space-y-2">
-                    <Label htmlFor="competitor_urls">Rakip ürün sayfa adresleri (isteğe bağlı)</Label>
-                    <textarea
-                      id="competitor_urls"
-                      value={competitorUrlsText}
-                      onChange={(e) => setCompetitorUrlsText(e.target.value)}
-                      placeholder="Satır başına bir URL (ör. benzer ürünün Trendyol veya rakip mağaza sayfası)"
-                      rows={3}
-                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="ecommerce_name">E-Ticaret Adı</Label>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <Label htmlFor="ecommerce_name" className="shrink-0">
+                        E-Ticaret ürün adı
+                      </Label>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 gap-1"
+                          onClick={openEcommerceAiRules}
+                        >
+                          <ScrollText className="h-3.5 w-3.5" aria-hidden />
+                          Kurallar
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="h-8 gap-1"
+                          disabled={ecommerceAiLoading}
+                          onClick={() => void handleAiEcommerceFull()}
+                        >
+                          <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                          {ecommerceAiLoading ? '…' : 'AI'}
+                        </Button>
+                      </div>
+                    </div>
                     <Input
                       id="ecommerce_name"
                       value={form.ecommerce_name ?? ''}
                       onChange={(e) => setForm((f) => ({ ...f, ecommerce_name: e.target.value }))}
-                      placeholder="E-ticaret sitelerinde görünecek ürün adı (boşsa ana ad kullanılır)"
+                      placeholder="E-ticarette görünecek ad (boşsa ana ürün adı kullanılabilir)"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      AI: Genel ürün adı, kategori yolu ve aynı kategorideki bir örnek vitrin adı (varsa) ile e-ticaret adı, hedef kelime,
+                      açıklama ve meta alanlarını doldurur. Kurallar tarayıcıda saklanır.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="seo_target_keyword">Hedef kelime</Label>
+                    <Input
+                      id="seo_target_keyword"
+                      value={seoTargetKeywords.target}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          seo_keywords: joinSeoTargetAndKeywords(e.target.value, splitSeoTargetAndKeywords(f.seo_keywords).rest),
+                        }))
+                      }
+                      placeholder="Birincil anahtar kelime (seo_keywords içinde ilk sırada tutulur)"
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="main_description">Açıklama</Label>
+                    <Label htmlFor="main_description">E-Ticaret açıklaması</Label>
                     <textarea
                       id="main_description"
                       value={form.main_description ?? ''}
                       onChange={(e) => setForm((f) => ({ ...f, main_description: e.target.value }))}
                       placeholder="Ürün açıklaması"
-                      rows={4}
-                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[100px]"
-                    />
-                  </div>
-                  <div className="space-y-2 pt-2 border-t">
-                    <Label htmlFor="seo_slug">SEO bağlantısı (URL parçası)</Label>
-                    <Input
-                      id="seo_slug"
-                      value={form.seo_slug ?? ''}
-                      onChange={(e) => setForm((f) => ({ ...f, seo_slug: e.target.value }))}
-                      placeholder="urun-adi-seo-url"
+                      rows={5}
+                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[120px]"
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="seo_title">Meta başlığı</Label>
+                    <Label htmlFor="seo_title">Meta başlık</Label>
                     <Input
                       id="seo_title"
                       value={form.seo_title ?? ''}
                       onChange={(e) => setForm((f) => ({ ...f, seo_title: e.target.value }))}
-                      placeholder="Sayfa başlığı (SEO)"
+                      placeholder="Sayfa başlığı"
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="seo_description">Meta açıklaması</Label>
+                    <Label htmlFor="seo_keywords_rest">Anahtar kelimeler</Label>
                     <textarea
-                      id="seo_description"
-                      value={form.seo_description ?? ''}
-                      onChange={(e) => setForm((f) => ({ ...f, seo_description: e.target.value }))}
-                      placeholder="Meta description (SEO)"
+                      id="seo_keywords_rest"
+                      value={seoTargetKeywords.rest}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          seo_keywords: joinSeoTargetAndKeywords(splitSeoTargetAndKeywords(f.seo_keywords).target, e.target.value),
+                        }))
+                      }
+                      placeholder="Hedef kelimeden sonraki ifadeler (virgülle ayırın)"
                       rows={2}
                       className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="seo_keywords">SEO anahtar kelimeleri</Label>
-                    <Input
-                      id="seo_keywords"
-                      value={form.seo_keywords ?? ''}
-                      onChange={(e) => setForm((f) => ({ ...f, seo_keywords: e.target.value }))}
-                      placeholder="örnek: kırmızı kalem, ofis kırtasiye, …"
+                    <Label htmlFor="seo_description">Meta açıklama</Label>
+                    <textarea
+                      id="seo_description"
+                      value={form.seo_description ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, seo_description: e.target.value }))}
+                      placeholder="Meta description"
+                      rows={3}
+                      className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-4 pt-2 border-t">
-                    <div className="space-y-2">
-                      <Label>Ürün Kodu</Label>
-                      <div className="flex h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
-                        {form.sku || '—'}
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Üretici</Label>
-                      <div className="flex h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
-                        {form.brand_id ? brands.find((b) => b.id === form.brand_id)?.name ?? '—' : '—'}
-                      </div>
-                    </div>
-                  </div>
                   <div className="space-y-2">
-                    <Label>Kategoriler</Label>
-                    <div className="flex min-h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm break-words">
-                      {categoryPath.length > 0 ? formatCategoryPathDisplay(categoryPath) : '—'}
+                    <Label>Genel liste fiyatı (taban)</Label>
+                    <div className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-muted/40 px-3 text-sm tabular-nums">
+                      <span className="text-muted-foreground truncate">
+                        {currencies.find((c) => c.id === form.currency_id)?.name ?? '—'}
+                      </span>
+                      <span className="font-medium shrink-0">{formatPrice(ecommerceGeneralBasePrice)}</span>
                     </div>
+                    <p className="text-xs text-muted-foreground">
+                      Paket ürünlerde paket içeriğinden hesaplanan toplam; diğerlerinde Fiyat sekmesindeki genel fiyat kullanılır.
+                    </p>
                   </div>
-                  <div className="space-y-2">
-                    <Label>Fiyat</Label>
-                    <div className="flex h-10 items-center rounded-md border border-input bg-muted/50 px-3 py-2 text-sm tabular-nums">
-                      {(() => {
-                        const ecomPrice = form.prices[1] ?? { price: form.price, currency_id: form.currency_id }
-                        const cur = ecomPrice.currency_id ? currencies.find((c) => c.id === ecomPrice.currency_id) : null
-                        return ecomPrice.price != null
-                          ? `${formatPrice(ecomPrice.price)} ${cur?.symbol ?? ''}`.trim() || '—'
-                          : '—'
-                      })()}
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Resimler</Label>
-                    <ProductImagesGrid
-                      images={form.images}
-                      onChange={(images) => {
-                        setForm((f) => ({ ...f, images }))
-                        if (editingId) {
-                          const imageValue = serializeImagesToImage(images)
-                          setData((prev) => prev.map((p) => (p.id === editingId ? { ...p, image: imageValue } : p)))
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-end">
+                    <div className="sm:col-span-4 space-y-2">
+                      <Label htmlFor="ecommerce_discount_type">İskonto türü</Label>
+                      <select
+                        id="ecommerce_discount_type"
+                        aria-label="E-ticaret iskonto türü"
+                        value={form.ecommerce_discount_type === 1 ? 1 : 0}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            ecommerce_discount_type: Number(e.target.value) === 1 ? 1 : 0,
+                          }))
                         }
-                      }}
-                    />
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      >
+                        <option value={0}>Yüzde (%)</option>
+                        <option value={1}>Sabit tutar</option>
+                      </select>
+                    </div>
+                    <div className="sm:col-span-4 space-y-2">
+                      <Label htmlFor="ecommerce_discount_value">İskonto değeri</Label>
+                      <DecimalInput
+                        id="ecommerce_discount_value"
+                        value={form.ecommerce_discount_value ?? 0}
+                        onChange={(v) => setForm((f) => ({ ...f, ecommerce_discount_value: v }))}
+                        maxDecimals={2}
+                        minDecimals={2}
+                        placeholder="0,00"
+                        className="text-right tabular-nums"
+                      />
+                    </div>
+                    <div className="sm:col-span-4 space-y-2">
+                      <Label htmlFor="ecommerce_currency_id">Para birimi</Label>
+                      <select
+                        id="ecommerce_currency_id"
+                        aria-label="E-ticaret para birimi"
+                        value={form.ecommerce_currency_id ?? ''}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            ecommerce_currency_id: e.target.value ? Number(e.target.value) : '',
+                          }))
+                        }
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      >
+                        <option value="">Seçin</option>
+                        {currencies.map((cur) => (
+                          <option key={cur.id} value={cur.id}>
+                            {cur.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="text-muted-foreground">Hesaplanan e-ticaret fiyatı</span>
+                    <span className="font-medium tabular-nums">
+                      {formatPrice(ecommerceComputedListPrice)}{' '}
+                      <span className="text-muted-foreground font-normal">
+                        {currencies.find((c) => c.id === form.ecommerce_currency_id)?.name ?? ''}
+                      </span>
+                    </span>
                   </div>
                 </div>
               </TabsContent>
-              <TabsContent value="diger" className="space-y-4 mt-4 min-h-[55vh]">
+              <TabsContent value="diger" className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="gtip_code">GTİP Kodu</Label>
                   <Input
@@ -3937,7 +4189,17 @@ export function ProductsPage() {
                     placeholder="Gümrük tarife kodu"
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="seo_slug">SEO bağlantısı (slug)</Label>
+                  <Input
+                    id="seo_slug"
+                    value={form.seo_slug ?? ''}
+                    onChange={(e) => setForm((f) => ({ ...f, seo_slug: e.target.value }))}
+                    placeholder="urun-adi-seo-url"
+                  />
+                </div>
               </TabsContent>
+              </div>
             </Tabs>
             </div>
             <DialogFooter className="flex-row justify-between sm:!justify-between gap-2 pt-4 border-t w-full shrink-0 mt-auto">
@@ -4015,8 +4277,8 @@ export function ProductsPage() {
                         </span>
                       </TooltipTrigger>
                       <TooltipContent className="max-w-xs">
-                        IdeaSoft’a aktar — Hangi bilgilerin gönderileceğini seçersiniz. Kayıtlı eşleştirmelerle marka/kategori/kur atanır;
-                        aynı SKU’lu IdeaSoft ürünü varsa seçtikleriniz güncellenir, yoksa yeni ürün tam içerikle oluşturulur. Önce Kaydet.
+                        IdeaSoft’a aktar — Genel, fiyat, görsel ve SEO senkron kutuları master alanlarını günceller. Stok, ürün miktarından;
+                        IdeaSoft indirimi E-Ticaret sekmesindeki iskonto ayarlarından gider. Önce Kaydet.
                       </TooltipContent>
                     </Tooltip>
                   </div>
@@ -4086,22 +4348,66 @@ export function ProductsPage() {
                   </TooltipTrigger>
                   <TooltipContent>Kopyala</TooltipContent>
                 </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="submit"
-                      size="icon"
-                      variant="outline"
-                      disabled={saving || !form.name.trim() || !form.type_id}
-                    >
-                      <Save className="h-4 w-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Kaydet</TooltipContent>
-                </Tooltip>
+                <div className="flex flex-wrap items-center gap-1.5 justify-end">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        disabled={saving || !form.name.trim() || !form.type_id}
+                        onClick={() => void persistProductModal(false)}
+                      >
+                        <Save className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Kaydet — modal açık kalır</TooltipContent>
+                  </Tooltip>
+                  <Button
+                    type="button"
+                    variant="save"
+                    size="sm"
+                    className="h-9 shrink-0"
+                    disabled={saving || !form.name.trim() || !form.type_id}
+                    onClick={() => void persistProductModal(true)}
+                  >
+                    Kaydet ve kapat
+                  </Button>
+                </div>
               </div>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={ecommerceAiRulesOpen} onOpenChange={setEcommerceAiRulesOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>AI e-ticaret kuralları</DialogTitle>
+            <DialogDescription>
+              Bu metin tarayıcınızda saklanır; ChatGPT ile üretilen vitrin adı, hedef kelime, açıklama ve meta alanları bu kurallara uymaya
+              çalışır. Örnek: ton, yasaklı ifadeler, uzunluk, marka geçişi.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="ecommerce-ai-rules-text">Kurallar</Label>
+            <textarea
+              id="ecommerce-ai-rules-text"
+              value={ecommerceAiRulesDraft}
+              onChange={(e) => setEcommerceAiRulesDraft(e.target.value)}
+              rows={10}
+              placeholder="Örn: Resmi ton kullan; fiyat vaadi yapma; teknik özellikleri öne çıkar…"
+              className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[180px]"
+            />
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => setEcommerceAiRulesOpen(false)}>
+              İptal
+            </Button>
+            <Button type="button" variant="save" onClick={saveEcommerceAiRules}>
+              Kaydet
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -4458,6 +4764,37 @@ export function ProductsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={bulkModal === 'seoAi'} onOpenChange={(o) => !o && setBulkModal(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-amber-600 shrink-0" />
+              Toplu SEO (AI)
+            </DialogTitle>
+            <DialogDescription>
+              Seçili <span className="font-medium text-foreground">{selectedIds.size}</span> ürün için OpenAI ile slug, meta
+              başlık, meta açıklama ve anahtar kelimeler üretilir; yalnızca master kayıt (
+              <code className="text-[11px] bg-muted px-1 rounded">product_descriptions</code>) güncellenir. IdeaSoft’a
+              aktarmak için ayrıca <strong>Toplu İşlemler › IdeaSoft’a aktar</strong> kullanın.
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Ürün düzenleme › E-Ticaret › <strong>AI e-ticaret kuralları</strong> burada da uygulanır.
+          </p>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => setBulkModal(null)} disabled={bulkSaving}>
+              İptal
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => openEcommerceAiRules()} disabled={bulkSaving}>
+              Kuralları düzenle
+            </Button>
+            <Button type="button" variant="save" onClick={() => void submitBulkSeoAiOnly()} disabled={bulkSaving}>
+              {bulkSaving ? 'Oluşturuluyor…' : 'Oluştur'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog
         open={parasutTransferModalOpen}
         onOpenChange={(o) => {
@@ -4569,17 +4906,18 @@ export function ProductsPage() {
           if (!o) setIdeasoftTransferModalOpen(false)
         }}
       >
-        <DialogContent className="max-w-md">
-          <DialogHeader>
+        <DialogContent className="max-w-md max-h-[min(92vh,760px)] flex flex-col gap-0 overflow-hidden">
+          <DialogHeader className="shrink-0">
             <DialogTitle>IdeaSoft’a aktarım</DialogTitle>
             <DialogDescription>
-              Mevcut IdeaSoft ürününde yalnızca işaretlediğiniz bölümler master kayıttan güncellenir. Yeni ürün oluşturulacaksa tüm alanlar
-              gönderilir (seçimler yalnızca güncellemede uygulanır). Stok ve indirim yalnızca yanındaki kutucuk işaretliyken IdeaSoft’a
-              yazılır; indirim alanı boş veya 0 ise indirim güncellenmez. İndirim tipi (yüzde / sabit tutar) IdeaSoft’taki{' '}
-              <span className="whitespace-nowrap">discountType</span> ile birlikte gönderilir.
+              Mevcut IdeaSoft ürününde yalnızca işaretlediğiniz bölümler (genel, fiyat, görsel, SEO) master kayıttan güncellenir. Yeni ürün
+              oluşturulacaksa tüm alanlar gönderilir (seçimler yalnızca güncellemede uygulanır). IdeaSoft stok miktarı ürün formundaki{' '}
+              <span className="font-medium">miktar</span> alanından;
+              indirim tipi ve değeri <span className="font-medium">E-Ticaret</span> sekmesindeki iskonto ayarlarından gönderilir (iskonto 0 ise IdeaSoft indirimi
+              güncellenmez).
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 py-2">
+          <div className="space-y-3 py-2 min-h-0 max-h-[min(48vh,320px)] overflow-y-auto pr-1 -mr-1">
             <label className="flex items-start gap-3 cursor-pointer">
               <Checkbox
                 id="ideasoft-sync-general"
@@ -4590,6 +4928,19 @@ export function ProductsPage() {
                 <span className="font-medium block">Genel bilgiler</span>
                 <span className="text-muted-foreground">
                   Ad, SKU, barkod, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi (stok aşağıdaki kutucuktan)
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-sync-seo"
+                checked={ideasoftSyncSeo}
+                onCheckedChange={(v) => setIdeasoftSyncSeo(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">SEO içerikleri</span>
+                <span className="text-muted-foreground">
+                  URL slug (Diğer), meta başlık / açıklama / anahtar kelimeler (E-Ticaret sekmesi)
                 </span>
               </span>
             </label>
@@ -4620,80 +4971,8 @@ export function ProductsPage() {
                 </span>
               </span>
             </label>
-            <label className="flex items-start gap-3 cursor-pointer">
-              <Checkbox
-                id="ideasoft-sync-seo"
-                checked={ideasoftSyncSeo}
-                onCheckedChange={(v) => setIdeasoftSyncSeo(!!v)}
-              />
-              <span className="text-sm leading-tight">
-                <span className="font-medium block">SEO bilgileri</span>
-                <span className="text-muted-foreground">Slug, sayfa başlığı, meta açıklama, anahtar kelimeler, arama anahtarı</span>
-              </span>
-            </label>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border/60">
-            <div className="flex gap-3 items-start">
-              <Checkbox
-                id="ideasoft-apply-stock"
-                className="mt-2 shrink-0"
-                checked={ideasoftApplyTransferStock}
-                onCheckedChange={(v) => setIdeasoftApplyTransferStock(!!v)}
-                disabled={ideasoftTransferLoading}
-              />
-              <div className="min-w-0 flex-1 space-y-2">
-                <Label htmlFor="ideasoft-transfer-stock">IdeaSoft stok miktarı</Label>
-                <Input
-                  id="ideasoft-transfer-stock"
-                  type="number"
-                  min={0}
-                  step={1}
-                  inputMode="numeric"
-                  value={ideasoftTransferStock}
-                  onChange={(e) => setIdeasoftTransferStock(e.target.value)}
-                  disabled={ideasoftTransferLoading || !ideasoftApplyTransferStock}
-                />
-              </div>
-            </div>
-            <div className="flex gap-3 items-start">
-              <Checkbox
-                id="ideasoft-apply-discount"
-                className="mt-2 shrink-0"
-                checked={ideasoftApplyTransferDiscount}
-                onCheckedChange={(v) => setIdeasoftApplyTransferDiscount(!!v)}
-                disabled={ideasoftTransferLoading}
-              />
-              <div className="min-w-0 flex-1 space-y-2">
-                <Label htmlFor="ideasoft-transfer-discount-type">İndirim tipi</Label>
-                <select
-                  id="ideasoft-transfer-discount-type"
-                  aria-label="IdeaSoft indirim tipi"
-                  value={ideasoftTransferDiscountType}
-                  onChange={(e) => setIdeasoftTransferDiscountType(e.target.value === '1' ? 1 : 0)}
-                  disabled={ideasoftTransferLoading || !ideasoftApplyTransferDiscount}
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                >
-                  <option value={0}>Yüzde (%)</option>
-                  <option value={1}>Sabit tutar</option>
-                </select>
-                <Label htmlFor="ideasoft-transfer-discount">
-                  {ideasoftTransferDiscountType === 0 ? 'İndirim yüzdesi' : 'İndirim tutarı'}
-                </Label>
-                <Input
-                  id="ideasoft-transfer-discount"
-                  type="number"
-                  min={0}
-                  max={ideasoftTransferDiscountType === 0 ? 100 : undefined}
-                  step={0.01}
-                  inputMode="decimal"
-                  value={ideasoftTransferDiscountPct}
-                  onChange={(e) => setIdeasoftTransferDiscountPct(e.target.value)}
-                  disabled={ideasoftTransferLoading || !ideasoftApplyTransferDiscount}
-                />
-              </div>
-            </div>
-          </div>
-          <div className="flex justify-end border-t border-border/60 pt-3 mt-1">
+          <div className="flex justify-end border-t border-border/60 pt-3 mt-1 shrink-0">
             <Button
               type="button"
               variant="ghost"
@@ -4705,7 +4984,7 @@ export function ProductsPage() {
               Hepsini seç
             </Button>
           </div>
-          <DialogFooter className="gap-2 sm:gap-0">
+          <DialogFooter className="gap-2 sm:gap-0 shrink-0 mt-auto pt-2">
             <Button
               type="button"
               variant="outline"
@@ -4732,21 +5011,22 @@ export function ProductsPage() {
           if (!o) setIdeasoftBulkTransferModalOpen(false)
         }}
       >
-        <DialogContent className="max-w-md">
-          <DialogHeader>
+        <DialogContent className="max-w-md max-h-[min(92vh,760px)] flex flex-col gap-0 overflow-hidden">
+          <DialogHeader className="shrink-0">
             <DialogTitle>IdeaSoft toplu aktarım</DialogTitle>
             <DialogDescription>
               <span className="block">
                 Seçili{' '}
                 <span className="font-medium text-foreground">{selectedIds.size}</span> ürün sırayla işlenir. SKU eşleşmesi veya
-                kayıtlı eşleştirme varsa yalnızca işaretlediğiniz bölümler güncellenir; IdeaSoft’ta kayıt yoksa ürün tam içerikle
-                oluşturulur. SKU boş olanlar hata verir. Stok ve indirim yalnızca yanındaki kutucuk işaretliyken tüm aktarımlara
+                kayıtlı eşleştirme varsa yalnızca işaretlediğiniz bölümler (genel, fiyat, görsel, SEO) güncellenir; IdeaSoft’ta kayıt
+                yoksa ürün tam içerikle oluşturulur. SKU boş olanlar hata verir. Stok ve indirim yalnızca yanındaki kutucuk işaretliyken
+                tüm aktarımlara
                 aynı değerlerle yazılır; indirim boş veya 0 ise indirim güncellenmez. İndirim tipi (yüzde / sabit tutar) tüm
                 satırlarda aynı şekilde gönderilir.
               </span>
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 py-2">
+          <div className="space-y-3 py-2 min-h-0 max-h-[min(40vh,280px)] overflow-y-auto pr-1 -mr-1">
             <label className="flex items-start gap-3 cursor-pointer">
               <Checkbox
                 id="ideasoft-bulk-sync-general"
@@ -4757,6 +5037,19 @@ export function ProductsPage() {
                 <span className="font-medium block">Genel bilgiler</span>
                 <span className="text-muted-foreground">
                   Ad, SKU, barkod, durum, birim etiketi, açıklama (detay), marka, kategori, para birimi (stok aşağıdaki kutucuktan)
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox
+                id="ideasoft-bulk-sync-seo"
+                checked={ideasoftBulkSyncSeo}
+                onCheckedChange={(v) => setIdeasoftBulkSyncSeo(!!v)}
+              />
+              <span className="text-sm leading-tight">
+                <span className="font-medium block">SEO içerikleri</span>
+                <span className="text-muted-foreground">
+                  URL slug (Diğer), meta başlık / açıklama / anahtar kelimeler (E-Ticaret sekmesi)
                 </span>
               </span>
             </label>
@@ -4785,17 +5078,6 @@ export function ProductsPage() {
                     ? 'Seçili ürünlerde kayıtlı görseller (ürün başına en fazla 8)'
                     : 'Seçili ürünlerde görsel yok'}
                 </span>
-              </span>
-            </label>
-            <label className="flex items-start gap-3 cursor-pointer">
-              <Checkbox
-                id="ideasoft-bulk-sync-seo"
-                checked={ideasoftBulkSyncSeo}
-                onCheckedChange={(v) => setIdeasoftBulkSyncSeo(!!v)}
-              />
-              <span className="text-sm leading-tight">
-                <span className="font-medium block">SEO bilgileri</span>
-                <span className="text-muted-foreground">Slug, sayfa başlığı, meta açıklama, anahtar kelimeler, arama anahtarı</span>
               </span>
             </label>
           </div>
@@ -4860,7 +5142,7 @@ export function ProductsPage() {
               </div>
             </div>
           </div>
-          <div className="flex justify-end border-t border-border/60 pt-3 mt-1">
+          <div className="flex justify-end border-t border-border/60 pt-3 mt-1 shrink-0">
             <Button
               type="button"
               variant="ghost"
@@ -4872,7 +5154,7 @@ export function ProductsPage() {
               Hepsini seç
             </Button>
           </div>
-          <DialogFooter className="gap-2 sm:gap-0">
+          <DialogFooter className="gap-2 sm:gap-0 shrink-0 mt-auto pt-2">
             <Button
               type="button"
               variant="outline"

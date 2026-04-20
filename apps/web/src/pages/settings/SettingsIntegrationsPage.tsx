@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { Umbrella, Sparkles, Store, ExternalLink } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { Umbrella, Sparkles, Store, ExternalLink, Database, Loader2 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
@@ -31,6 +31,47 @@ import {
   validateIdeasoftSettingsForSave,
   type IdeasoftSettings,
 } from '@/lib/ideasoft-settings'
+import {
+  fetchOkmMysqlSettings,
+  saveOkmMysqlSettings,
+  type OkmMysqlSettings,
+} from '@/lib/okm-mysql-settings'
+
+const okmMysqlSelectClass =
+  'flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+
+async function postOkmMysqlDatabases(s: OkmMysqlSettings): Promise<string[]> {
+  const res = await fetch(`${API_URL}/api/integrations/okm-mysql/databases`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      host: s.host,
+      port: s.port,
+      user: s.user,
+      password: s.password,
+    }),
+  })
+  const data = (await res.json()) as { ok?: boolean; databases?: string[]; error?: string }
+  if (!data.ok) throw new Error(data.error || 'Veritabanları alınamadı')
+  return data.databases ?? []
+}
+
+async function postOkmMysqlTables(s: OkmMysqlSettings, database: string): Promise<string[]> {
+  const res = await fetch(`${API_URL}/api/integrations/okm-mysql/tables`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      host: s.host,
+      port: s.port,
+      user: s.user,
+      password: s.password,
+      database,
+    }),
+  })
+  const data = (await res.json()) as { ok?: boolean; tables?: string[]; error?: string }
+  if (!data.ok) throw new Error(data.error || 'Tablolar alınamadı')
+  return data.tables ?? []
+}
 
 /** Sidebar menülerden entegrasyon ikon path'ini bul (label ile eşleşme) */
 function findIntegrationIconPath(menus: { label: string; iconPath?: string }[], keywords: string[]): string | undefined {
@@ -73,11 +114,11 @@ function TabIcon({
   return <FallbackIcon className={className} />
 }
 
-const INT_TABS = ['parasut', 'ideasoft', 'openai'] as const
+const INT_TABS = ['parasut', 'ideasoft', 'openai', 'okm'] as const
 type IntTab = (typeof INT_TABS)[number]
 
 function parseIntTab(raw: string | null): IntTab {
-  if (raw === 'openai' || raw === 'parasut' || raw === 'ideasoft') return raw
+  if (raw === 'openai' || raw === 'parasut' || raw === 'ideasoft' || raw === 'okm') return raw
   return 'parasut'
 }
 
@@ -100,15 +141,23 @@ export function SettingsIntegrationsPage() {
   }
   const [parasutIconPath, setParasutIconPath] = useState<string | undefined>()
   const [ideasoftIconPath, setIdeasoftIconPath] = useState<string | undefined>()
+  const [okmIconPath, setOkmIconPath] = useState<string | undefined>()
   const [parasutSettings, setParasutSettings] = useState<ParasutSettings>({})
   const [ideasoftSettings, setIdeasoftSettings] = useState<IdeasoftSettings>(emptyIdeasoft)
   const [openaiSettings, setOpenaiSettings] = useState<OpenAISettings>({})
+  const [okmSettings, setOkmSettings] = useState<OkmMysqlSettings>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [ideasoftSaving, setIdeasoftSaving] = useState(false)
   const [openaiSaving, setOpenaiSaving] = useState(false)
+  const [okmSaving, setOkmSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [ideasoftTesting, setIdeasoftTesting] = useState(false)
+  const [okmTesting, setOkmTesting] = useState(false)
+  const [okmDatabases, setOkmDatabases] = useState<string[]>([])
+  const [okmTables, setOkmTables] = useState<string[]>([])
+  const [okmLoadingDbs, setOkmLoadingDbs] = useState(false)
+  const [okmLoadingTables, setOkmLoadingTables] = useState(false)
   const [ideasoftExchanging, setIdeasoftExchanging] = useState(false)
   const [authCodeInput, setAuthCodeInput] = useState('')
   const lastOAuthState = useRef<string | null>(null)
@@ -116,14 +165,30 @@ export function SettingsIntegrationsPage() {
   const loadSettings = useCallback(async () => {
     setLoading(true)
     try {
-      const [parasutData, ideasoftData, openaiData] = await Promise.all([
+      const [parasutData, ideasoftData, openaiData, okmData] = await Promise.all([
         fetchParasutSettings(),
         fetchIdeasoftSettings().catch(() => ({}) as IdeasoftSettings),
         fetchOpenAISettings().catch(() => ({})),
+        fetchOkmMysqlSettings().catch((): OkmMysqlSettings => ({})),
       ])
       setParasutSettings(parasutData)
       setIdeasoftSettings(ideasoftData)
       setOpenaiSettings(openaiData)
+      setOkmSettings(okmData)
+      setOkmDatabases([])
+      setOkmTables([])
+      try {
+        const dbs = await postOkmMysqlDatabases(okmData)
+        setOkmDatabases(dbs)
+        const db = (okmData.database || '').trim()
+        if (db) {
+          const tbl = await postOkmMysqlTables(okmData, db)
+          setOkmTables(tbl)
+        }
+      } catch {
+        setOkmDatabases([])
+        setOkmTables([])
+      }
     } catch (err) {
       toastError('Yükleme hatası', err instanceof Error ? err.message : 'Ayarlar yüklenemedi')
     } finally {
@@ -183,10 +248,94 @@ export function SettingsIntegrationsPage() {
     }
   }
 
+  async function saveOkmMysql() {
+    setOkmSaving(true)
+    try {
+      await saveOkmMysqlSettings(okmSettings)
+      toastSuccess(
+        'Kaydedildi',
+        'OKM ayarları kaydedildi. Veritabanı ve blog tablosunu seçtikten sonra tekrar kaydederek blog listesini tamamlayın.',
+      )
+      await loadSettings()
+    } catch (err) {
+      toastError('Kaydetme hatası', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setOkmSaving(false)
+    }
+  }
+
+  async function handleOkmMysqlDatabasesRefresh() {
+    setOkmLoadingDbs(true)
+    try {
+      const dbs = await postOkmMysqlDatabases(okmSettings)
+      setOkmDatabases(dbs)
+      const prevDb = (okmSettings.database || '').trim()
+      if (prevDb && !dbs.includes(prevDb)) {
+        setOkmSettings((s) => ({ ...s, database: '', blog_table: '' }))
+        setOkmTables([])
+      } else if (prevDb && dbs.includes(prevDb)) {
+        const tbl = await postOkmMysqlTables(okmSettings, prevDb)
+        setOkmTables(tbl)
+      } else {
+        setOkmTables([])
+      }
+      toastSuccess('Tamam', `${dbs.length} veritabanı listelendi.`)
+    } catch (err) {
+      toastError('Liste hatası', err instanceof Error ? err.message : 'Alınamadı')
+      setOkmDatabases([])
+      setOkmTables([])
+    } finally {
+      setOkmLoadingDbs(false)
+    }
+  }
+
+  async function handleOkmMysqlTablesForDatabase(database: string) {
+    if (!database.trim()) {
+      setOkmTables([])
+      return
+    }
+    setOkmLoadingTables(true)
+    try {
+      const tbl = await postOkmMysqlTables(okmSettings, database.trim())
+      setOkmTables(tbl)
+    } catch (err) {
+      toastError('Tablolar', err instanceof Error ? err.message : 'Alınamadı')
+      setOkmTables([])
+    } finally {
+      setOkmLoadingTables(false)
+    }
+  }
+
+  async function handleOkmMysqlTest() {
+    setOkmTesting(true)
+    try {
+      const res = await fetch(`${API_URL}/api/integrations/test/okm-mysql`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: okmSettings.host,
+          port: okmSettings.port,
+          user: okmSettings.user,
+          password: okmSettings.password,
+          /** Veritabanı ve blog tablosu seçilmeden yalnızca sunucu + kimlik doğrulama */
+          connection_only: true,
+        }),
+      })
+      const data = (await res.json()) as { ok?: boolean; error?: string; message?: string }
+      if (data.ok) toastSuccess('Bağlantı başarılı', data.message || 'MySQL sunucusu yanıt verdi.')
+      else toastError('Bağlantı hatası', data.error || 'Test başarısız')
+    } catch (err) {
+      toastError('Test hatası', err instanceof Error ? err.message : 'Test edilemedi')
+    } finally {
+      setOkmTesting(false)
+    }
+  }
+
   useEffect(() => {
     const resolveIcons = (items: { label: string; iconPath?: string }[]) => {
       setParasutIconPath(findIntegrationIconPath(items, ['paraşüt', 'parasut']))
       setIdeasoftIconPath(findIntegrationIconPath(items, ['ideasoft', 'ideashop', 'idea soft']))
+      setOkmIconPath(findIntegrationIconPath(items, ['okm', 'otomatik', 'kapım']))
     }
     const load = async () => {
       const menus = await fetchSidebarMenus()
@@ -314,6 +463,15 @@ export function SettingsIntegrationsPage() {
               {ideasoftSaving ? 'Kaydediliyor...' : 'Kaydet'}
             </Button>
           </div>
+        ) : activeTab === 'okm' ? (
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleOkmMysqlTest} disabled={okmTesting}>
+              {okmTesting ? 'Test ediliyor...' : 'MySQL test'}
+            </Button>
+            <Button variant="save" onClick={saveOkmMysql} disabled={okmSaving}>
+              {okmSaving ? 'Kaydediliyor...' : 'Kaydet'}
+            </Button>
+          </div>
         ) : (
           <Button variant="save" onClick={saveOpenAI} disabled={openaiSaving}>
             {openaiSaving ? 'Kaydediliyor...' : 'Kaydet'}
@@ -322,7 +480,7 @@ export function SettingsIntegrationsPage() {
       }
     >
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-        <TabsList className="grid w-full max-w-2xl grid-cols-3">
+        <TabsList className="grid w-full max-w-4xl grid-cols-2 sm:grid-cols-4 gap-1">
           <TabsTrigger value="parasut" className="flex items-center gap-2">
             <TabIcon
               iconPath={parasutIconPath}
@@ -339,6 +497,10 @@ export function SettingsIntegrationsPage() {
           <TabsTrigger value="openai" className="flex items-center gap-2">
             <Sparkles className="h-4 w-4" />
             OpenAI
+          </TabsTrigger>
+          <TabsTrigger value="okm" className="flex items-center gap-2">
+            <TabIcon iconPath={okmIconPath} fallback={Database} alt="OKM" className="h-4 w-4" />
+            OKM
           </TabsTrigger>
         </TabsList>
 
@@ -578,11 +740,323 @@ export function SettingsIntegrationsPage() {
                       placeholder="sk-..."
                     />
                     <p className="text-xs text-muted-foreground">
-                      platform.openai.com adresinden API anahtarı alın. Ürün modalında E-Ticaret sekmesindeki &quot;ChatGPT
-                      ile Oluştur&quot; butonu bu anahtarı kullanır.
+                      platform.openai.com adresinden API anahtarı alın. Ürün modalı E-Ticaret sekmesindeki &quot;AI&quot; ile tam metin
+                      paketi ve isteğe bağlı &quot;Kurallar&quot; özelliği bu anahtarı kullanır.
                     </p>
                   </div>
                 </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="okm" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>OKM — Eski site (Otomatik Kapım Marketim) MySQL</CardTitle>
+              <CardDescription>
+                <strong>Kaydet</strong> ile önce sunucu bağlantı bilgilerini saklayabilirsiniz; veritabanı ve blog tablosu
+                zorunlu değildir. Alttaki <strong>MySQL test</strong> yalnızca sunucu + kullanıcı doğrulaması yapar (veritabanı
+                veya blog tablosu seçmeniz gerekmez). Listeler için <strong>Veritabanlarını getir</strong> kullanın, ardından
+                veritabanı ve tabloyu seçip isteğe bağlı tekrar kaydedin. Sunucu Worker ortamından erişilebilir olmalıdır
+                (localhost kullanmayın).
+                Yalnızca{' '}
+                <Link className="underline font-medium text-foreground" to="/ayarlar/veri-aktarimi">
+                  Veri aktarımı
+                </Link>{' '}
+                MySQL kullanıyorsanız host/kullanıcı burada boş bırakılıp liste yine getirilebilir.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-8">
+              {loading ? (
+                <p className="text-sm text-muted-foreground py-4">Yükleniyor...</p>
+              ) : (
+                <>
+                  <div className="space-y-4">
+                    <p className="text-sm font-medium text-foreground">Sunucu bağlantısı</p>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-host">Sunucu (host)</Label>
+                        <Input
+                          id="okm-host"
+                          placeholder="mysql.ornekhosting.com"
+                          value={okmSettings.host ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, host: e.target.value }))}
+                          autoComplete="off"
+                        />
+                        <p className="text-xs text-muted-foreground">Uzak MySQL hostname veya IP (Veri aktarımı MySQL kullanıyorsanız boş bırakılabilir).</p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="okm-port">Port</Label>
+                        <Input
+                          id="okm-port"
+                          placeholder="3306"
+                          value={okmSettings.port ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, port: e.target.value }))}
+                          inputMode="numeric"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="okm-user">Kullanıcı</Label>
+                        <Input
+                          id="okm-user"
+                          placeholder="mysql_kullanici"
+                          value={okmSettings.user ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, user: e.target.value }))}
+                          autoComplete="username"
+                        />
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-password">Şifre</Label>
+                        <Input
+                          id="okm-password"
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder="••••••••"
+                          value={okmSettings.password ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, password: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleOkmMysqlDatabasesRefresh()}
+                        disabled={okmLoadingDbs}
+                      >
+                        {okmLoadingDbs ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Yükleniyor…
+                          </>
+                        ) : (
+                          'Veritabanlarını getir'
+                        )}
+                      </Button>
+                      <span className="text-xs text-muted-foreground">
+                        Bağlantı bilgisi değiştiyse listeyi yeniden getirin.
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="border-t pt-6 space-y-4">
+                    <p className="text-sm font-medium text-foreground">Veritabanı ve blog tablosu</p>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label htmlFor="okm-database-select">Veritabanı</Label>
+                        <select
+                          id="okm-database-select"
+                          aria-label="OKM MySQL veritabanı seçimi"
+                          className={okmMysqlSelectClass}
+                          value={okmSettings.database ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            setOkmSettings((s) => ({ ...s, database: v, blog_table: '', product_table: '' }))
+                            if (v) void handleOkmMysqlTablesForDatabase(v)
+                            else setOkmTables([])
+                          }}
+                          disabled={okmDatabases.length === 0}
+                        >
+                          <option value="">— Önce listeyi getirin —</option>
+                          {okmDatabases.map((d) => (
+                            <option key={d} value={d}>
+                              {d}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="okm-blog-table-select">Blog tablosu</Label>
+                        <select
+                          id="okm-blog-table-select"
+                          aria-label="OKM blog tablosu seçimi"
+                          className={okmMysqlSelectClass}
+                          value={okmSettings.blog_table ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, blog_table: e.target.value }))}
+                          disabled={!(okmSettings.database || '').trim() || okmLoadingTables}
+                        >
+                          <option value="">
+                            {okmLoadingTables ? 'Tablolar yükleniyor…' : '— Tablo seçin —'}
+                          </option>
+                          {(() => {
+                            const cur = (okmSettings.blog_table || '').trim()
+                            const list = [...okmTables]
+                            if (cur && !list.includes(cur)) list.unshift(cur)
+                            return list.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))
+                          })()}
+                        </select>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-blog_order_column">Sıralama sütunu</Label>
+                        <Input
+                          id="okm-blog_order_column"
+                          placeholder="id"
+                          value={okmSettings.blog_order_column ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, blog_order_column: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          OKM › Blog listesinde ORDER BY için kullanılır (ör. <code className="text-[11px] bg-muted px-1 rounded">id</code>,{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">created_at</code>).
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-blog_source_id_column">Kaynak birincil anahtar sütunu</Label>
+                        <Input
+                          id="okm-blog_source_id_column"
+                          placeholder="id"
+                          value={okmSettings.blog_source_id_column ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, blog_source_id_column: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          IdeaSoft eşlemesi ve aktarım için satır kimliği (çoğu tabloda <code className="text-[11px] bg-muted px-1 rounded">id</code>).
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-ideasoft_blog_category_id">IdeaSoft blog kategori ID</Label>
+                        <Input
+                          id="okm-ideasoft_blog_category_id"
+                          placeholder="ör. 3"
+                          inputMode="numeric"
+                          value={okmSettings.ideasoft_blog_category_id ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, ideasoft_blog_category_id: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Admin API <code className="text-[11px] bg-muted px-1 rounded">POST /admin-api/blogs</code> için kategori gerekir;{' '}
+                          <Link className="underline font-medium text-foreground" to="/ideasoft/blog">
+                            IdeaSoft › Blog sayfaları
+                          </Link>{' '}
+                          üzerinde varsayılan kategori tanımlıysa bu alan boş bırakılabilir. Aksi halde buraya sayısal kategori{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">id</code> girin (BlogCategory LIST).
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-ideasoft_blog_id_column">Eski tabloda IdeaSoft blog ID sütunu</Label>
+                        <Input
+                          id="okm-ideasoft_blog_id_column"
+                          placeholder="ör. ideasoft_blog_id"
+                          value={okmSettings.ideasoft_blog_id_column ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, ideasoft_blog_id_column: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          OKM MySQL’de daha önce yazı başına IdeaSoft blog kimliği tutuluyorsa sütun adını girin; OKM › Blog sayfasından{' '}
+                          <strong>D1’e eski eşlemeleri aktar</strong> ile <code className="text-[11px] bg-muted px-1 rounded">okm_blog_ideasoft_sync</code>{' '}
+                          doldurulur (çift gönderim önlenir).
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-blog_image_base_url">Eski site kök URL (blog görselleri)</Label>
+                        <Input
+                          id="okm-blog_image_base_url"
+                          placeholder="https://eski-siteniz.com"
+                          value={okmSettings.blog_image_base_url ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, blog_image_base_url: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          İçerikteki <code className="text-[11px] bg-muted px-1 rounded">img src=&quot;/upload/...&quot;</code> gibi göreli yollar bu köke
+                          eklenir. Kapak için tam veya göreli görsel adresi çözülür; Worker görseli indirip IdeaSoft’a{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">image</code> veya{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">POST …/blog_images</code> ile gönderir.
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-blog_image_column">Kapak görseli sütunu (isteğe bağlı)</Label>
+                        <Input
+                          id="okm-blog_image_column"
+                          placeholder="Boş: image, resim, thumb, cover… otomatik"
+                          value={okmSettings.blog_image_column ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, blog_image_column: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          MySQL’de kapak URL’si veya yolu tutan sütun adı. OAuth’da gerekirse{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">blog_image_create</code> kapsamını ekleyin.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="border-t pt-6 space-y-4">
+                    <p className="text-sm font-medium text-foreground">Ürün tablosu (eski site listesi)</p>
+                    <p className="text-xs text-muted-foreground">
+                      OKM ›{' '}
+                      <Link className="underline font-medium text-foreground" to="/okm/products">
+                        Ürünler (eski site)
+                      </Link>{' '}
+                      sayfası bu tablodan okur. SEF sütunu boş bırakılırsa <code className="text-[11px] bg-muted px-1 rounded">sef</code>,{' '}
+                      <code className="text-[11px] bg-muted px-1 rounded">slug</code>, <code className="text-[11px] bg-muted px-1 rounded">seo_url</code>{' '}
+                      gibi yaygın adlar denenir. Tahmini ürün linki için yukarıdaki <strong>Eski site kök URL</strong> ile{' '}
+                      <strong>URL yol segmenti</strong> kullanılır (çoğu yapıda <code className="text-[11px] bg-muted px-1 rounded">urun</code>).
+                    </p>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-product-table-select">Ürün tablosu</Label>
+                        <select
+                          id="okm-product-table-select"
+                          aria-label="OKM ürün tablosu seçimi"
+                          className={okmMysqlSelectClass}
+                          value={okmSettings.product_table ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, product_table: e.target.value }))}
+                          disabled={!(okmSettings.database || '').trim() || okmLoadingTables}
+                        >
+                          <option value="">
+                            {okmLoadingTables ? 'Tablolar yükleniyor…' : '— İsteğe bağlı tablo seçin —'}
+                          </option>
+                          {(() => {
+                            const cur = (okmSettings.product_table || '').trim()
+                            const list = [...okmTables]
+                            if (cur && !list.includes(cur)) list.unshift(cur)
+                            return list.map((t) => (
+                              <option key={`p-${t}`} value={t}>
+                                {t}
+                              </option>
+                            ))
+                          })()}
+                        </select>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-product_order_column">Ürün sıralama sütunu</Label>
+                        <Input
+                          id="okm-product_order_column"
+                          placeholder="id"
+                          value={okmSettings.product_order_column ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, product_order_column: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Liste <code className="text-[11px] bg-muted px-1 rounded">ORDER BY … DESC</code> ile sıralanır (ör.{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">id</code>,{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">updated_at</code>).
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-product_sef_column">SEF / adres sütunu (isteğe bağlı)</Label>
+                        <Input
+                          id="okm-product_sef_column"
+                          placeholder="Boş: sef, slug, seo_url… otomatik"
+                          value={okmSettings.product_sef_column ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, product_sef_column: e.target.value }))}
+                        />
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="okm-product_url_path_segment">Ürün URL yol segmenti (tahmini link)</Label>
+                        <Input
+                          id="okm-product_url_path_segment"
+                          placeholder="urun"
+                          value={okmSettings.product_url_path_segment ?? ''}
+                          onChange={(e) => setOkmSettings((s) => ({ ...s, product_url_path_segment: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Eski sitede ürün adresi <code className="text-[11px] bg-muted px-1 rounded">…/urun/ornek-sef</code> ise{' '}
+                          <code className="text-[11px] bg-muted px-1 rounded">urun</code> yazın; kök URL yukarıdaki eski site adresidir.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>

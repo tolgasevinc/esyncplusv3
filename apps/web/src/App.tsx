@@ -47,6 +47,9 @@ const SettingsFileManagerPage = lazy(() => import('@/pages/settings/SettingsFile
 const SettingsExchangeRatesPage = lazy(() => import('@/pages/settings/SettingsExchangeRatesPage').then((m) => ({ default: m.SettingsExchangeRatesPage })))
 const SettingsMarketplacePage = lazy(() => import('@/pages/settings/SettingsMarketplacePage').then((m) => ({ default: m.SettingsMarketplacePage })))
 const OpenCartPage = lazy(() => import('@/pages/opencart/OpenCartPage').then((m) => ({ default: m.OpenCartPage })))
+const OkmPage = lazy(() => import('@/pages/okm/OkmPage').then((m) => ({ default: m.OkmPage })))
+const OkmBlogPostsPage = lazy(() => import('@/pages/okm/OkmBlogPostsPage').then((m) => ({ default: m.OkmBlogPostsPage })))
+const OkmProductsPage = lazy(() => import('@/pages/okm/OkmProductsPage').then((m) => ({ default: m.OkmProductsPage })))
 const SalesDashboardPage = lazy(() => import('@/pages/SalesDashboardPage').then((m) => ({ default: m.SalesDashboardPage })))
 const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPage').then((m) => ({ default: m.ParasutProductsPage })))
 const ParasutCategoriesPage = lazy(() => import('@/pages/parasut/ParasutCategoriesPage').then((m) => ({ default: m.ParasutCategoriesPage })))
@@ -76,7 +79,17 @@ const IdeasoftProductLabelsPage = lazy(() =>
 const IdeasoftProductExtraFieldsPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftProductExtraFieldsPage').then((m) => ({ default: m.IdeasoftProductExtraFieldsPage }))
 )
+const IdeasoftBlogPagesPage = lazy(() =>
+  import('@/pages/ideasoft/IdeasoftBlogPagesPage').then((m) => ({ default: m.IdeasoftBlogPagesPage }))
+)
 const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
+const TrendyolPage = lazy(() => import('@/pages/trendyol/TrendyolPage').then((m) => ({ default: m.TrendyolPage })))
+const TrendyolCategoriesPage = lazy(() =>
+  import('@/pages/trendyol/TrendyolCategoriesPage').then((m) => ({ default: m.TrendyolCategoriesPage }))
+)
+const TrendyolProductsPage = lazy(() =>
+  import('@/pages/trendyol/TrendyolProductsPage').then((m) => ({ default: m.TrendyolProductsPage }))
+)
 function App() {
   return (
     <>
@@ -115,6 +128,7 @@ function App() {
         <Route path="/ideasoft/urun-resimleri" element={<IdeasoftProductImagesPage />} />
         <Route path="/ideasoft/urun-etiketleri" element={<IdeasoftProductLabelsPage />} />
         <Route path="/ideasoft/ekstra-ozellikler" element={<IdeasoftProductExtraFieldsPage />} />
+        <Route path="/ideasoft/blog" element={<IdeasoftBlogPagesPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />
@@ -161,7 +175,13 @@ function App() {
         <Route path="/urunler" element={<Navigate to="/products" replace />} />
         <Route path="/e-documents" element={<EDocumentsPage />} />
         <Route path="/opencart" element={<OpenCartPage />} />
+        <Route path="/okm" element={<OkmPage />} />
+        <Route path="/okm/blog" element={<OkmBlogPostsPage />} />
+        <Route path="/okm/products" element={<OkmProductsPage />} />
         <Route path="/satis" element={<SalesDashboardPage />} />
+        <Route path="/trendyol" element={<TrendyolPage />} />
+        <Route path="/trendyol/urunler" element={<TrendyolProductsPage />} />
+        <Route path="/trendyol/kategoriler" element={<TrendyolCategoriesPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </Suspense>

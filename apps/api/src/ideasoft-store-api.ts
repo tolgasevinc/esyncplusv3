@@ -414,3 +414,60 @@ export async function ideasoftDoAdminRequestWithRefresh(
 ): Promise<Response> {
   return ideasoftDoRequestWithRefresh(db, pathAndQuery, init, ideasoftAdminApiRequest, auth);
 }
+
+/** app_settings `ideasoft`: OKM (veya diğer) kaynaklardan IdeaSoft Admin API `POST/PUT /blogs` gövdesi için varsayılanlar */
+export const IDEASOFT_BLOG_PUSH_KEYS = {
+  categoryId: 'BLOG_PUSH_CATEGORY_ID',
+  tagsJson: 'BLOG_PUSH_TAGS_JSON',
+  status: 'BLOG_PUSH_STATUS',
+  blockVisibility: 'BLOG_PUSH_BLOCK_VISIBILITY',
+} as const;
+
+export type IdeasoftBlogPushTagItem = { id: number; title: string };
+
+/** Blog POST/PUT `tags: [{ id, title }]` — JSON dizi; boş veya hatalı ise [] */
+export function parseIdeasoftBlogTagsJson(raw: string): IdeasoftBlogPushTagItem[] {
+  const s = (raw ?? '').trim();
+  if (!s || s === '[]') return [];
+  let arr: unknown;
+  try {
+    arr = JSON.parse(s);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: IdeasoftBlogPushTagItem[] = [];
+  for (const el of arr) {
+    if (!el || typeof el !== 'object') continue;
+    const o = el as Record<string, unknown>;
+    const id = typeof o.id === 'number' && Number.isFinite(o.id) ? Math.trunc(o.id) : parseInt(String(o.id ?? ''), 10);
+    if (!Number.isFinite(id) || id <= 0) continue;
+    const titleRaw =
+      typeof o.title === 'string' && o.title.trim()
+        ? o.title.trim()
+        : typeof o.name === 'string' && o.name.trim()
+          ? o.name.trim()
+          : `Etiket ${id}`;
+    out.push({ id, title: titleRaw.slice(0, 255) });
+  }
+  return out;
+}
+
+export function parseIdeasoftBlogPushFromSettings(settings: Record<string, string>): {
+  categoryId: number | null;
+  tags: IdeasoftBlogPushTagItem[];
+  status: number;
+  blockVisibility: number;
+} {
+  const catRaw = (settings[IDEASOFT_BLOG_PUSH_KEYS.categoryId] ?? '').trim();
+  const cat = parseInt(catRaw, 10);
+  const tags = parseIdeasoftBlogTagsJson(settings[IDEASOFT_BLOG_PUSH_KEYS.tagsJson] ?? '');
+  const st = parseInt((settings[IDEASOFT_BLOG_PUSH_KEYS.status] ?? '1').trim(), 10);
+  const bv = parseInt((settings[IDEASOFT_BLOG_PUSH_KEYS.blockVisibility] ?? '1').trim(), 10);
+  return {
+    categoryId: Number.isFinite(cat) && cat > 0 ? cat : null,
+    tags,
+    status: Number.isFinite(st) ? st : 1,
+    blockVisibility: Number.isFinite(bv) ? bv : 1,
+  };
+}

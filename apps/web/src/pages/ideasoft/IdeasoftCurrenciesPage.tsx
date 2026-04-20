@@ -20,7 +20,7 @@ import { toastSuccess, toastError } from '@/lib/toast'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-/** Store API Currency (GET/PUT gövdesi — dökümanla uyumlu) */
+/** Admin API Currency — GET /admin-api/currencies, GET/PUT /admin-api/currencies/:id (Bearer) */
 export interface IdeasoftCurrency {
   id: number
   label: string
@@ -32,7 +32,8 @@ export interface IdeasoftCurrency {
   permissionStatus: number
   isPrimary: number
   isEffective: number
-  isExtra: number
+  /** Bazı yanıtlarda olmayabilir */
+  isExtra?: number
 }
 
 export type IdeasoftStatusFilter = 'all' | 'active' | 'inactive'
@@ -45,22 +46,47 @@ const listDefaults = {
   statusFilter: 'active' as IdeasoftStatusFilter,
 }
 
+function normalizeCurrencyRow(raw: Record<string, unknown>): IdeasoftCurrency {
+  const id = typeof raw.id === 'number' ? raw.id : parseInt(String(raw.id ?? ''), 10)
+  return {
+    id: Number.isFinite(id) ? id : 0,
+    label: typeof raw.label === 'string' ? raw.label : '',
+    abbr: typeof raw.abbr === 'string' ? raw.abbr : '',
+    buyingPrice: Number(raw.buyingPrice) || 0,
+    sellingPrice: Number(raw.sellingPrice) || 0,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
+    status: Number(raw.status) || 0,
+    permissionStatus: Number(raw.permissionStatus) || 0,
+    isPrimary: Number(raw.isPrimary) || 0,
+    isEffective: Number(raw.isEffective) || 0,
+    isExtra: raw.isExtra !== undefined ? Number(raw.isExtra) || 0 : undefined,
+  }
+}
+
 function extractCurrenciesList(json: unknown): { items: IdeasoftCurrency[]; total: number } {
   if (Array.isArray(json)) {
-    return { items: json as IdeasoftCurrency[], total: json.length }
+    const items = json.map((x) =>
+      x && typeof x === 'object' ? normalizeCurrencyRow(x as Record<string, unknown>) : emptyCurrency()
+    )
+    return { items, total: items.length }
   }
   if (json && typeof json === 'object') {
     const o = json as Record<string, unknown>
     const hydra = o['hydra:member']
     if (Array.isArray(hydra)) {
+      const items = hydra.map((x) =>
+        x && typeof x === 'object' ? normalizeCurrencyRow(x as Record<string, unknown>) : emptyCurrency()
+      )
       const total =
-        typeof o['hydra:totalItems'] === 'number' ? (o['hydra:totalItems'] as number) : hydra.length
-      return { items: hydra as IdeasoftCurrency[], total }
+        typeof o['hydra:totalItems'] === 'number' ? (o['hydra:totalItems'] as number) : items.length
+      return { items, total }
     }
     if (Array.isArray(o.data)) {
-      const d = o.data as IdeasoftCurrency[]
-      const total = typeof o.total === 'number' ? o.total : d.length
-      return { items: d, total }
+      const items = (o.data as unknown[]).map((x) =>
+        x && typeof x === 'object' ? normalizeCurrencyRow(x as Record<string, unknown>) : emptyCurrency()
+      )
+      const total = typeof o.total === 'number' ? o.total : items.length
+      return { items, total }
     }
   }
   return { items: [], total: 0 }
@@ -77,7 +103,7 @@ function emptyCurrency(): IdeasoftCurrency {
     permissionStatus: 1,
     isPrimary: 0,
     isEffective: 0,
-    isExtra: 0,
+    isExtra: undefined,
   }
 }
 
@@ -153,7 +179,7 @@ export function IdeasoftCurrenciesPage() {
       } else if (statusFilter === 'inactive') {
         params.set('status', '0')
       }
-      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies?${params}`)
+      const res = await fetch(`${API_URL}/api/ideasoft/admin-api/currencies?${params}`)
       const data = await parseJsonResponse<unknown>(res)
       if (!res.ok) {
         setListError(formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) || 'Liste alınamadı')
@@ -325,22 +351,25 @@ export function IdeasoftCurrenciesPage() {
     setLoadDetailPending(true)
     setForm(emptyCurrency())
     try {
-      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${row.id}`)
+      const res = await fetch(`${API_URL}/api/ideasoft/admin-api/currencies/${row.id}`)
       const data = await parseJsonResponse<IdeasoftCurrency & { error?: string; hint?: string }>(res)
       if (!res.ok) throw new Error(formatIdeasoftProxyErrorForUi(data) || 'Kayıt yüklenemedi')
-      setForm({
-        id: data.id,
-        label: data.label ?? '',
-        buyingPrice: Number(data.buyingPrice) || 0,
-        sellingPrice: Number(data.sellingPrice) || 0,
-        abbr: data.abbr ?? '',
-        updatedAt: data.updatedAt,
-        status: data.status ?? 0,
-        permissionStatus: data.permissionStatus ?? 0,
-        isPrimary: data.isPrimary ?? 0,
-        isEffective: data.isEffective ?? 0,
-        isExtra: data.isExtra ?? 0,
-      })
+      setForm(
+        normalizeCurrencyRow({
+          ...data,
+          id: data.id,
+          label: data.label,
+          buyingPrice: data.buyingPrice,
+          sellingPrice: data.sellingPrice,
+          abbr: data.abbr,
+          updatedAt: data.updatedAt,
+          status: data.status,
+          permissionStatus: data.permissionStatus,
+          isPrimary: data.isPrimary,
+          isEffective: data.isEffective,
+          isExtra: data.isExtra,
+        } as Record<string, unknown>)
+      )
     } catch (err) {
       toastError('Hata', err instanceof Error ? err.message : 'Yüklenemedi')
       setModalOpen(false)
@@ -375,7 +404,7 @@ export function IdeasoftCurrenciesPage() {
       }
       if (form.updatedAt) payload.updatedAt = form.updatedAt
 
-      const res = await fetch(`${API_URL}/api/ideasoft/store-api/currencies/${editId}`, {
+      const res = await fetch(`${API_URL}/api/ideasoft/admin-api/currencies/${editId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -395,7 +424,7 @@ export function IdeasoftCurrenciesPage() {
   return (
     <PageLayout
       title="IdeaSoft — Para birimleri"
-      description="Store API kur listesi; master eşleştirme Parametreler › Para birimleri (product_currencies)."
+      description="Admin API GET /admin-api/currencies; master eşleştirme Parametreler › Para birimleri (product_currencies)."
       backTo="/ideasoft"
       contentRef={contentRef}
       contentOverflow="hidden"

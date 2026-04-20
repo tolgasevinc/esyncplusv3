@@ -8,6 +8,7 @@ import {
   ideasoftDoStoreRequestWithRefresh,
   ideasoftProxyErrorParts,
   loadIdeasoftIntegrationSettings,
+  parseIdeasoftBlogPushFromSettings,
 } from './ideasoft-store-api';
 
 /** Upstream Response.status → Hono c.json için uygun literal (dar union) */
@@ -1130,8 +1131,26 @@ app.get('/api/products', async (c) => {
       params.push(Number(filter_brand_id));
     }
     if (filter_category_id) {
-      where += ' AND p.category_id = ?';
-      params.push(Number(filter_category_id));
+      const categoryRootId = Number(filter_category_id);
+      const { results: categoryTreeRows } = await c.env.DB.prepare(
+        `WITH RECURSIVE cat_tree(id) AS (
+           SELECT id FROM product_categories WHERE id = ? AND is_deleted = 0
+           UNION ALL
+           SELECT c.id FROM product_categories c
+           INNER JOIN cat_tree t ON c.category_id = t.id
+           WHERE c.is_deleted = 0
+         )
+         SELECT id FROM cat_tree`
+      )
+        .bind(categoryRootId)
+        .all();
+      const categoryIds = (categoryTreeRows as { id: number }[]).map((r) => r.id);
+      if (categoryIds.length > 0) {
+        where += ` AND p.category_id IN (${categoryIds.map(() => '?').join(',')})`;
+        params.push(...categoryIds);
+      } else {
+        where += ' AND 1=0';
+      }
     }
     if (filter_group_id) {
       const groupId = Number(filter_group_id);
@@ -1743,8 +1762,10 @@ async function runSingleIdeasoftTransfer(
   const row = await db
       .prepare(
         `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.status, p.brand_id, p.category_id, p.currency_id, p.unit_id, p.image,
+         pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id,
          pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
          FROM products p
+         LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0 AND (pp.status = 1 OR pp.status IS NULL)
          LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
          WHERE p.id = ? AND p.is_deleted = 0
          LIMIT 1`
@@ -1763,6 +1784,8 @@ async function runSingleIdeasoftTransfer(
         currency_id: number | null;
         unit_id: number | null;
         image: string | null;
+        ecommerce_price: number | null;
+        ecommerce_currency_id: number | null;
         ecommerce_name: string | null;
         main_description: string | null;
         seo_slug: string | null;
@@ -1774,6 +1797,11 @@ async function runSingleIdeasoftTransfer(
 
   const sku = (row.sku ?? '').trim();
   if (!sku) return { ok: false, error: 'IdeaSoft aktarımı için ana ürün SKU dolu olmalıdır' };
+
+  /** Admin API: `price1` = master ürün genel fiyatı (`products.price`); para birimi = `products.currency_id` eşlemesi. */
+  const transferPrice = Number.isFinite(Number(row.price)) ? Math.max(0, Number(row.price)) : 0;
+  const masterCurrencyIdForIdeasoft =
+    row.currency_id != null && row.currency_id > 0 ? row.currency_id : null;
 
   try {
     let isBrandId: number | undefined;
@@ -1787,8 +1815,8 @@ async function runSingleIdeasoftTransfer(
       if (isC && /^\d+$/.test(isC)) isCatId = parseInt(isC, 10);
     }
     let isCurId: number | undefined;
-    if (row.currency_id != null && row.currency_id > 0) {
-      const isCr = invertIdeasoftIdMap(curMap, String(row.currency_id));
+    if (masterCurrencyIdForIdeasoft != null) {
+      const isCr = invertIdeasoftIdMap(curMap, String(masterCurrencyIdForIdeasoft));
       if (isCr && /^\d+$/.test(isCr)) isCurId = parseInt(isCr, 10);
     }
 
@@ -1954,7 +1982,7 @@ async function runSingleIdeasoftTransfer(
       fullName: displayName,
       sku,
       barcode: (row.barcode ?? '').trim(),
-      price1: Number(row.price) || 0,
+      price1: transferPrice,
       stockAmount: Number(row.quantity) || 0,
       status: row.status ? 1 : 0,
       stockTypeLabel,
@@ -2002,7 +2030,10 @@ async function runSingleIdeasoftTransfer(
         if (isCurId != null) partial.currency = { id: isCurId };
         if (isCatId != null) partial.categories = [{ id: isCatId }];
       }
-      if (sync.price) partial.price1 = Number(row.price) || 0;
+      if (sync.price) {
+        partial.price1 = transferPrice;
+        if (isCurId != null) partial.currency = { id: isCurId };
+      }
       if (sync.images && imageSlots.length > 0) partial.images = imageSlots;
       if (sync.seo) {
         Object.assign(partial, {
@@ -2205,6 +2236,8 @@ app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
       sync_price?: boolean;
       sync_images?: boolean;
       sync_seo?: boolean;
+      generate_seo_ai?: boolean;
+      seo_ai_user_rules?: string;
       ideasoft_stock_amount?: number | string;
       ideasoft_discount_percent?: number | string;
       ideasoft_discount_type?: number | string;
@@ -2215,14 +2248,28 @@ app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
     if (ids.length === 0) return c.json({ error: 'En az bir ürün ID gerekli' }, 400);
     if (ids.length > 200) return c.json({ error: 'Tek seferde en fazla 200 ürün' }, 400);
 
+    const generateSeoAi = !!body.generate_seo_ai;
+    const seoAiUserRules = (body.seo_ai_user_rules ?? '').trim();
+
     const partialSync: IdeasoftTransferPartialSyncBody = {
       sync_general: body.sync_general,
       sync_price: body.sync_price,
       sync_images: body.sync_images,
-      sync_seo: body.sync_seo,
+      sync_seo: !!(body.sync_seo || generateSeoAi),
     };
 
     const ideasoftTransferOverrides = parseIdeasoftTransferFieldOverrides(body);
+
+    let apiKeyForBulkSeo: string | null = null;
+    if (generateSeoAi) {
+      apiKeyForBulkSeo = await getOpenAiApiKey(c);
+      if (!apiKeyForBulkSeo) {
+        return c.json(
+          { error: 'SEO metinleri için OpenAI API anahtarı gerekli. Ayarlar › Entegrasyonlar üzerinden tanımlayın.' },
+          400,
+        );
+      }
+    }
 
     const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
     const auth = getIdeasoftStoreAuth(settings);
@@ -2253,6 +2300,30 @@ app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
     }[] = [];
 
     for (const masterId of ids) {
+      if (generateSeoAi && apiKeyForBulkSeo) {
+        try {
+          const ctx = await fetchProductBulkAiSeoContext(c.env.DB, masterId);
+          if (!ctx || !ctx.name.trim()) {
+            results.push({ product_id: masterId, ok: false, error: 'Ürün bulunamadı veya ürün adı boş (SEO AI atlandı)' });
+            continue;
+          }
+          const aiSeo = await callOpenAiForProductSeoText(
+            {
+              productName: ctx.name.trim(),
+              brandName: ctx.brand_name,
+              categoryPath: ctx.category_path,
+              userRules: seoAiUserRules,
+            },
+            apiKeyForBulkSeo,
+          );
+          await persistBulkAiSeoToProductDescriptions(c.env.DB, masterId, aiSeo);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : 'OpenAI SEO hatası';
+          results.push({ product_id: masterId, ok: false, error: msg });
+          continue;
+        }
+      }
+
       const r = await runSingleIdeasoftTransfer(
         { DB: c.env.DB, STORAGE: c.env.STORAGE },
         settings,
@@ -2299,6 +2370,68 @@ app.post('/api/products/bulk-ideasoft-transfer', async (c) => {
   }
 });
 
+/** Seçili master ürünlerde yalnızca `product_descriptions` SEO alanlarını OpenAI ile üretir (IdeaSoft yok). */
+app.post('/api/products/bulk-generate-seo-ai', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ ids?: number[]; seo_ai_user_rules?: string }>().catch(() => ({}));
+    const ids = Array.isArray(body.ids)
+      ? body.ids.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0)
+      : [];
+    if (ids.length === 0) return c.json({ error: 'En az bir ürün ID gerekli' }, 400);
+    if (ids.length > 200) return c.json({ error: 'Tek seferde en fazla 200 ürün' }, 400);
+
+    const apiKey = await getOpenAiApiKey(c);
+    if (!apiKey) {
+      return c.json(
+        { error: 'OpenAI API anahtarı gerekli. Ayarlar › Entegrasyonlar üzerinden tanımlayın.' },
+        400,
+      );
+    }
+    const seoAiUserRules = (body.seo_ai_user_rules ?? '').trim();
+
+    const results: { product_id: number; ok: boolean; error?: string }[] = [];
+
+    for (const masterId of ids) {
+      try {
+        const ctx = await fetchProductBulkAiSeoContext(c.env.DB, masterId);
+        if (!ctx || !ctx.name.trim()) {
+          results.push({ product_id: masterId, ok: false, error: 'Ürün bulunamadı veya ürün adı boş' });
+          continue;
+        }
+        const aiSeo = await callOpenAiForProductSeoText(
+          {
+            productName: ctx.name.trim(),
+            brandName: ctx.brand_name,
+            categoryPath: ctx.category_path,
+            userRules: seoAiUserRules,
+          },
+          apiKey,
+        );
+        await persistBulkAiSeoToProductDescriptions(c.env.DB, masterId, aiSeo);
+        results.push({ product_id: masterId, ok: true });
+      } catch (e: unknown) {
+        results.push({
+          product_id: masterId,
+          ok: false,
+          error: e instanceof Error ? e.message : 'OpenAI veya kayıt hatası',
+        });
+      }
+    }
+
+    const succeeded = results.filter((x) => x.ok).length;
+    const failed = results.length - succeeded;
+    return c.json({
+      ok: failed === 0,
+      succeeded,
+      failed,
+      results,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Toplu SEO AI hatası' }, 500);
+  }
+});
+
 app.post('/api/products', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -2306,6 +2439,8 @@ app.post('/api/products', async (c) => {
       name: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
       type_id?: number; product_item_group_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
       ecommerce_price?: number; ecommerce_currency_id?: number; ecommerce_enabled?: boolean;
+      ecommerce_discount_type?: number;
+      ecommerce_discount_value?: number;
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
@@ -2316,9 +2451,14 @@ app.post('/api/products', async (c) => {
     const sort_order = body.sort_order ?? 0;
     const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
     const ecommerce_enabled = body.ecommerce_enabled !== undefined ? (body.ecommerce_enabled ? 1 : 0) : 1;
+    const ecommerce_discount_type = body.ecommerce_discount_type === 1 ? 1 : 0;
+    const ecommerce_discount_value =
+      body.ecommerce_discount_value !== undefined && body.ecommerce_discount_value !== null
+        ? Number(body.ecommerce_discount_value) || 0
+        : 0;
     await c.env.DB.prepare(
-      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, product_item_group_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status, ecommerce_enabled)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO products (name, sku, barcode, brand_id, category_id, type_id, product_item_group_id, unit_id, currency_id, price, quantity, image, tax_rate, supplier_code, gtip_code, sort_order, status, ecommerce_enabled, ecommerce_discount_type, ecommerce_discount_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       name,
       body.sku?.trim() || null,
@@ -2337,7 +2477,9 @@ app.post('/api/products', async (c) => {
       body.gtip_code?.trim() || null,
       sort_order,
       status,
-      ecommerce_enabled
+      ecommerce_enabled,
+      ecommerce_discount_type,
+      ecommerce_discount_value
     ).run();
     const productId = (await c.env.DB.prepare(`SELECT last_insert_rowid() as id`).first<{ id: number }>())?.id ?? 0;
     if (productId && body.prices && Array.isArray(body.prices) && body.prices.length > 0) {
@@ -2411,6 +2553,8 @@ app.put('/api/products/:id', async (c) => {
       name?: string; sku?: string; barcode?: string; brand_id?: number; category_id?: number;
       type_id?: number; product_item_group_id?: number; unit_id?: number; currency_id?: number; price?: number; quantity?: number;
       ecommerce_price?: number; ecommerce_currency_id?: number; ecommerce_enabled?: boolean;
+      ecommerce_discount_type?: number;
+      ecommerce_discount_value?: number;
       prices?: { price_type_id: number; price?: number; currency_id?: number | null; status?: number }[];
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
@@ -2438,7 +2582,27 @@ app.put('/api/products/:id', async (c) => {
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
     if (body.ecommerce_enabled !== undefined) { updates.push('ecommerce_enabled = ?'); values.push(body.ecommerce_enabled ? 1 : 0); }
-    if (updates.length === 0 && !(body.ecommerce_name !== undefined || body.main_description !== undefined || body.seo_slug !== undefined || body.seo_title !== undefined || body.seo_description !== undefined || body.seo_keywords !== undefined)) return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    if (body.ecommerce_discount_type !== undefined) {
+      updates.push('ecommerce_discount_type = ?');
+      values.push(body.ecommerce_discount_type === 1 ? 1 : 0);
+    }
+    if (body.ecommerce_discount_value !== undefined) {
+      updates.push('ecommerce_discount_value = ?');
+      values.push(Number(body.ecommerce_discount_value) || 0);
+    }
+    if (
+      updates.length === 0 &&
+      !(
+        body.ecommerce_name !== undefined ||
+        body.main_description !== undefined ||
+        body.seo_slug !== undefined ||
+        body.seo_title !== undefined ||
+        body.seo_description !== undefined ||
+        body.seo_keywords !== undefined
+      )
+    ) {
+      return c.json({ error: 'Güncellenecek alan yok' }, 400);
+    }
     if (updates.length > 0) {
       updates.push("updated_at = datetime('now')");
       await c.env.DB.prepare(`UPDATE products SET ${updates.join(', ')} WHERE id = ?`).bind(...values, id).run();
@@ -2818,7 +2982,7 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : 'Yayınlama başarısız' }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -2913,6 +3077,67 @@ async function updateProductDescriptionsWithSeoKeywordsFallback(
       .bind(...newV, productId)
       .run();
   }
+}
+
+async function fetchProductBulkAiSeoContext(
+  db: D1Database,
+  productId: number,
+): Promise<{ name: string; brand_name: string; category_path: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT TRIM(COALESCE(p.name, '')) AS name,
+        TRIM(COALESCE(b.name, '')) AS brand_name,
+        TRIM(COALESCE(grp.name, '')) AS group_name,
+        TRIM(COALESCE(cat.name, '')) AS category_name,
+        TRIM(COALESCE(CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.name END, '')) AS subcategory_name
+       FROM products p
+       LEFT JOIN product_brands b ON p.brand_id = b.id AND b.is_deleted = 0
+       LEFT JOIN product_categories sub ON p.category_id = sub.id AND sub.is_deleted = 0
+       LEFT JOIN product_categories cat ON cat.id = COALESCE(sub.category_id, CASE WHEN sub.group_id IS NOT NULL AND sub.group_id > 0 THEN sub.id END) AND cat.is_deleted = 0
+       LEFT JOIN product_categories grp ON grp.id = COALESCE(cat.group_id, sub.group_id, sub.id) AND grp.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0
+       LIMIT 1`,
+    )
+    .bind(productId)
+    .first<{
+      name: string;
+      brand_name: string;
+      group_name: string;
+      category_name: string;
+      subcategory_name: string;
+    }>();
+  if (!row) return null;
+  const pathParts = [row.group_name, row.category_name, row.subcategory_name]
+    .map((x) => (x ?? '').trim())
+    .filter(Boolean);
+  return {
+    name: row.name ?? '',
+    brand_name: row.brand_name ?? '',
+    category_path: pathParts.join(' › '),
+  };
+}
+
+/** Toplu SEO AI: yalnızca SEO sütunlarını günceller veya satır oluşturur. */
+async function persistBulkAiSeoToProductDescriptions(
+  db: D1Database,
+  productId: number,
+  seo: { seo_slug: string; seo_title: string; seo_description: string; seo_keywords: string },
+): Promise<void> {
+  const existing = await db.prepare(`SELECT id FROM product_descriptions WHERE product_id = ?`).bind(productId).first<{ id: number }>();
+  const slug = seo.seo_slug.trim() || null;
+  const title = seo.seo_title.trim() || null;
+  const desc = seo.seo_description.trim() || null;
+  const kw = seo.seo_keywords.trim() || null;
+  if (existing) {
+    await updateProductDescriptionsWithSeoKeywordsFallback(
+      db,
+      ['seo_slug = ?', 'seo_title = ?', 'seo_description = ?', 'seo_keywords = ?'],
+      [slug, title, desc, kw],
+      productId,
+    );
+    return;
+  }
+  await insertProductDescriptionsRowWithSeoKeywordsFallback(db, productId, null, null, slug, title, desc, kw);
 }
 
 
@@ -6775,8 +7000,7 @@ app.post('/api/mysql/test', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ error: msg, ok: false }, 500);
+    return c.json({ error: formatMysqlOutboundError(err), ok: false }, 500);
   }
 });
 
@@ -6807,6 +7031,41 @@ async function createMysqlConnection(config: Record<string, string>) {
   } as Parameters<typeof createConnection>[0]);
 }
 
+/** Veritabanı seçmeden sunucuya bağlanır (`SHOW DATABASES` vb.) */
+async function createMysqlServerConnection(params: {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+}) {
+  return createConnection({
+    host: params.host.trim(),
+    port: params.port,
+    user: params.user.trim(),
+    password: params.password ?? '',
+    charset: 'utf8mb4',
+    connectTimeout: 10000,
+    enableKeepAlive: false,
+    disableEval: true,
+  } as Parameters<typeof createConnection>[0]);
+}
+
+/** Edge/wrangler: TCP MySQL bağlantısı kurulamazsa anlamlı Türkçe ipucu ekler */
+function formatMysqlOutboundError(err: unknown): string {
+  const base = err instanceof Error ? err.message : String(err);
+  const lower = base.toLowerCase();
+  const connectivity =
+    lower.includes('proxy request failed') ||
+    lower.includes('cannot connect to the specified address') ||
+    lower.includes('econnrefused') ||
+    lower.includes('etimedout') ||
+    lower.includes('enotfound') ||
+    lower.includes('getaddrinfo') ||
+    lower.includes('connect econnrefused');
+  if (!connectivity) return base;
+  return `${base} — Bu ortamdan MySQL sunucusuna TCP ile bağlanılamıyor. Ayarlardaki host: localhost veya 127.0.0.1 kullanmayın (Cloudflare Worker internet üzerinden çalışır). Gerçek sunucu hostname/IP ve açık MySQL portu gerekir. Yerel veritabanı için Cloudflare Hyperdrive, SSH tüneli veya API'yi Node ortamında çalıştırmayı düşünün.`;
+}
+
 app.get('/api/mysql/tables', async (c) => {
   try {
     const config = await getMysqlConfig(c);
@@ -6821,7 +7080,7 @@ app.get('/api/mysql/tables', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -6841,7 +7100,7 @@ app.get('/api/mysql/columns/:table', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -6860,6 +7119,1387 @@ app.get('/api/mysql/table-data/:table', async (c) => {
     } finally {
       await connection.end();
     }
+  } catch (err: unknown) {
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
+// ========== OKM MySQL (blog vb.) ==========
+/** MySQL şema adı: yalnızca güvenli karakterler */
+function sanitizeMysqlSchemaName(raw: string): string | null {
+  const t = (raw ?? '').trim().replace(/[^a-zA-Z0-9_]/g, '');
+  return t || null;
+}
+
+/** `okm_mysql` kategorisindeki tüm anahtarlar (host, port, database, user, password, blog_table, …) */
+async function loadOkmMysqlSettingsMap(c: { env: Bindings }): Promise<Record<string, string>> {
+  if (!c.env.DB) return {};
+  const { results } = await c.env.DB.prepare(
+    `SELECT key, value FROM app_settings WHERE category = 'okm_mysql' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`
+  ).all();
+  const okm: Record<string, string> = {};
+  for (const r of results as { key: string; value: string | null }[]) {
+    if (r.key) okm[r.key] = r.value ?? '';
+  }
+  return okm;
+}
+
+/** İstek gövdesi + kayıtlı `okm_mysql` ile bağlantı kimlik bilgisi; yoksa null (genel mysql denenecek) */
+async function resolveOkmMysqlCredentials(
+  c: { env: Bindings },
+  body: {
+    host?: string;
+    server?: string;
+    port?: number | string;
+    user?: string;
+    password?: string;
+  },
+): Promise<{ host: string; port: number; user: string; password: string } | null> {
+  const okm = await loadOkmMysqlSettingsMap(c);
+  const host = (body.host || body.server || '').trim() || (okm.host || okm.server || '').trim();
+  const user = (body.user || '').trim() || (okm.user || '').trim();
+  if (!host || !user) return null;
+  const portRaw = body.port ?? okm.port;
+  const portNum =
+    typeof portRaw === 'number' && Number.isFinite(portRaw)
+      ? portRaw
+      : parseInt(String(portRaw || '3306'), 10) || 3306;
+  let password = okm.password ?? '';
+  if (body.password !== undefined && body.password !== null && String(body.password) !== '') {
+    password = String(body.password);
+  }
+  return { host, port: portNum, user, password };
+}
+
+/**
+ * OKM listeleri için bağlantı: önce `okm_mysql` host/kullanıcı; yoksa Veri Aktarımı `mysql` kaydı (varsayılan DB ile).
+ */
+async function connectMysqlForOkmMetadata(
+  c: { env: Bindings },
+  body: { host?: string; server?: string; port?: number | string; user?: string; password?: string },
+): Promise<Awaited<ReturnType<typeof createConnection>> | null> {
+  const creds = await resolveOkmMysqlCredentials(c, body);
+  if (creds) {
+    return createMysqlServerConnection(creds);
+  }
+  const base = await getMysqlConfig(c);
+  if (!base) return null;
+  return createMysqlConnection(base);
+}
+
+/**
+ * OKM (eski site) MySQL bağlantısı:
+ * - `okm_mysql` içinde sunucu (host veya server), kullanıcı ve veritabanı doluysa bu bilgiler tek başına kullanılır.
+ * - Aksi halde geriye dönük: genel `mysql` ayarları + `okm_mysql.database` ile veritabanı adı override.
+ */
+async function getOkmMysqlConfig(c: { env: Bindings }): Promise<Record<string, string> | null> {
+  const okm = await loadOkmMysqlSettingsMap(c);
+  const host = (okm.host || okm.server || '').trim();
+  const user = (okm.user || '').trim();
+  const databaseDirect = (okm.database || '').trim();
+  const password = okm.password ?? '';
+  const portNum = parseInt(okm.port || '3306', 10) || 3306;
+
+  if (host && user && databaseDirect) {
+    return {
+      host,
+      port: String(portNum),
+      database: databaseDirect,
+      user,
+      password,
+    };
+  }
+
+  const base = await getMysqlConfig(c);
+  if (!base || !c.env.DB) return null;
+  const database = databaseDirect || (base.database ?? '').trim();
+  if (!database) return null;
+  return { ...base, database };
+}
+
+function sanitizeOkmSqlIdent(raw: string, fallback: string): string {
+  const t = (raw ?? '').trim().replace(/[^a-zA-Z0-9_]/g, '');
+  return t || fallback;
+}
+
+async function getOkmMysqlBlogSettings(c: { env: Bindings }): Promise<{
+  blog_table: string;
+  blog_order_column: string;
+  blog_source_id_column: string;
+  ideasoft_blog_category_id: number | null;
+  /** Eski OKM tablosunda IdeaSoft blog id tutan sütun adı (boş: içe aktarım yok) */
+  ideasoft_blog_id_column: string;
+  /** Eski site kök URL (https://…); göreli kapak / içerik img yolları için */
+  blog_image_base_url: string;
+  /** Kapak görseli sütunu (boş: image, resim, thumb vb. otomatik) */
+  blog_image_column: string;
+}> {
+  const okm = await loadOkmMysqlSettingsMap(c);
+  const rawCat = (okm.ideasoft_blog_category_id ?? '').trim();
+  const catNum = parseInt(rawCat, 10);
+  const legacyCol = sanitizeOkmSqlIdent(okm.ideasoft_blog_id_column ?? '', '');
+  const imgBase = (okm.blog_image_base_url ?? '').trim().replace(/\/+$/, '');
+  return {
+    blog_table: sanitizeOkmSqlIdent(okm.blog_table, 'blog'),
+    blog_order_column: sanitizeOkmSqlIdent(okm.blog_order_column, 'id'),
+    blog_source_id_column: sanitizeOkmSqlIdent(okm.blog_source_id_column, 'id'),
+    ideasoft_blog_category_id: Number.isFinite(catNum) && catNum > 0 ? catNum : null,
+    ideasoft_blog_id_column: legacyCol,
+    blog_image_base_url: imgBase,
+    blog_image_column: sanitizeOkmSqlIdent(okm.blog_image_column ?? '', ''),
+  };
+}
+
+const OKM_PRODUCT_SEF_COLUMN_CANDIDATES = [
+  'sef',
+  'sef_adres',
+  'seo_url',
+  'seo_slug',
+  'slug',
+  'friendly_url',
+  'url_key',
+  'link',
+  'keyword',
+  'seo_keyword',
+  'uri',
+  'permalink',
+  'url_friendly',
+  'urun_sef',
+] as const;
+
+const OKM_PRODUCT_TITLE_CANDIDATES = [
+  'name',
+  'baslik',
+  'title',
+  'urun_adi',
+  'urunadi',
+  'product_name',
+  'ad',
+  'isim',
+  'tanim',
+  'caption',
+] as const;
+
+function okmMysqlTypeIsStringish(typeRaw: string): boolean {
+  const t = (typeRaw ?? '').toLowerCase();
+  return t.includes('char') || t.includes('text') || t.includes('blob') || t === 'json';
+}
+
+async function getOkmMysqlProductSettings(c: { env: Bindings }): Promise<{
+  product_table: string;
+  product_order_column: string;
+  product_sef_column: string;
+  product_url_path_segment: string;
+  legacy_site_base_url: string;
+}> {
+  const okm = await loadOkmMysqlSettingsMap(c);
+  const pathSeg = (okm.product_url_path_segment ?? 'urun').trim().replace(/^\/+|\/+$/g, '');
+  const legacyBase = (okm.blog_image_base_url ?? '').trim().replace(/\/+$/, '');
+  return {
+    product_table: sanitizeOkmSqlIdent(okm.product_table, ''),
+    product_order_column: sanitizeOkmSqlIdent(okm.product_order_column, 'id'),
+    product_sef_column: sanitizeOkmSqlIdent(okm.product_sef_column ?? '', ''),
+    product_url_path_segment: pathSeg || 'urun',
+    legacy_site_base_url: legacyBase,
+  };
+}
+
+function resolveOkmProductSefColumnName(allColumnNames: string[], explicit: string): string | null {
+  const ex = (explicit ?? '').trim();
+  if (ex) {
+    const hit = allColumnNames.find((n) => n.toLowerCase() === ex.toLowerCase());
+    return hit ?? null;
+  }
+  const lower = new Map(allColumnNames.map((n) => [n.toLowerCase(), n] as const));
+  for (const cand of OKM_PRODUCT_SEF_COLUMN_CANDIDATES) {
+    const k = lower.get(cand);
+    if (k) return k;
+  }
+  return null;
+}
+
+function buildOkmLegacyProductUrl(
+  baseRaw: string,
+  pathSegment: string,
+  sefRaw: string | null | undefined,
+): string | null {
+  const s = sefRaw == null ? '' : String(sefRaw).trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  const base = (baseRaw ?? '').trim().replace(/\/+$/, '');
+  if (!base) return null;
+  const seg = (pathSegment ?? '').trim().replace(/^\/+|\/+$/g, '');
+  const path = seg ? `${base}/${seg}/${s}` : `${base}/${s}`;
+  return path;
+}
+
+/** Arama için güvenli sütun adları: şemadan + öncelikli adaylar */
+function pickOkmProductSearchColumnNames(
+  schemaCols: { Field: string; Type: string }[],
+  sefCol: string | null,
+): string[] {
+  const stringish = schemaCols.filter((c) => okmMysqlTypeIsStringish(c.Type)).map((c) => c.Field);
+  const nameSet = new Set(stringish);
+  const out: string[] = [];
+  const prefer = [
+    ...OKM_PRODUCT_TITLE_CANDIDATES,
+    ...OKM_PRODUCT_SEF_COLUMN_CANDIDATES,
+    'sku',
+    'stok',
+    'kod',
+    'model',
+    'barkod',
+    'barcode',
+    'stok_kodu',
+    'urun_kodu',
+  ];
+  if (sefCol && nameSet.has(sefCol)) {
+    out.push(sefCol);
+    nameSet.delete(sefCol);
+  }
+  for (const p of prefer) {
+    const hit = [...nameSet].find((n) => n.toLowerCase() === p);
+    if (hit) {
+      out.push(hit);
+      nameSet.delete(hit);
+    }
+  }
+  for (const n of stringish) {
+    if (out.length >= 18) break;
+    if (nameSet.has(n)) {
+      out.push(n);
+      nameSet.delete(n);
+    }
+  }
+  return [...new Set(out)];
+}
+
+function readPositiveIntFromOkmRow(row: Record<string, unknown>, columnName: string): number | null {
+  const col = (columnName ?? '').trim();
+  if (!col) return null;
+  const key = Object.keys(row).find((k) => k.toLowerCase() === col.toLowerCase()) ?? col;
+  const v = row[key];
+  if (v == null || v === '') return null;
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const n = Math.trunc(v);
+    return n > 0 ? n : null;
+  }
+  const n = parseInt(String(v).trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+type OkmBlogIdeasoftSyncRow = {
+  sync_status: string;
+  ideasoft_blog_id: number | null;
+  last_error: string | null;
+  last_synced_at: string | null;
+};
+
+async function loadOkmBlogIdeasoftSyncMap(
+  db: D1Database,
+  sourceTable: string,
+  sourceIds: string[],
+): Promise<Map<string, OkmBlogIdeasoftSyncRow>> {
+  const out = new Map<string, OkmBlogIdeasoftSyncRow>();
+  const ids = [...new Set(sourceIds.map((x) => String(x ?? '').trim()).filter(Boolean))];
+  if (ids.length === 0) return out;
+  const chunkSize = 80;
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(
+        `SELECT source_id, sync_status, ideasoft_blog_id, last_error, last_synced_at
+         FROM okm_blog_ideasoft_sync WHERE source_table = ? AND source_id IN (${placeholders})`,
+      )
+      .bind(sourceTable, ...chunk)
+      .all();
+    for (const r of results as {
+      source_id: string;
+      sync_status: string;
+      ideasoft_blog_id: number | null;
+      last_error: string | null;
+      last_synced_at: string | null;
+    }[]) {
+      if (!r.source_id) continue;
+      out.set(String(r.source_id), {
+        sync_status: r.sync_status || 'pending',
+        ideasoft_blog_id:
+          r.ideasoft_blog_id != null && Number.isFinite(Number(r.ideasoft_blog_id))
+            ? Number(r.ideasoft_blog_id)
+            : null,
+        last_error: r.last_error ?? null,
+        last_synced_at: r.last_synced_at ?? null,
+      });
+    }
+  }
+  return out;
+}
+
+function pickOkmBlogTextColumn(row: Record<string, unknown>, candidates: string[]): string {
+  const lower = new Map(Object.keys(row).map((k) => [k.toLowerCase(), k] as const));
+  for (const c of candidates) {
+    const k = lower.get(c.toLowerCase());
+    if (!k) continue;
+    const v = row[k];
+    const s = v == null ? '' : String(v).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
+function slugifyOkmBlogTitle(title: string, sourceId: string): string {
+  const base = title
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 160);
+  const suffix = String(sourceId).replace(/[^a-z0-9]+/gi, '').slice(-12);
+  const core = base || 'yazi';
+  return suffix ? `${core}-${suffix}` : core;
+}
+
+/** Tam veya göreli URL → sorgu/hash olmadan yol (OKM SEF). */
+function okmBlogNormalizeSefPath(raw: string): string {
+  let s = (raw ?? '').trim();
+  if (!s) return '';
+  try {
+    if (/^https?:\/\//i.test(s)) {
+      const u = new URL(s);
+      s = u.pathname || '';
+    }
+  } catch {
+    /* olduğu gibi */
+  }
+  s = (s.split(/[?#]/)[0] ?? '').replace(/^\/+|\/+$/g, '');
+  try {
+    s = decodeURIComponent(s.replace(/\+/g, ' ')).trim();
+  } catch {
+    s = s.trim();
+  }
+  return s;
+}
+
+/**
+ * Çok segmentli yolda son parça yazı SEF’i; bilinen dosya uzantısı IdeaSoft `extension` alanına (noktasız, örn. html).
+ */
+function okmBlogSefSlugAndExtensionFromPath(path: string): { slug: string; extension: string } {
+  const p = (path ?? '').trim();
+  if (!p) return { slug: '', extension: '' };
+  const leaf = p.includes('/') ? p.replace(/^.*\//, '') : p;
+  const lastDot = leaf.lastIndexOf('.');
+  if (lastDot > 0 && lastDot < leaf.length - 1) {
+    const ext = leaf.slice(lastDot + 1).toLowerCase();
+    if (/^[a-z0-9]{1,8}$/.test(ext) && ['html', 'htm', 'php', 'shtml', 'asp', 'aspx'].includes(ext)) {
+      return { slug: leaf.slice(0, lastDot), extension: ext };
+    }
+  }
+  return { slug: leaf, extension: '' };
+}
+
+/** OKM’den gelen SEF’i mümkün olduğunca koru (Türkçe karakter / tire); yalnızca riskli ve ayraç karakterleri sadeleştir. */
+function okmBlogSanitizeSlugLoose(s: string, maxLen: number): string {
+  let t = (s ?? '').trim();
+  if (!t) return '';
+  t = t.replace(/\s+/g, '-');
+  t = t.replace(/[<>"'`\\]+/g, '');
+  t = t.replace(/[/\\?#&:]+/g, '-');
+  t = t.replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return t.slice(0, maxLen);
+}
+
+const OKM_BLOG_COVER_COLUMN_CANDIDATES = [
+  'image',
+  'featured_image',
+  'cover_image',
+  'thumbnail',
+  'thumb',
+  'resim',
+  'gorsel',
+  'foto',
+  'photo',
+  'picture',
+  'banner',
+  'kapak',
+  'listing_image',
+  'cover',
+  'main_image',
+  'avatar',
+];
+
+function pickOkmBlogCoverRaw(row: Record<string, unknown>, explicitColumn: string): string {
+  const ex = (explicitColumn ?? '').trim();
+  if (ex) {
+    const k = Object.keys(row).find((r) => r.toLowerCase() === ex.toLowerCase()) ?? ex;
+    const v = row[k];
+    return v == null ? '' : String(v).trim();
+  }
+  return pickOkmBlogTextColumn(row, OKM_BLOG_COVER_COLUMN_CANDIDATES);
+}
+
+function resolveOkmPublicAssetUrl(raw: string, baseRaw: string): string | null {
+  const t = (raw ?? '').trim();
+  if (!t) return null;
+  if (/^https?:\/\//i.test(t)) return t;
+  const base = (baseRaw ?? '').trim().replace(/\/+$/, '');
+  if (!base) return null;
+  if (t.startsWith('//')) return `https:${t}`;
+  if (t.startsWith('/')) return `${base}${t}`;
+  return `${base}/${t.replace(/^\/+/, '')}`;
+}
+
+/** İçerik HTML’inde göreli img src → mutlak URL (eski sitede görünür resimler IdeaSoft’ta da açılır). */
+function rewriteOkmHtmlImageSrcs(html: string, baseRaw: string): string {
+  const base = (baseRaw ?? '').trim().replace(/\/+$/, '');
+  if (!base || !html) return html;
+  const join = (src: string): string => {
+    const s = src.trim();
+    if (!s || /^https?:\/\//i.test(s) || s.startsWith('data:')) return s;
+    if (s.startsWith('//')) return `https:${s}`;
+    if (s.startsWith('/')) return `${base}${s}`;
+    return `${base}/${s.replace(/^\/+/, '')}`;
+  };
+  return html.replace(/\ssrc\s*=\s*(["'])([^"']*)\1/gi, (_m, q: string, src: string) => {
+    const j = join(src);
+    return j === src ? _m : ` src=${q}${j}${q}`;
+  });
+}
+
+/** `src` / `srcset` iç URL’den son dosya adı (path traversal yok). */
+function okmBlogImageBasenameForDosya(src: string): string | null {
+  let s = (src ?? '').trim();
+  if (!s || s.toLowerCase().startsWith('data:')) return null;
+  try {
+    if (/^https?:\/\//i.test(s)) {
+      const u = new URL(s);
+      s = u.pathname || '';
+    }
+  } catch {
+    return null;
+  }
+  s = (s.split(/[?#]/)[0] ?? '').replace(/\\/g, '/');
+  s = s.replace(/^\/+/, '');
+  const leaf = s.includes('/') ? s.replace(/^.*\//, '') : s;
+  if (!leaf || leaf === '.' || leaf === '..') return null;
+  if (/\.\./.test(leaf)) return null;
+  try {
+    return decodeURIComponent(leaf);
+  } catch {
+    return leaf;
+  }
+}
+
+/**
+ * Blog PUT (yineleme): IdeaSoft içerik görselleri `src` / `srcset` → `/dosya/{dosyaAdı}`.
+ * Mutlak URL veya göreli yol fark etmez; yalnızca son segment kullanılır.
+ */
+function rewriteOkmHtmlImageSrcsToDosyaPaths(html: string): string {
+  if (!html) return html;
+  const toDosya = (src: string): string | null => {
+    const name = okmBlogImageBasenameForDosya(src);
+    if (!name) return null;
+    return `/dosya/${encodeURIComponent(name)}`;
+  };
+  let out = html.replace(/\ssrc\s*=\s*(["'])([^"']*)\1/gi, (_m, q: string, src: string) => {
+    const next = toDosya(src);
+    return next == null ? _m : ` src=${q}${next}${q}`;
+  });
+  out = out.replace(/\ssrcset\s*=\s*(["'])([^"']*)\1/gi, (_m, q: string, val: string) => {
+    const parts = val.split(',').map((p) => p.trim()).filter(Boolean);
+    if (parts.length === 0) return _m;
+    const nextParts = parts.map((part) => {
+      const sp = part.search(/\s/);
+      const url = sp >= 0 ? part.slice(0, sp).trim() : part;
+      const desc = sp >= 0 ? part.slice(sp) : '';
+      const d = toDosya(url);
+      return d == null ? part : `${d}${desc}`;
+    });
+    if (nextParts.every((p, i) => p === parts[i])) return _m;
+    return ` srcset=${q}${nextParts.join(', ')}${q}`;
+  });
+  return out;
+}
+
+/** Özet / özel metin / SEO: OKM’de HTML olabilir; IdeaSoft’ta düz metin beklenir. */
+function okmBlogHtmlToPlainText(html: string): string {
+  const raw = (html ?? '').trim();
+  if (!raw) return '';
+  let s = raw
+    .replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '')
+    .replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, '');
+  s = s
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\/\s*(p|div|h[1-6]|blockquote|tr)\s*>/gi, '\n')
+    .replace(/<\/\s*li\s*>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, '');
+  s = s
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&apos;/gi, "'");
+  s = s.replace(/&#(\d+);/g, (_, n) => {
+    const c = parseInt(n, 10);
+    return Number.isFinite(c) && c > 0 && c < 0x110000 ? String.fromCharCode(c) : '';
+  });
+  s = s.replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+    const c = parseInt(h, 16);
+    return Number.isFinite(c) && c > 0 && c < 0x110000 ? String.fromCharCode(c) : '';
+  });
+  return s
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function fetchRemoteImageAsDataUrl(url: string): Promise<string | null> {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  } catch {
+    return null;
+  }
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 25_000);
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      signal: ac.signal,
+      headers: { 'User-Agent': 'eSyncPlus-OKM-Blog/1', Accept: 'image/*,*/*;q=0.8' },
+    });
+    if (!res.ok) return null;
+    const ct = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (!ct.startsWith('image/')) return null;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength === 0 || buf.byteLength > 5_000_000) return null;
+    const b64 = arrayBufferToBase64(buf);
+    return `data:${ct || 'image/jpeg'};base64,${b64}`;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function splitDataUrlForIdeasoftBlogImage(dataUrl: string): { extension: string; attachment: string } | null {
+  const s = dataUrl.trim();
+  const m = /^data:(image\/(png|jpeg|jpg|gif|webp));base64,(.+)$/i.exec(s);
+  if (!m) return null;
+  const extRaw = (m[2] ?? 'jpeg').toLowerCase();
+  const ext = extRaw === 'jpeg' ? 'jpg' : extRaw;
+  return { extension: ext, attachment: s };
+}
+
+/**
+ * Blog kapak görseli → IdeaSoft Admin API’de ürün aktarımıyla aynı data URL + filename/extension kuralı.
+ * Kaynak sırası: data:image…, JSON dizi (ürün `image` alanı), http(s), R2 `storagePathToDataUrl`, göreli + `blog_image_base_url`.
+ */
+async function resolveOkmBlogCoverAttachment(
+  row: Record<string, unknown>,
+  storage: R2Bucket | undefined,
+  opts: { imageBaseUrl: string; imageColumn: string; sourceId: string; slug: string },
+): Promise<{ filename: string; extension: string; attachment: string } | null> {
+  const raw = pickOkmBlogCoverRaw(row, opts.imageColumn);
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  let dataUrl: string | null = null;
+
+  if (trimmed.toLowerCase().startsWith('data:image')) {
+    dataUrl = trimmed;
+  } else {
+    const paths = parseProductImageStoragePaths(trimmed);
+    for (const path of paths) {
+      if (!path) continue;
+      if (/^https?:\/\//i.test(path)) {
+        dataUrl = await fetchRemoteImageAsDataUrl(path);
+        if (dataUrl) break;
+        continue;
+      }
+      if (path.startsWith('//')) {
+        dataUrl = await fetchRemoteImageAsDataUrl(`https:${path}`);
+        if (dataUrl) break;
+        continue;
+      }
+      const fromR2 = await storagePathToDataUrl(storage, path);
+      if (fromR2?.startsWith('data:image')) {
+        dataUrl = fromR2;
+        break;
+      }
+      if (fromR2 && /^https?:\/\//i.test(fromR2)) {
+        dataUrl = await fetchRemoteImageAsDataUrl(fromR2);
+        if (dataUrl) break;
+      }
+      const abs = resolveOkmPublicAssetUrl(path, opts.imageBaseUrl);
+      if (abs) {
+        dataUrl = await fetchRemoteImageAsDataUrl(abs);
+        if (dataUrl) break;
+      }
+    }
+  }
+
+  if (!dataUrl) return null;
+  let parts = splitDataUrlForIdeasoftBlogImage(dataUrl);
+  if (!parts) {
+    const d = dataUrl.toLowerCase();
+    if (!d.startsWith('data:image')) return null;
+    const ext = d.includes('image/png')
+      ? 'png'
+      : d.includes('image/webp')
+        ? 'webp'
+        : d.includes('image/gif')
+          ? 'gif'
+          : 'jpg';
+    parts = { extension: ext, attachment: dataUrl };
+  }
+  const slug = (opts.slug ?? '').trim() || 'kapak';
+  const fnBase =
+    slug
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40) || 'blog';
+  const filename = `${fnBase}-${opts.sourceId}`.slice(0, 120);
+  return { filename, extension: parts.extension, attachment: parts.attachment };
+}
+
+/**
+ * Blog PUT (yineleme): kapak görseli içerikteki gibi `attachment: /dosya/{dosyaAdı}`.
+ * HTTP(s) veya göreli yol; `data:image` ile null (o zaman `resolveOkmBlogCoverAttachment` kullanılır).
+ */
+function buildOkmBlogCoverDosyaAttachment(
+  row: Record<string, unknown>,
+  imageColumn: string,
+): { filename: string; extension: string; attachment: string } | null {
+  const raw = pickOkmBlogCoverRaw(row, imageColumn).trim();
+  if (!raw || raw.toLowerCase().startsWith('data:image')) return null;
+  const paths = parseProductImageStoragePaths(raw);
+  const tryPaths = paths.length > 0 ? paths : [raw];
+  for (const p of tryPaths) {
+    if (!p?.trim() || p.trim().toLowerCase().startsWith('data:image')) continue;
+    const leaf = okmBlogImageBasenameForDosya(p);
+    if (!leaf) continue;
+    const lastDot = leaf.lastIndexOf('.');
+    let ext = 'jpg';
+    let base = leaf;
+    if (lastDot > 0 && lastDot < leaf.length - 1) {
+      base = leaf.slice(0, lastDot);
+      ext = leaf.slice(lastDot + 1).toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+    }
+    if (ext === 'jpeg') ext = 'jpg';
+    if (ext.length > 8) ext = ext.slice(0, 8);
+    const fn =
+      base
+        .replace(/[^\w\u00C0-\u024F\u0400-\u04FF.\-]+/gi, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 120) || 'kapak';
+    return {
+      filename: fn,
+      extension: ext,
+      attachment: `/dosya/${encodeURIComponent(leaf)}`,
+    };
+  }
+  return null;
+}
+
+/** Ürün POST/PUT’taki `images: [{ filename, extension, sortOrder, attachment }]` ile aynı yapı */
+function withIdeasoftBlogCoverProductStyleImages(
+  payload: Record<string, unknown>,
+  cover: { filename: string; extension: string; attachment: string },
+): Record<string, unknown> {
+  return {
+    ...payload,
+    images: [
+      {
+        filename: cover.filename,
+        extension: cover.extension,
+        sortOrder: 1,
+        attachment: cover.attachment,
+      },
+    ],
+  };
+}
+
+function withIdeasoftBlogCoverSingularImage(
+  payload: Record<string, unknown>,
+  cover: { filename: string; extension: string; attachment: string },
+): Record<string, unknown> {
+  return {
+    ...payload,
+    image: { filename: cover.filename, extension: cover.extension, attachment: cover.attachment },
+  };
+}
+
+async function ideasoftPostBlogImageSubresource(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  blogId: number,
+  attachment: { filename: string; extension: string; attachment: string },
+): Promise<boolean> {
+  const body = JSON.stringify({
+    filename: attachment.filename,
+    extension: attachment.extension,
+    sortOrder: 1,
+    attachment: attachment.attachment,
+    blog: { id: blogId },
+  });
+  const res = await ideasoftDoAdminRequestWithRefresh(
+    db,
+    '/blog_images',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body,
+    },
+    settings,
+    auth,
+  );
+  return res.ok;
+}
+
+function okmRowToIdeasoftBlogPayload(
+  row: Record<string, unknown>,
+  sourceIdColumn: string,
+  blogDefaults: {
+    categoryId: number;
+    categoryTitle: string;
+    tags: { id: number; title: string }[];
+    status: number;
+    blockVisibility: number;
+    imageBaseUrl: string;
+    /** PUT yinelemede içerik görselleri `/dosya/…`; ilk aktarımda eski site kökü ile mutlak URL. */
+    contentImageSrcMode?: 'legacy_abs' | 'dosya';
+  },
+): { sourceId: string; payload: Record<string, unknown> } | null {
+  const idKey = Object.keys(row).find((k) => k.toLowerCase() === sourceIdColumn.toLowerCase()) ?? sourceIdColumn;
+  const rawId = row[idKey];
+  if (rawId == null || String(rawId).trim() === '') return null;
+  const sourceId = String(rawId).trim();
+
+  const titleRaw = pickOkmBlogTextColumn(row, ['title', 'name', 'baslik', 'subject', 'konu', 'heading', 'baslik_tr']);
+  const title = okmBlogHtmlToPlainText(titleRaw);
+  if (!title) return null;
+
+  let excerptRaw = pickOkmBlogTextColumn(row, [
+    'excerpt',
+    'summary',
+    'spot',
+    'ozet',
+    'kisa_aciklama',
+    'lead',
+    'intro',
+    'ozel_metin',
+    'ozelmetin',
+    'ozel_metin_tr',
+    'custom_text',
+    'special_text',
+    'specialtext',
+    'extra_text',
+  ]);
+  let content =
+    pickOkmBlogTextColumn(row, ['content', 'body', 'icerik', 'description', 'aciklama', 'text', 'detay', 'icerik_tr']) ||
+    excerptRaw;
+  if (blogDefaults.contentImageSrcMode === 'dosya') {
+    content = rewriteOkmHtmlImageSrcsToDosyaPaths(content);
+  } else {
+    content = rewriteOkmHtmlImageSrcs(content, blogDefaults.imageBaseUrl);
+  }
+  if (!excerptRaw) excerptRaw = content.slice(0, 500) || titleRaw || title;
+  const excerpt = okmBlogHtmlToPlainText(excerptRaw).slice(0, 65535);
+
+  const sefRaw = pickOkmBlogTextColumn(row, [
+    'slug',
+    'seo_slug',
+    'sef',
+    'sef_link',
+    'seflink',
+    'permalink',
+    'friendly_url',
+    'friendlyurl',
+    'uri',
+    'path',
+    'blog_path',
+    'detay_link',
+    'link_rewrite',
+    'rewrite',
+    'haber_url',
+    'yazi_url',
+    'url',
+    'link',
+    'seo_url',
+  ]);
+  const sefPath = okmBlogNormalizeSefPath(sefRaw);
+  const { slug: sefSlugPart, extension: sefExtension } = okmBlogSefSlugAndExtensionFromPath(sefPath);
+  let slug = okmBlogSanitizeSlugLoose(sefSlugPart, 255);
+  if (!slug) slug = slugifyOkmBlogTitle(title, sourceId);
+  slug = slug.slice(0, 255);
+  const extOnlyRaw = pickOkmBlogTextColumn(row, ['extension', 'url_extension', 'slug_extension', 'sef_extension', 'uzanti']);
+  let blogExtension = sefExtension;
+  if (!blogExtension && extOnlyRaw) {
+    const e = extOnlyRaw.trim().replace(/^\./, '').toLowerCase();
+    if (/^[a-z0-9]{1,8}$/.test(e)) blogExtension = e;
+  }
+
+  const pageTitle = okmBlogHtmlToPlainText(
+    pickOkmBlogTextColumn(row, ['page_title', 'pageTitle', 'meta_title', 'seo_title']) || titleRaw || title,
+  ).slice(0, 255);
+  const metaKeywords = okmBlogHtmlToPlainText(
+    pickOkmBlogTextColumn(row, ['meta_keywords', 'metaKeywords', 'keywords', 'etiketler']),
+  ).slice(0, 65535);
+  const metaDescription = okmBlogHtmlToPlainText(
+    pickOkmBlogTextColumn(row, ['meta_description', 'metaDescription', 'seo_description']) || excerptRaw,
+  ).slice(0, 65535);
+
+  const payload: Record<string, unknown> = {
+    title: title.slice(0, 255),
+    slug,
+    excerpt,
+    content: content.slice(0, 65535),
+    pageTitle,
+    metaKeywords,
+    metaDescription,
+    blockVisibility: blogDefaults.blockVisibility,
+    status: blogDefaults.status,
+    categories: [{ id: blogDefaults.categoryId, title: blogDefaults.categoryTitle.slice(0, 255) }],
+    tags: blogDefaults.tags.map((t) => ({ id: t.id, title: t.title.slice(0, 255) })),
+  };
+  if (blogExtension) payload.extension = blogExtension;
+
+  return { sourceId, payload };
+}
+
+async function upsertOkmBlogSync(
+  db: D1Database,
+  sourceTable: string,
+  sourceId: string,
+  patch: { sync_status: string; ideasoft_blog_id?: number | null; last_error?: string | null; last_synced_at?: string | null },
+): Promise<void> {
+  const ideasoftId =
+    patch.ideasoft_blog_id === undefined ? null : patch.ideasoft_blog_id == null ? null : Number(patch.ideasoft_blog_id);
+  const err = patch.last_error === undefined ? null : patch.last_error;
+  const synced = patch.last_synced_at === undefined ? null : patch.last_synced_at;
+  await db
+    .prepare(
+      `INSERT INTO okm_blog_ideasoft_sync (source_table, source_id, sync_status, ideasoft_blog_id, last_error, last_synced_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_table, source_id) DO UPDATE SET
+         sync_status = excluded.sync_status,
+         ideasoft_blog_id = excluded.ideasoft_blog_id,
+         last_error = excluded.last_error,
+         last_synced_at = excluded.last_synced_at,
+         updated_at = datetime('now')`,
+    )
+    .bind(sourceTable, sourceId, patch.sync_status, ideasoftId, err, synced)
+    .run();
+}
+
+async function ideasoftFetchBlogCategoryTitle(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  categoryId: number,
+): Promise<string | null> {
+  const res = await ideasoftDoAdminRequestWithRefresh(
+    db,
+    `/blog_categories/${categoryId}`,
+    { method: 'GET', headers: { Accept: 'application/json' } },
+    settings,
+    auth,
+  );
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  if (!res.ok) return null;
+  if (json && typeof json === 'object') {
+    const t = (json as Record<string, unknown>).title;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  }
+  return null;
+}
+
+/** OKM MySQL’de blog yazıları + D1’de IdeaSoft eşleştirme durumu (`_ideasoft`) */
+app.get('/api/okm/blog-posts', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const config = await getOkmMysqlConfig(c);
+    if (!config) {
+      return c.json(
+        {
+          error:
+            'OKM MySQL yapılandırılmadı. Ayarlar › Entegrasyonlar › OKM: sunucu ve kullanıcı, ardından listeden veritabanı ve blog tablosu seçin; veya Veri Aktarımı genel `mysql` + OKM’de veritabanı adı kullanın. Sıralama sütunu: `blog_order_column` (varsayılan: id).',
+        },
+        400
+      );
+    }
+    const blogCfg = await getOkmMysqlBlogSettings(c);
+    const { blog_table, blog_order_column, blog_source_id_column, blog_image_base_url } = blogCfg;
+    const limit = Math.min(parseInt(c.req.query('limit') || '200') || 200, 500);
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(
+        `SELECT * FROM \`${blog_table}\` ORDER BY \`${blog_order_column}\` DESC LIMIT ?`,
+        [limit],
+      );
+      const list = rows as Record<string, unknown>[];
+      const idKey =
+        list.length > 0
+          ? Object.keys(list[0] ?? {}).find((k) => k.toLowerCase() === blog_source_id_column.toLowerCase()) ??
+            blog_source_id_column
+          : blog_source_id_column;
+      const sourceIds = list
+        .map((r) => {
+          const v = r[idKey];
+          return v == null ? '' : String(v).trim();
+        })
+        .filter(Boolean);
+      const syncMap = await loadOkmBlogIdeasoftSyncMap(c.env.DB, blog_table, sourceIds);
+      const enriched = list.map((r) => {
+        const sidRaw = r[idKey];
+        const sid = sidRaw == null ? '' : String(sidRaw).trim();
+        const s = sid ? syncMap.get(sid) : undefined;
+        const ideasoft: OkmBlogIdeasoftSyncRow = s ?? {
+          sync_status: 'none',
+          ideasoft_blog_id: null,
+          last_error: null,
+          last_synced_at: null,
+        };
+        return { ...r, _ideasoft: ideasoft };
+      });
+      return c.json({
+        data: enriched,
+        blog_table,
+        blog_source_id_column: idKey,
+        blog_image_base_url: blog_image_base_url || '',
+      });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
+/** OKM MySQL ürün tablosu — SEF sütunu (ayar veya otomatik) ve tahmini eski site ürün URL’si */
+app.get('/api/okm/products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const pCfg = await getOkmMysqlProductSettings(c);
+    if (!pCfg.product_table) {
+      return c.json(
+        {
+          error:
+            'OKM ürün tablosu seçilmedi. Ayarlar › Entegrasyonlar › OKM bölümünde ürün tablosunu seçin veya `product_table` alanını kaydedin.',
+        },
+        400,
+      );
+    }
+    const config = await getOkmMysqlConfig(c);
+    if (!config) {
+      return c.json(
+        {
+          error:
+            'OKM MySQL yapılandırılmadı. Ayarlar › Entegrasyonlar › OKM: sunucu ve kullanıcı, veritabanı ve ürün tablosu.',
+        },
+        400,
+      );
+    }
+    const searchRaw = (c.req.query('search') || '').trim();
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10) || 1);
+    const limit = Math.min(parseInt(c.req.query('limit') || '25', 10) || 25, 200);
+    const offset = (page - 1) * limit;
+
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const tableSql = pCfg.product_table.replace(/`/g, '');
+      const [descRows] = await conn.execute(`SHOW COLUMNS FROM \`${tableSql}\``);
+      const schemaCols = descRows as { Field: string; Type: string }[];
+      const allNames = schemaCols.map((r) => r.Field);
+      const orderCol = allNames.find((n) => n.toLowerCase() === pCfg.product_order_column.toLowerCase());
+      const orderSafe = orderCol ?? sanitizeOkmSqlIdent(pCfg.product_order_column, 'id');
+      const sefResolved = resolveOkmProductSefColumnName(allNames, pCfg.product_sef_column);
+      const searchCols = pickOkmProductSearchColumnNames(schemaCols, sefResolved);
+
+      let whereSql = '';
+      const whereParams: string[] = [];
+      if (searchRaw && searchCols.length > 0) {
+        const pat = `%${escapeLikePattern(searchRaw)}%`;
+        whereSql = ` WHERE (${searchCols.map((col) => `\`${col.replace(/`/g, '')}\` LIKE ?`).join(' OR ')})`;
+        for (let i = 0; i < searchCols.length; i++) whereParams.push(pat);
+      }
+
+      const [countRows] = await conn.execute(
+        `SELECT COUNT(*) AS c FROM \`${tableSql}\`${whereSql}`,
+        whereParams,
+      );
+      const total = Number((countRows as { c: number }[])[0]?.c ?? 0) || 0;
+
+      const [dataRows] = await conn.execute(
+        `SELECT * FROM \`${tableSql}\`${whereSql} ORDER BY \`${orderSafe.replace(/`/g, '')}\` DESC LIMIT ? OFFSET ?`,
+        [...whereParams, limit, offset],
+      );
+      const list = dataRows as Record<string, unknown>[];
+
+      const enriched = list.map((row) => {
+        const sefVal =
+          sefResolved && row[sefResolved] != null && String(row[sefResolved]).trim() !== ''
+            ? String(row[sefResolved]).trim()
+            : null;
+        const titleGuess = pickOkmBlogTextColumn(row, [...OKM_PRODUCT_TITLE_CANDIDATES]);
+        const legacyUrl = buildOkmLegacyProductUrl(
+          pCfg.legacy_site_base_url,
+          pCfg.product_url_path_segment,
+          sefVal,
+        );
+        return {
+          ...row,
+          _okm_meta: {
+            sef_value: sefVal,
+            sef_column: sefResolved,
+            title_guess: titleGuess || null,
+            legacy_product_url: legacyUrl,
+          },
+        };
+      });
+
+      return c.json({
+        data: enriched,
+        total,
+        product_table: pCfg.product_table,
+        product_order_column: orderSafe,
+        sef_column_resolved: sefResolved,
+        legacy_site_base_url: pCfg.legacy_site_base_url,
+        product_url_path_segment: pCfg.product_url_path_segment,
+      });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
+/**
+ * Eski OKM MySQL blog tablosunda zaten dolu olan IdeaSoft blog kimliği sütununu okuyup D1 `okm_blog_ideasoft_sync` içine yazar.
+ * Ayarlar: `ideasoft_blog_id_column` (ör. ideasoft_blog_id). Gövde: `{ "dry_run": true }` — yalnızca sayım, yazma yok.
+ */
+app.post('/api/okm/blog-posts/import-legacy-sync', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const blogCfg = await getOkmMysqlBlogSettings(c);
+    if (!blogCfg.ideasoft_blog_id_column) {
+      return c.json(
+        {
+          error:
+            'Eski IdeaSoft ID sütunu tanımlı değil. Ayarlar › Entegrasyonlar › OKM içinde `ideasoft_blog_id_column` alanına MySQL’deki sütun adını girin (ör. ideasoft_blog_id), kaydedin ve tekrar deneyin.',
+        },
+        400,
+      );
+    }
+    const config = await getOkmMysqlConfig(c);
+    if (!config) {
+      return c.json({ error: 'OKM MySQL yapılandırılmadı.' }, 400);
+    }
+    const body = await c.req.json<{ dry_run?: boolean }>().catch(() => ({}));
+    const dryRun = body.dry_run === true;
+
+    const connection = await createMysqlConnection(config);
+    let rows: Record<string, unknown>[];
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const limit = 3000;
+      const [r] = await conn.execute(
+        `SELECT * FROM \`${blogCfg.blog_table}\` ORDER BY \`${blogCfg.blog_order_column}\` DESC LIMIT ?`,
+        [limit],
+      );
+      rows = r as Record<string, unknown>[];
+    } finally {
+      await connection.end();
+    }
+
+    const idCol = blogCfg.blog_source_id_column;
+    const idKey =
+      rows.length > 0
+        ? Object.keys(rows[0] ?? {}).find((k) => k.toLowerCase() === idCol.toLowerCase()) ?? idCol
+        : idCol;
+
+    let upserted = 0;
+    let skipped_no_source_id = 0;
+    let skipped_no_legacy_id = 0;
+
+    for (const row of rows) {
+      const sidRaw = row[idKey];
+      const sourceId = sidRaw == null ? '' : String(sidRaw).trim();
+      if (!sourceId) {
+        skipped_no_source_id += 1;
+        continue;
+      }
+      const legacyIs = readPositiveIntFromOkmRow(row, blogCfg.ideasoft_blog_id_column);
+      if (legacyIs == null) {
+        skipped_no_legacy_id += 1;
+        continue;
+      }
+      if (!dryRun) {
+        await upsertOkmBlogSync(c.env.DB, blogCfg.blog_table, sourceId, {
+          sync_status: 'synced',
+          ideasoft_blog_id: legacyIs,
+          last_error: null,
+          last_synced_at: new Date().toISOString(),
+        });
+      }
+      upserted += 1;
+    }
+
+    return c.json({
+      ok: true,
+      dry_run: dryRun,
+      blog_table: blogCfg.blog_table,
+      ideasoft_blog_id_column: blogCfg.ideasoft_blog_id_column,
+      scanned: rows.length,
+      upserted,
+      skipped_no_source_id,
+      skipped_no_legacy_id,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
+/**
+ * OKM blog satırlarını IdeaSoft Admin API `POST /admin-api/blogs` ile oluşturur (döküman: Blog POST).
+ * Gövde: `{ "source_ids": ["1","2"] }` — boş veya yok: listedeki `sync_status !== 'synced'` olanların tamamı.
+ */
+app.post('/api/okm/blog-posts/push-to-ideasoft', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft erişimi yok. Ayarlar › Entegrasyonlar › IdeaSoft ile mağaza adresi ve access token tanımlayın. Gerekli OAuth kapsamları: blog_create, blog_update, blog_category_read.',
+        },
+        400,
+      );
+    }
+    const blogCfg = await getOkmMysqlBlogSettings(c);
+    const blogPushIs = parseIdeasoftBlogPushFromSettings(settings);
+    const resolvedCategoryId =
+      blogPushIs.categoryId != null && blogPushIs.categoryId > 0
+        ? blogPushIs.categoryId
+        : blogCfg.ideasoft_blog_category_id;
+    if (!resolvedCategoryId) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft blog kategori ID gerekli. IdeaSoft › Blog sayfaları bölümünde varsayılan kategori kimliğini girin veya Ayarlar › Entegrasyonlar › OKM içinde `ideasoft_blog_category_id` tanımlayın (Admin API BlogCategory).',
+        },
+        400,
+      );
+    }
+    const config = await getOkmMysqlConfig(c);
+    if (!config) {
+      return c.json({ error: 'OKM MySQL yapılandırılmadı.' }, 400);
+    }
+
+    const body = await c.req.json<{ source_ids?: unknown }>().catch(() => ({}));
+    const requestedIds = Array.isArray(body.source_ids)
+      ? body.source_ids.map((x) => String(x ?? '').trim()).filter(Boolean)
+      : [];
+
+    const connection = await createMysqlConnection(config);
+    let rows: Record<string, unknown>[];
+    try {
+      const conn = connection as unknown as { execute: (sql: string, values?: unknown[]) => Promise<[unknown[]]> };
+      const limit = 500;
+      const [r] = await conn.execute(
+        `SELECT * FROM \`${blogCfg.blog_table}\` ORDER BY \`${blogCfg.blog_order_column}\` DESC LIMIT ?`,
+        [limit],
+      );
+      rows = r as Record<string, unknown>[];
+    } finally {
+      await connection.end();
+    }
+
+    const idCol = blogCfg.blog_source_id_column;
+    const idKey =
+      rows.length > 0
+        ? Object.keys(rows[0] ?? {}).find((k) => k.toLowerCase() === idCol.toLowerCase()) ?? idCol
+        : idCol;
+
+    const catTitle =
+      (await ideasoftFetchBlogCategoryTitle(c.env.DB, settings, auth, resolvedCategoryId)) ||
+      `Kategori ${resolvedCategoryId}`;
+
+    const blogPayloadDefaults = {
+      categoryId: resolvedCategoryId,
+      categoryTitle: catTitle,
+      tags: blogPushIs.tags,
+      status: blogPushIs.status,
+      blockVisibility: blogPushIs.blockVisibility,
+      imageBaseUrl: blogCfg.blog_image_base_url,
+    };
+
+    const allSourceIds = rows
+      .map((row) => {
+        const sidRaw = row[idKey];
+        return sidRaw == null ? '' : String(sidRaw).trim();
+      })
+      .filter(Boolean);
+    const fullSyncMap = await loadOkmBlogIdeasoftSyncMap(c.env.DB, blogCfg.blog_table, allSourceIds);
+
+    const toProcess: { row: Record<string, unknown>; sourceId: string }[] = [];
+    for (const row of rows) {
+      const sidRaw = row[idKey];
+      const sourceId = sidRaw == null ? '' : String(sidRaw).trim();
+      if (!sourceId) continue;
+      if (requestedIds.length > 0 && !requestedIds.includes(sourceId)) continue;
+      const cur = fullSyncMap.get(sourceId);
+      if (requestedIds.length === 0 && cur?.sync_status === 'synced' && cur.ideasoft_blog_id) continue;
+      toProcess.push({ row, sourceId });
+    }
+
+    const results: { source_id: string; ok: boolean; ideasoft_blog_id?: number; error?: string }[] = [];
+
+    for (const { row, sourceId } of toProcess) {
+      const cur = fullSyncMap.get(sourceId);
+      const existingIsId =
+        cur?.sync_status === 'synced' && cur.ideasoft_blog_id != null && cur.ideasoft_blog_id > 0
+          ? cur.ideasoft_blog_id
+          : null;
+
+      const built = okmRowToIdeasoftBlogPayload(row, idKey, {
+        ...blogPayloadDefaults,
+        contentImageSrcMode: existingIsId != null ? 'dosya' : 'legacy_abs',
+      });
+      if (!built) {
+        await upsertOkmBlogSync(c.env.DB, blogCfg.blog_table, sourceId, {
+          sync_status: 'failed',
+          last_error: 'Başlık veya kaynak kimliği okunamadı',
+          ideasoft_blog_id: null,
+        });
+        results.push({ source_id: sourceId, ok: false, error: 'Başlık veya kaynak kimliği okunamadı' });
+        continue;
+      }
+
+      const slugForCover = typeof built.payload.slug === 'string' ? built.payload.slug : 'kapak';
+      const coverDosya =
+        existingIsId != null ? buildOkmBlogCoverDosyaAttachment(row, blogCfg.blog_image_column) : null;
+      const coverAtt =
+        coverDosya ??
+        (await resolveOkmBlogCoverAttachment(row, c.env.STORAGE, {
+          imageBaseUrl: blogCfg.blog_image_base_url,
+          imageColumn: blogCfg.blog_image_column,
+          sourceId,
+          slug: slugForCover,
+        }));
+      const basePayload = built.payload as Record<string, unknown>;
+      const payloadWithCover = coverAtt ? withIdeasoftBlogCoverProductStyleImages(basePayload, coverAtt) : basePayload;
+
+      await upsertOkmBlogSync(c.env.DB, blogCfg.blog_table, sourceId, {
+        sync_status: 'pending',
+        last_error: null,
+      });
+
+      const sendBlog = (p: Record<string, unknown>) =>
+        ideasoftDoAdminRequestWithRefresh(
+          c.env.DB,
+          existingIsId != null ? `/blogs/${existingIsId}` : `/blogs`,
+          {
+            method: existingIsId != null ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify(existingIsId != null ? { ...p, id: existingIsId } : p),
+          },
+          settings,
+          auth,
+        );
+
+      let strippedForBlogImages = false;
+      let postRes = await sendBlog(payloadWithCover);
+      if (!postRes.ok && coverAtt && payloadWithCover !== basePayload) {
+        postRes = await sendBlog(withIdeasoftBlogCoverSingularImage(basePayload, coverAtt));
+      }
+      if (!postRes.ok && coverAtt) {
+        strippedForBlogImages = true;
+        postRes = await sendBlog(basePayload);
+      }
+      const postText = await postRes.text();
+      let postJson: unknown = null;
+      try {
+        postJson = postText ? JSON.parse(postText) : null;
+      } catch {
+        postJson = null;
+      }
+
+      if (!postRes.ok) {
+        const parts = ideasoftProxyErrorParts(postJson, postText, postRes.status);
+        const errMsg = parts.error || `HTTP ${postRes.status}`;
+        await upsertOkmBlogSync(c.env.DB, blogCfg.blog_table, sourceId, {
+          sync_status: 'failed',
+          last_error: errMsg,
+          ideasoft_blog_id: existingIsId ?? null,
+        });
+        results.push({ source_id: sourceId, ok: false, error: errMsg });
+        continue;
+      }
+
+      const newId = pickIdeasoftNumericId(postJson) ?? existingIsId;
+      if (newId == null) {
+        const errMsg = 'IdeaSoft yanıtında blog ID okunamadı';
+        await upsertOkmBlogSync(c.env.DB, blogCfg.blog_table, sourceId, {
+          sync_status: 'failed',
+          last_error: errMsg,
+          ideasoft_blog_id: null,
+        });
+        results.push({ source_id: sourceId, ok: false, error: errMsg });
+        continue;
+      }
+
+      if (coverAtt && strippedForBlogImages) {
+        try {
+          await ideasoftPostBlogImageSubresource(c.env.DB, settings, auth, newId, coverAtt);
+        } catch {
+          /* blog_images yok veya OAuth — metin yine kayıtlı */
+        }
+      }
+
+      await upsertOkmBlogSync(c.env.DB, blogCfg.blog_table, sourceId, {
+        sync_status: 'synced',
+        ideasoft_blog_id: newId,
+        last_error: null,
+        last_synced_at: new Date().toISOString(),
+      });
+      results.push({ source_id: sourceId, ok: true, ideasoft_blog_id: newId });
+    }
+
+    const ok = results.filter((r) => r.ok).length;
+    const fail = results.length - ok;
+    return c.json({ ok: true, results, summary: { total: results.length, synced: ok, failed: fail } });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -6926,7 +8566,7 @@ app.get('/api/opencart-mysql/categories', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -6947,7 +8587,7 @@ app.get('/api/opencart-mysql/manufacturers', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7048,7 +8688,7 @@ app.get('/api/opencart-mysql/products', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7100,7 +8740,7 @@ app.post('/api/opencart-mysql/products/bulk-update-prices', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7129,7 +8769,7 @@ app.get('/api/opencart-mysql/products/:id', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7185,7 +8825,7 @@ app.put('/api/opencart-mysql/products/:id', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7211,7 +8851,7 @@ app.get('/api/opencart-mysql/products/:id/attributes', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7232,7 +8872,7 @@ app.get('/api/opencart-mysql/products/:id/images', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7260,7 +8900,7 @@ app.get('/api/opencart-mysql/products/:id/filters', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7293,7 +8933,7 @@ app.get('/api/opencart-mysql/products/:id/options', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7321,7 +8961,7 @@ app.get('/api/opencart-mysql/products/:id/related', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7348,7 +8988,7 @@ app.get('/api/opencart-mysql/products/:id/categories', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7373,7 +9013,7 @@ app.get('/api/opencart-mysql/attributes', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7386,7 +9026,7 @@ app.get('/api/d1/tables', async (c) => {
     const tables = (results as { name: string }[]).map((r) => r.name);
     return c.json({ tables });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7398,7 +9038,7 @@ app.get('/api/d1/columns/:table', async (c) => {
     const cols = (results as { name: string; type: string }[]).map((r) => ({ name: r.name, type: r.type }));
     return c.json({ columns: cols });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7427,7 +9067,7 @@ app.get('/api/dia/vergidaireleri', async (c) => {
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total, page, limit });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7459,7 +9099,7 @@ app.get('/api/dia/cari-kartlar', async (c) => {
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total, page, limit });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7533,7 +9173,7 @@ app.post('/api/dia/cari-kartlar/:id/transfer-parasut', async (c) => {
     const contactId = (createJson as { data?: { id?: string } }).data?.id;
     return c.json({ ok: true, parasut_contact_id: contactId, message: 'Paraşüt\'e müşteri olarak aktarıldı.' });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7547,7 +9187,7 @@ app.get('/api/d1/table-count/:table', async (c) => {
     const count = (r as { cnt: number } | null)?.cnt ?? 0;
     return c.json({ table, count });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7567,7 +9207,7 @@ app.get('/api/d1/debug', async (c) => {
     }
     return c.json({ message: "Worker'ın bağlı olduğu D1'den okunan değerler", counts });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7579,7 +9219,7 @@ app.post('/api/d1/reset-product-categories', async (c) => {
     await c.env.DB.prepare("DELETE FROM sqlite_sequence WHERE name='product_categories'").run();
     return c.json({ ok: true, message: 'product_categories tablosu sıfırlandı. Yeni kayıtlar id=1\'den başlayacak.' });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -7601,7 +9241,7 @@ app.get('/api/d1/test-write', async (c) => {
       writeWorked: afterCount === beforeCount + 1,
     });
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -8036,7 +9676,7 @@ app.post('/api/transfer/execute', async (c) => {
       await connection.end();
     }
   } catch (err: unknown) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: formatMysqlOutboundError(err) }, 500);
   }
 });
 
@@ -8221,6 +9861,82 @@ function ensureMetaDescriptionContainsTargetKeyword(
   return prefixed.slice(0, SEO_META_DESCRIPTION_MAX_LEN);
 }
 
+/** OpenAI: ürün adı + marka/kategori → SEO alanları (toplu IdeaSoft öncesi veya `/api/ai/generate-seo`). */
+async function callOpenAiForProductSeoText(
+  params: { productName: string; brandName?: string; categoryPath?: string; userRules?: string },
+  apiKey: string,
+): Promise<{ seo_slug: string; seo_title: string; seo_description: string; seo_keywords: string }> {
+  const name = params.productName.trim();
+  if (!name) throw new Error('Ürün adı gerekli');
+
+  const brandName = (params.brandName ?? '').trim();
+  const categoryPath = (params.categoryPath ?? '').trim();
+  const userRules = (params.userRules ?? '').trim();
+  const userPrompt = `Ürün adı: ${name}${brandName ? `\nMarka: ${brandName}` : ''}${categoryPath ? `\nKategori yolu: ${categoryPath}` : ''}`;
+
+  let systemPrompt = `Sen Türkçe e-ticaret SEO uzmanısın. Yalnızca verilen ürün adından (ve varsa marka/kategori) SEO alanları üret.
+
+Yanıtını SADECE şu JSON formatında ver, başka metin yazma:
+{"seo_slug":"...","seo_title":"...","seo_description":"...","seo_keywords":"..."}
+
+Kurallar:
+- seo_slug: URL yolu parçası; küçük harf, rakam ve tire; ASCII (Türkçe karakter kullanma: ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c); örn: red-detayli-urun-adi
+- seo_title: meta title, arama sonuçları için, max 60 karakter, Türkçe
+- seo_keywords: virgülle ayrılmış 8-12 anahtar kelime, Türkçe. İlk sıradaki ifade "hedef kelime"dir (birincil anahtar kelime).
+- seo_description: meta description, max 160 karakter, tıklanmayı teşvik eden özet
+- ZORUNLU DOĞRULAMA (buna uygun üret): "Hedef kelime, ürün meta açıklaması içinde geçmelidir." Yani seo_keywords içinde virgülle ayrılmış İLK ifade, seo_description metninde tamamı veya anlamlı biçimde (kelime köküyle) geçmeli. Önce seo_keywords listesini yaz (hedef kelime en başta), sonra seo_description metnini bu hedefi içerecek şekilde kur; açıklama hedeften bağımsız yazılmasın.`;
+
+  if (userRules) {
+    systemPrompt += `
+
+Kullanıcının ek kuralları (önceliklidir, çelişki varsa buna uy):
+---
+${userRules}
+---`;
+  }
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.55,
+    }),
+  });
+
+  const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+  if (!res.ok) {
+    const errMsg = data?.error?.message ?? (await res.text()).slice(0, 200);
+    throw new Error(`OpenAI: ${errMsg}`);
+  }
+
+  const content = data?.choices?.[0]?.message?.content?.trim();
+  if (!content) throw new Error('OpenAI yanıt vermedi');
+
+  let parsed: { seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string };
+  try {
+    const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    parsed = JSON.parse(cleaned) as typeof parsed;
+  } catch {
+    throw new Error('OpenAI yanıtı parse edilemedi');
+  }
+
+  const rawKeywords = parsed.seo_keywords ?? '';
+  const rawDesc = parsed.seo_description ?? '';
+  const seo_description = ensureMetaDescriptionContainsTargetKeyword(rawDesc, rawKeywords, name);
+
+  return {
+    seo_slug: parsed.seo_slug ?? '',
+    seo_title: parsed.seo_title ?? '',
+    seo_description,
+    seo_keywords: rawKeywords,
+  };
+}
+
 /** Ürün adından SEO: slug, meta başlık, açıklama, anahtar kelimeler */
 app.post('/api/ai/generate-seo', async (c) => {
   try {
@@ -8234,60 +9950,14 @@ app.post('/api/ai/generate-seo', async (c) => {
 
     const brandName = (body?.brand_name ?? '').trim();
     const categoryPath = (body?.category_path ?? '').trim();
-    const userPrompt = `Ürün adı: ${name}${brandName ? `\nMarka: ${brandName}` : ''}${categoryPath ? `\nKategori yolu: ${categoryPath}` : ''}`;
-
-    const systemPrompt = `Sen Türkçe e-ticaret SEO uzmanısın. Yalnızca verilen ürün adından (ve varsa marka/kategori) SEO alanları üret.
-
-Yanıtını SADECE şu JSON formatında ver, başka metin yazma:
-{"seo_slug":"...","seo_title":"...","seo_description":"...","seo_keywords":"..."}
-
-Kurallar:
-- seo_slug: URL yolu parçası; küçük harf, rakam ve tire; ASCII (Türkçe karakter kullanma: ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c); örn: red-detayli-urun-adi
-- seo_title: meta title, arama sonuçları için, max 60 karakter, Türkçe
-- seo_keywords: virgülle ayrılmış 8-12 anahtar kelime, Türkçe. İlk sıradaki ifade "hedef kelime"dir (birincil anahtar kelime).
-- seo_description: meta description, max 160 karakter, tıklanmayı teşvik eden özet
-- ZORUNLU DOĞRULAMA (buna uygun üret): "Hedef kelime, ürün meta açıklaması içinde geçmelidir." Yani seo_keywords içinde virgülle ayrılmış İLK ifade, seo_description metninde tamamı veya anlamlı biçimde (kelime köküyle) geçmeli. Önce seo_keywords listesini yaz (hedef kelime en başta), sonra seo_description metnini bu hedefi içerecek şekilde kur; açıklama hedeften bağımsız yazılmasın.`;
-
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.55,
-      }),
-    });
-
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-    if (!res.ok) {
-      const errMsg = data?.error?.message ?? (await res.text()).slice(0, 200);
-      return c.json({ error: `OpenAI: ${errMsg}` }, 400);
-    }
-
-    const content = data?.choices?.[0]?.message?.content?.trim();
-    if (!content) return c.json({ error: 'OpenAI yanıt vermedi' }, 500);
-
-    let parsed: { seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string };
     try {
-      const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-      parsed = JSON.parse(cleaned) as typeof parsed;
-    } catch {
-      return c.json({ error: 'OpenAI yanıtı parse edilemedi' }, 500);
+      const out = await callOpenAiForProductSeoText({ productName: name, brandName, categoryPath }, apiKey);
+      return c.json(out);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'İstek başarısız';
+      if (msg.startsWith('OpenAI:')) return c.json({ error: msg }, 400);
+      return c.json({ error: msg }, 500);
     }
-
-    const rawKeywords = parsed.seo_keywords ?? '';
-    const rawDesc = parsed.seo_description ?? '';
-    const seo_description = ensureMetaDescriptionContainsTargetKeyword(rawDesc, rawKeywords, name);
-
-    return c.json({
-      seo_slug: parsed.seo_slug ?? '',
-      seo_title: parsed.seo_title ?? '',
-      seo_description,
-      seo_keywords: rawKeywords,
-    });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
   }
@@ -8422,6 +10092,139 @@ Kurallar:
     return c.json({
       ecommerce_name: parsed.ecommerce_name ?? '',
       main_description: parsed.main_description ?? '',
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
+  }
+});
+
+/** E-ticaret tam paket: vitrin adı (aynı kategoriden örnek biçim), hedef kelime + SEO anahtarlar, açıklama, meta; isteğe bağlı kullanıcı kuralları */
+app.post('/api/ai/generate-ecommerce-full', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req
+      .json<{
+        product_name?: string;
+        brand_name?: string;
+        category_path?: string;
+        category_id?: number | null;
+        exclude_product_id?: number | null;
+        user_rules?: string;
+      }>()
+      .catch(() => null);
+    const productName = (body?.product_name ?? '').trim();
+    if (!productName) return c.json({ error: 'Ana ürün adı (product_name) gerekli' }, 400);
+
+    const apiKey = await getOpenAiApiKey(c);
+    if (!apiKey) return c.json({ error: 'OpenAI API anahtarı tanımlı değil. Ayarlar > Entegrasyonlar sayfasından ekleyin.' }, 400);
+
+    const brandName = (body?.brand_name ?? '').trim();
+    const categoryPath = (body?.category_path ?? '').trim();
+    const userRules = (body?.user_rules ?? '').trim();
+    const categoryId =
+      body?.category_id != null && Number.isFinite(Number(body.category_id)) ? Number(body.category_id) : null;
+    const excludeId =
+      body?.exclude_product_id != null && Number(body.exclude_product_id) > 0 ? Number(body.exclude_product_id) : null;
+
+    let categoryExampleTitle = '';
+    if (categoryId && categoryId > 0) {
+      let exSql = `SELECT COALESCE(NULLIF(TRIM(pd.ecommerce_name), ''), NULLIF(TRIM(p.name), '')) AS example_title
+        FROM products p
+        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
+        WHERE p.is_deleted = 0 AND p.category_id = ?
+          AND COALESCE(NULLIF(TRIM(pd.ecommerce_name), ''), NULLIF(TRIM(p.name), '')) IS NOT NULL`;
+      const exBinds: number[] = [categoryId];
+      if (excludeId != null) {
+        exSql += ` AND p.id != ?`;
+        exBinds.push(excludeId);
+      }
+      exSql += ` ORDER BY p.updated_at DESC LIMIT 1`;
+      const exRow = await c.env.DB.prepare(exSql).bind(...exBinds).first<{ example_title: string | null }>();
+      categoryExampleTitle = String(exRow?.example_title ?? '').trim();
+    }
+
+    const userLines: string[] = [
+      `Ana ürün adı (stok / iç ad): ${productName}`,
+      brandName ? `Marka: ${brandName}` : null,
+      categoryPath ? `Kategori yolu: ${categoryPath}` : null,
+      categoryExampleTitle
+        ? `Aynı kategoriden örnek vitrin/e-ticaret ürün adı (yalnızca İSİMLENDİRME BİÇİMİ için referans; metni kopyalama, bu ürüne özgü yaz):\n"${categoryExampleTitle}"`
+        : categoryId
+          ? 'Aynı kategoride örnek vitrin adı bulunamadı; sektöre uygun tutarlı bir e-ticaret adı üret.'
+          : null,
+    ].filter((x): x is string => Boolean(x));
+
+    let systemPrompt = `Sen Türkçe e-ticaret içerik uzmanısın. Verilen ürün bilgilerine göre aşağıdaki alanların tamamını tek seferde üret.
+
+Yanıtını SADECE şu JSON formatında ver, başka metin veya markdown kod bloğu kullanma:
+{"ecommerce_name":"...","seo_keywords":"...","main_description":"...","seo_title":"...","seo_description":"...","seo_slug":"..."}
+
+Alan kuralları:
+- ecommerce_name: Vitrinde görünecek e-ticaret ürün adı; mümkünse verilen "aynı kategoriden örnek" ile benzer yapı (uzunluk, ayraçlar, marka/özellik sırası, ölçü birimi kullanımı vb.) ama içerik bu ürüne özel ve özgün olsun. Max ~100 karakter.
+- seo_keywords: Virgülle ayrılmış 8-12 anahtar kelime, Türkçe. İLK ifade birincil hedef kelimedir (sistemde "hedef kelime" olarak kullanılır); sonrası destekleyici kelimeler.
+- main_description: Ürün açıklaması; HTML kullanabilirsin (p, ul, li, strong). 2-4 paragraf, satış ve fayda odaklı, abartılı iddia yok.
+- seo_title: Meta title, arama sonuçları için, max 60 karakter, Türkçe.
+- seo_description: Meta description, max 160 karakter; birincil hedef kelimenin (seo_keywords içindeki ilk ifade) metinde geçmesi gerekir.
+- seo_slug: URL parçası; küçük harf, rakam ve tire; ASCII (Türkçe harf kullanma: ı→i, ş→s, ğ→g, ü→u, ö→o, ç→c).`;
+
+    if (userRules) {
+      systemPrompt += `
+
+Kullanıcının ek kuralları (önceliklidir, çelişki varsa buna uy):
+---
+${userRules}
+---`;
+    }
+
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userLines.join('\n') },
+        ],
+        temperature: 0.65,
+      }),
+    });
+
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+    if (!res.ok) {
+      const errMsg = data?.error?.message ?? (await res.text()).slice(0, 200);
+      return c.json({ error: `OpenAI: ${errMsg}` }, 400);
+    }
+
+    const content = data?.choices?.[0]?.message?.content?.trim();
+    if (!content) return c.json({ error: 'OpenAI yanıt vermedi' }, 500);
+
+    let parsed: {
+      ecommerce_name?: string;
+      seo_keywords?: string;
+      main_description?: string;
+      seo_title?: string;
+      seo_description?: string;
+      seo_slug?: string;
+    };
+    try {
+      const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      parsed = JSON.parse(cleaned) as typeof parsed;
+    } catch {
+      return c.json({ error: 'OpenAI yanıtı parse edilemedi' }, 500);
+    }
+
+    const rawKeywords = parsed.seo_keywords ?? '';
+    const rawDesc = parsed.seo_description ?? '';
+    const ecommerceNameForSeo = (parsed.ecommerce_name ?? productName).trim() || productName;
+    const seo_description = ensureMetaDescriptionContainsTargetKeyword(rawDesc, rawKeywords, ecommerceNameForSeo);
+
+    return c.json({
+      ecommerce_name: parsed.ecommerce_name ?? '',
+      seo_keywords: rawKeywords,
+      main_description: parsed.main_description ?? '',
+      seo_title: parsed.seo_title ?? '',
+      seo_description,
+      seo_slug: parsed.seo_slug ?? '',
     });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
@@ -8627,6 +10430,333 @@ app.post('/api/marketplace/categories', async (c) => {
   }
 });
 
+/** Trendyol ürün kategorileri — kayıtlı `marketplace_trendyol` ayarlarıyla (ağaç + düz liste) */
+app.get('/api/trendyol/categories', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const settings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    const supplierId = settings.supplier_id?.trim();
+    const apiKey = settings.api_key?.trim();
+    const apiSecret = settings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json(
+        {
+          error:
+            'Trendyol API ayarları eksik. Ayarlar › Marketplace › Trendyol: Satıcı ID, API Key ve API Secret kaydedin.',
+        },
+        400,
+      );
+    }
+    const userAgent = (settings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = settings.environment?.trim().toLowerCase();
+    const apiUrl = settings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const trendyolHeaders: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+    };
+    const res = await fetch(`${base}/integration/product/product-categories`, {
+      method: 'GET',
+      headers: trendyolHeaders,
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      return c.json({ error: `Trendyol ${res.status}: ${errText.slice(0, 400)}` }, 400);
+    }
+    const raw = (await res.json()) as unknown;
+    let data: unknown[] = [];
+    if (Array.isArray(raw)) {
+      data = raw;
+    } else if (raw && typeof raw === 'object' && 'categories' in raw) {
+      data = Array.isArray((raw as { categories?: unknown }).categories)
+        ? (raw as { categories: unknown[] }).categories
+        : [];
+    } else if (raw && typeof raw === 'object' && 'id' in raw) {
+      data = [raw];
+    }
+    type TyCat = { id?: number; name?: string; subCategories?: TyCat[] };
+    const flattenTy = (items: TyCat[], parentId: number | null = null): { id: number; name: string; parentId: number | null }[] => {
+      const result: { id: number; name: string; parentId: number | null }[] = [];
+      for (const cat of items) {
+        const id = cat.id ?? 0;
+        result.push({ id, name: String(cat.name ?? ''), parentId });
+        const subs = Array.isArray(cat.subCategories) ? cat.subCategories : [];
+        if (subs.length) result.push(...flattenTy(subs as TyCat[], id));
+      }
+      return result;
+    };
+    const toTree = (items: TyCat[]): { id: number; name: string; subCategories?: { id: number; name: string; subCategories?: unknown[] }[] }[] =>
+      items.map((cat) => {
+        const id = cat.id ?? 0;
+        const name = String(cat.name ?? '');
+        const subs = Array.isArray(cat.subCategories) ? toTree(cat.subCategories as TyCat[]) : [];
+        if (subs.length === 0) return { id, name };
+        return { id, name, subCategories: subs };
+      });
+    const list = Array.isArray(data) ? (data as TyCat[]) : [];
+    return c.json({
+      tree: list.length ? toTree(list) : [],
+      flat: list.length ? flattenTy(list) : [],
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kategoriler alınamadı' }, 500);
+  }
+});
+
+/** Master ürün → Trendyol createProducts (V1) — https://developers.trendyol.com/v2.0/docs/product-create-createproducts */
+app.post('/api/trendyol/products/create', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req
+      .json<{
+        product_id?: number;
+        /** Görsel URL kökü (https, /storage/serve için) — genelde web istemcisindeki API_URL */
+        image_origin?: string;
+        trendyol_category_id?: number;
+        trendyol_brand_id?: number;
+        cargo_company_id?: number;
+        dimensional_weight?: number;
+        attributes?: { attributeId: number; attributeValueId?: number; customAttributeValue?: string }[];
+        product_main_id?: string;
+        barcode?: string;
+        stock_code?: string;
+        title?: string;
+        description?: string;
+        list_price?: number;
+        sale_price?: number;
+        shipment_address_id?: number;
+        returning_address_id?: number;
+      }>()
+      .catch(() => null);
+    if (!body?.product_id || body.product_id < 1) return c.json({ error: 'product_id gerekli' }, 400);
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const tySettings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) tySettings[r.key] = r.value ?? '';
+    }
+    const supplierId = tySettings.supplier_id?.trim();
+    const apiKey = tySettings.api_key?.trim();
+    const apiSecret = tySettings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json(
+        { error: 'Trendyol API ayarları eksik (Satıcı ID, API Key, Secret). Ayarlar › Marketplace › Trendyol.' },
+        400,
+      );
+    }
+
+    const pid = body.product_id;
+    const row = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.image,
+              pd.main_description, pd.ecommerce_name,
+              (SELECT price FROM product_prices WHERE product_id = p.id AND price_type_id = 1 AND is_deleted = 0 LIMIT 1) as ecommerce_price
+       FROM products p
+       LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0`,
+    )
+      .bind(pid)
+      .first<{
+        id: number;
+        name: string;
+        sku: string | null;
+        barcode: string | null;
+        price: number | null;
+        quantity: number | null;
+        tax_rate: number | null;
+        image: string | null;
+        main_description: string | null;
+        ecommerce_name: string | null;
+        ecommerce_price: number | null;
+      }>();
+    if (!row) return c.json({ error: 'Ürün bulunamadı' }, 404);
+
+    const catId = Number(body.trendyol_category_id);
+    const brandId = Number(body.trendyol_brand_id);
+    const cargoId = Number(body.cargo_company_id);
+    const desi = Number(body.dimensional_weight);
+    if (!Number.isFinite(catId) || catId <= 0) return c.json({ error: 'Geçerli Trendyol categoryId gerekli' }, 400);
+    if (!Number.isFinite(brandId) || brandId <= 0) return c.json({ error: 'Geçerli Trendyol brandId gerekli' }, 400);
+    if (!Number.isFinite(cargoId) || cargoId <= 0) return c.json({ error: 'Geçerli cargoCompanyId gerekli' }, 400);
+    if (!Number.isFinite(desi) || desi <= 0) return c.json({ error: 'Pozitif dimensionalWeight (desi) gerekli' }, 400);
+
+    const attrs = Array.isArray(body.attributes) ? body.attributes : [];
+    if (attrs.length === 0) {
+      return c.json(
+        {
+          error:
+            'Kategori özellikleri (attributes) boş olamaz. Trendyol kategori niteliklerine göre en az bir attributeId / attributeValueId ekleyin.',
+        },
+        400,
+      );
+    }
+    for (const a of attrs) {
+      if (!a || typeof a.attributeId !== 'number' || !Number.isFinite(a.attributeId)) {
+        return c.json({ error: 'Her özellik için geçerli attributeId gerekli' }, 400);
+      }
+      const hasVal = a.attributeValueId != null && Number.isFinite(Number(a.attributeValueId));
+      const hasCustom = typeof a.customAttributeValue === 'string' && a.customAttributeValue.trim() !== '';
+      if (!hasVal && !hasCustom) {
+        return c.json({ error: 'Her özellik için attributeValueId veya customAttributeValue gerekli' }, 400);
+      }
+    }
+
+    const barcodeRaw = (body.barcode ?? row.barcode ?? row.sku ?? '').trim();
+    if (!barcodeRaw) return c.json({ error: 'Barkod veya SKU (barcode alanı) gerekli' }, 400);
+    if (barcodeRaw.length > 40) return c.json({ error: 'Barkod en fazla 40 karakter olabilir' }, 400);
+
+    const stockCode = (body.stock_code ?? row.sku ?? '').trim();
+    if (!stockCode) return c.json({ error: 'Stok kodu (SKU) gerekli' }, 400);
+    if (stockCode.length > 100) return c.json({ error: 'Stok kodu en fazla 100 karakter' }, 400);
+
+    const titleRaw = (body.title ?? row.ecommerce_name ?? row.name ?? '').trim();
+    if (!titleRaw) return c.json({ error: 'Ürün adı boş olamaz' }, 400);
+    if (titleRaw.length > 100) return c.json({ error: 'Ürün adı en fazla 100 karakter (Trendyol)' }, 400);
+
+    const descRaw = (body.description ?? row.main_description ?? '').trim();
+    if (!descRaw) return c.json({ error: 'Ürün açıklaması (main_description) gerekli' }, 400);
+    if (descRaw.length > 30000) return c.json({ error: 'Açıklama en fazla 30.000 karakter' }, 400);
+
+    const saleBase =
+      body.sale_price != null && Number.isFinite(body.sale_price) && body.sale_price > 0
+        ? Number(body.sale_price)
+        : row.ecommerce_price != null && Number(row.ecommerce_price) > 0
+          ? Number(row.ecommerce_price)
+          : Number(row.price ?? 0);
+    if (!Number.isFinite(saleBase) || saleBase <= 0) {
+      return c.json({ error: 'Geçerli satış fiyatı yok (ürün fiyatı veya e-ticaret fiyatı)' }, 400);
+    }
+
+    let listP =
+      body.list_price != null && Number.isFinite(body.list_price) && body.list_price > 0 ? Number(body.list_price) : 0;
+    if (listP <= 0) listP = Math.round(saleBase * 1.08 * 100) / 100;
+    if (listP < saleBase) {
+      return c.json({ error: 'listPrice, salePrice değerinden küçük olamaz (Trendyol kuralı)' }, 400);
+    }
+
+    const qty = Math.max(0, Math.floor(Number(row.quantity ?? 0)));
+    const tr = Number(row.tax_rate ?? 20);
+    let vatRate = Math.round(tr <= 1 ? tr * 100 : tr);
+    const allowedVat = new Set([0, 1, 10, 18, 20]);
+    if (!allowedVat.has(vatRate)) {
+      vatRate = [0, 1, 10, 18, 20].reduce((best, x) => (Math.abs(x - vatRate) < Math.abs(best - vatRate) ? x : best), 20);
+    }
+
+    const paths = parseProductImageStoragePaths(row.image ?? '');
+    const origin = (body.image_origin ?? '').trim().replace(/\/+$/, '');
+    if (!origin.startsWith('https://')) {
+      return c.json(
+        {
+          error:
+            'Görsel tabanı (image_origin) https ile tam adres olmalı (örn. uygulama API kök URL’si). Trendyol görselleri https URL ile ister.',
+        },
+        400,
+      );
+    }
+    const images: { url: string }[] = [];
+    for (const p of paths.slice(0, 8)) {
+      const u = `${origin}/storage/serve?key=${encodeURIComponent(p)}`;
+      images.push({ url: u });
+    }
+    if (images.length === 0) {
+      return c.json({ error: 'En az bir ürün görseli gerekli (Trendyol). Ürün kartına görsel ekleyin.' }, 400);
+    }
+
+    const productMainId = (body.product_main_id ?? row.sku ?? String(row.id)).trim().slice(0, 40);
+    if (!productMainId) return c.json({ error: 'productMainId (model kodu) gerekli' }, 400);
+
+    const item: Record<string, unknown> = {
+      barcode: barcodeRaw,
+      title: titleRaw,
+      productMainId,
+      brandId,
+      categoryId: catId,
+      quantity: qty,
+      stockCode,
+      dimensionalWeight: desi,
+      description: descRaw,
+      currencyType: 'TRY',
+      listPrice: listP,
+      salePrice: saleBase,
+      vatRate,
+      cargoCompanyId: cargoId,
+      shipmentAddressId: body.shipment_address_id ?? 0,
+      returningAddressId: body.returning_address_id ?? 0,
+      images,
+      attributes: attrs.map((a) => {
+        const o: Record<string, unknown> = { attributeId: a.attributeId };
+        if (a.attributeValueId != null) o.attributeValueId = a.attributeValueId;
+        if (a.customAttributeValue != null && String(a.customAttributeValue).trim() !== '') {
+          o.customAttributeValue = String(a.customAttributeValue).trim();
+        }
+        return o;
+      }),
+    };
+
+    const userAgent = (tySettings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = tySettings.environment?.trim().toLowerCase();
+    const apiUrl = tySettings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const trendyolHeaders: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'Content-Type': 'application/json',
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+    };
+
+    const res = await fetch(`${base}/integration/product/sellers/${supplierId}/products`, {
+      method: 'POST',
+      headers: trendyolHeaders,
+      body: JSON.stringify({ items: [item] }),
+    });
+    const text = await res.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    if (!res.ok) {
+      return c.json(
+        { error: `Trendyol ${res.status}`, detail: text.slice(0, 800), parsed: json },
+        400,
+      );
+    }
+    return c.json({
+      ok: true,
+      raw: json,
+      message:
+        'İstek kabul edildi. Ürün onay sürecine alınır; batchRequestId ile getBatchRequestResult ile durumu kontrol edin (Trendyol dokümantasyonu).',
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Aktarım başarısız' }, 500);
+  }
+});
+
 /** Kategori sil (soft delete) */
 app.delete('/api/app-settings-category', async (c) => {
   try {
@@ -8780,6 +10910,169 @@ app.post('/api/integrations/test/parasut', async (c) => {
   }
 });
 
+/** OKM (eski site) MySQL: istek gövdesindeki bilgilerle veya kayıtlı `okm_mysql` / genel `mysql` ayarlarıyla test */
+app.post('/api/integrations/test/okm-mysql', async (c) => {
+  try {
+    const body = await c.req
+      .json<{
+        host?: string;
+        server?: string;
+        port?: number | string;
+        database?: string;
+        user?: string;
+        password?: string;
+        /** true: yalnızca sunucuya TCP + kimlik doğrulama (veritabanı / blog tablosu gerekmez) */
+        connection_only?: boolean;
+      }>()
+      .catch(() => ({}));
+
+    const okm = await loadOkmMysqlSettingsMap(c);
+    const host = (body.host || body.server || '').trim() || (okm.host || okm.server || '').trim();
+    const user = (body.user || '').trim() || (okm.user || '').trim();
+    const connectionOnly = body.connection_only === true;
+    const database = connectionOnly ? '' : (body.database || '').trim() || (okm.database || '').trim();
+    let password = String(okm.password ?? '');
+    if (body.password !== undefined && body.password !== null && String(body.password) !== '') {
+      password = String(body.password);
+    }
+    const portRaw =
+      body.port !== undefined && body.port !== null && String(body.port) !== '' ? body.port : okm.port;
+    const portNum =
+      typeof portRaw === 'number' && Number.isFinite(portRaw)
+        ? portRaw
+        : parseInt(String(portRaw || '3306'), 10) || 3306;
+
+    if (host && user && database) {
+      const config = { host, port: String(portNum), database, user, password };
+      const connection = await createMysqlConnection(config);
+      try {
+        const conn = connection as unknown as { execute: (sql: string) => Promise<[unknown[]]> };
+        await conn.execute('SELECT 1 AS ok');
+        return c.json({ ok: true, message: 'MySQL bağlantısı başarılı.' });
+      } finally {
+        await connection.end();
+      }
+    }
+
+    if (host && user) {
+      const connection = await createMysqlServerConnection({
+        host,
+        port: portNum,
+        user,
+        password: String(password),
+      });
+      try {
+        const conn = connection as unknown as { execute: (sql: string) => Promise<[unknown[]]> };
+        await conn.execute('SELECT 1 AS ok');
+        return c.json({ ok: true, message: 'MySQL sunucu bağlantısı başarılı (veritabanı seçilmeden).' });
+      } finally {
+        await connection.end();
+      }
+    }
+
+    const config = await getOkmMysqlConfig(c);
+    if (!config) {
+      return c.json(
+        {
+          ok: false,
+          error:
+            'Sunucu ve kullanıcı gerekli. Kayıtlı OKM veya Veri Aktarımı MySQL ayarlarını kontrol edin.',
+        },
+        400,
+      );
+    }
+
+    const connection = await createMysqlConnection(config);
+    try {
+      const conn = connection as unknown as { execute: (sql: string) => Promise<[unknown[]]> };
+      await conn.execute('SELECT 1 AS ok');
+      return c.json({ ok: true, message: 'MySQL bağlantısı başarılı.' });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ ok: false, error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
+/** OKM: sunucuya bağlanıp erişilebilir veritabanı adlarını listeler */
+app.post('/api/integrations/okm-mysql/databases', async (c) => {
+  try {
+    const body = await c.req
+      .json<{ host?: string; server?: string; port?: number | string; user?: string; password?: string }>()
+      .catch(() => ({}));
+    const connection = await connectMysqlForOkmMetadata(c, body);
+    if (!connection) {
+      return c.json(
+        {
+          ok: false,
+          error:
+            'Sunucu (host) ve kullanıcı gerekli. OKM sekmesinde doldurun veya Veri Aktarımı altında genel MySQL tanımlayın.',
+        },
+        400,
+      );
+    }
+    try {
+      const conn = connection as unknown as { execute: (sql: string) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute('SHOW DATABASES');
+      const raw = (rows as Record<string, unknown>[])
+        .map((r) => String(r.Database ?? Object.values(r)[0] ?? ''))
+        .filter(Boolean);
+      const skip = new Set(['information_schema', 'performance_schema', 'mysql', 'sys']);
+      const databases = raw.filter((d) => !skip.has(d.toLowerCase())).sort((a, b) => a.localeCompare(b, 'tr'));
+      return c.json({ ok: true, databases });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ ok: false, error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
+/** OKM: seçilen veritabanındaki tabloları listeler */
+app.post('/api/integrations/okm-mysql/tables', async (c) => {
+  try {
+    const body = await c.req
+      .json<{
+        host?: string;
+        server?: string;
+        port?: number | string;
+        user?: string;
+        password?: string;
+        database?: string;
+      }>()
+      .catch(() => ({}));
+    const db = sanitizeMysqlSchemaName(body.database || '');
+    if (!db) {
+      return c.json({ ok: false, error: 'Geçerli bir veritabanı adı gerekli.' }, 400);
+    }
+    const connection = await connectMysqlForOkmMetadata(c, body);
+    if (!connection) {
+      return c.json(
+        {
+          ok: false,
+          error:
+            'Sunucu (host) ve kullanıcı gerekli. OKM sekmesinde doldurun veya Veri Aktarımı altında genel MySQL tanımlayın.',
+        },
+        400,
+      );
+    }
+    try {
+      const conn = connection as unknown as { execute: (sql: string) => Promise<[unknown[]]> };
+      const [rows] = await conn.execute(`SHOW TABLES FROM \`${db.replace(/`/g, '')}\``);
+      const tables = (rows as Record<string, unknown>[])
+        .map((r) => String(Object.values(r)[0] ?? ''))
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, 'tr'));
+      return c.json({ ok: true, tables });
+    } finally {
+      await connection.end();
+    }
+  } catch (err: unknown) {
+    return c.json({ ok: false, error: formatMysqlOutboundError(err) }, 500);
+  }
+});
+
 app.post('/api/integrations/ideasoft/exchange-code', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -8808,7 +11101,7 @@ app.post('/api/integrations/test/ideasoft', async (c) => {
         400
       );
     }
-    const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, '/currencies?limit=1', { method: 'GET' }, settings, auth);
+    const res = await ideasoftDoAdminRequestWithRefresh(c.env.DB, '/currencies?limit=1', { method: 'GET' }, settings, auth);
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -8816,7 +11109,7 @@ app.post('/api/integrations/test/ideasoft', async (c) => {
     } catch {
       body = null;
     }
-    if (res.ok) return c.json({ ok: true, message: 'Store API bağlantısı başarılı (GET /api/currencies).' });
+    if (res.ok) return c.json({ ok: true, message: 'Admin API bağlantısı başarılı (GET /admin-api/currencies).' });
     const errMsg =
       body && typeof body === 'object'
         ? (body as { error_description?: string; message?: string; error?: string }).error_description

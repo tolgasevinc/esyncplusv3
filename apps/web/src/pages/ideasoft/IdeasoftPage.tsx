@@ -17,6 +17,7 @@ import {
   XCircle,
   Loader2,
   ScanLine,
+  BookOpen,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -43,6 +44,16 @@ const storeParamSections: { id: string; title: string; icon: LucideIcon; to?: st
   { id: 'markalar', title: 'Markalar', icon: Tag, to: '/ideasoft/markalar' },
   { id: 'kategoriler', title: 'Kategoriler', icon: FolderTree, to: '/ideasoft/kategoriler' },
   { id: 'para-birimleri', title: 'Para birimleri', icon: DollarSign, to: '/ideasoft/para-birimleri' },
+]
+
+const blogSections: { id: string; title: string; icon: LucideIcon; to?: string; apiHint?: string }[] = [
+  {
+    id: 'blog-sayfalari',
+    title: 'Blog sayfaları',
+    icon: BookOpen,
+    to: '/ideasoft/blog',
+    apiHint: 'Blog POST/PUT — kategori, etiket, status',
+  },
 ]
 
 const productParamSections: { id: string; title: string; icon: LucideIcon; to?: string; apiHint?: string }[] = [
@@ -605,6 +616,21 @@ export function IdeasoftPage() {
           </CardHeader>
           <CardContent>
             <SectionGrid sections={primarySections} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <BookOpen className="h-6 w-6 text-primary" />
+              <CardTitle>Blog sayfaları</CardTitle>
+            </div>
+            <CardDescription>
+              OKM’den IdeaSoft’a aktarımda kullanılan varsayılan kategori, etiket ve yayın alanları (Admin API).
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <SectionGrid sections={blogSections} />
           </CardContent>
         </Card>
 

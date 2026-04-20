@@ -7,7 +7,9 @@
     "dev:remote": "wrangler dev --remote",
     "build": "wrangler deploy --dry-run --outdir=dist",
     "deploy": "wrangler deploy",
-    "deploy:api": "wrangler deploy"
+    "deploy:api": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply esync-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply esync-db --remote"
   },
   "dependencies": {
     "hono": "^4.6.0",

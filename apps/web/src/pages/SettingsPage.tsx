@@ -78,9 +78,11 @@ const SETTINGS_GROUPS: SettingsNavGroup[] = [
     items: [
       { label: 'Paraşüt', to: '/ayarlar/entegrasyonlar?tab=parasut' },
       { label: 'IdeaSoft', to: '/ayarlar/entegrasyonlar?tab=ideasoft' },
+      { label: 'OpenAI', to: '/ayarlar/entegrasyonlar?tab=openai' },
+      { label: 'OKM (eski site MySQL)', to: '/ayarlar/entegrasyonlar?tab=okm' },
       { label: 'Opencart', to: '/opencart' },
       { label: 'Shopify', soon: true },
-      { label: 'Trendyol', soon: true },
+      { label: 'Trendyol (API)', to: '/ayarlar/marketplace?m=trendyol' },
       { label: 'Hepsiburada', soon: true },
       { label: 'Pazarama', soon: true },
       { label: 'EPttAVM', soon: true },
@@ -212,6 +214,10 @@ export function SettingsPage() {
         <span className="text-border">·</span>
         <Link to="/ayarlar/entegrasyonlar?tab=openai" className="underline underline-offset-2 hover:text-foreground">
           OpenAI
+        </Link>
+        <span className="text-border">·</span>
+        <Link to="/ayarlar/entegrasyonlar?tab=okm" className="underline underline-offset-2 hover:text-foreground">
+          OKM MySQL
         </Link>
         <span className="text-border">·</span>
         <Link to="/parasut" className="underline underline-offset-2 hover:text-foreground inline-flex items-center gap-1">

@@ -19,7 +19,10 @@ export interface ProductCodeDisplayProps {
   brandCode: string
   supplierCode: string
   onSupplierCodeChange: (value: string) => void
-  /** Paket/mamül/hizmet gibi tiplerde tedarikçi kodu düzenlenemez */
+  /**
+   * Marka/kategori ön ekinden sonraki parça düzenlenebilir mi.
+   * Paket vb. tiplerde tedarikçi kodu alanı kapalı olsa da SKU son eki buradan değiştirilebilir (varsayılan: true).
+   */
   supplierCodeEditable?: boolean
   /** Mevcut SKU (nokta ile ayrılmış). Verilirse son noktadan sonrası parse edilir */
   sku?: string
