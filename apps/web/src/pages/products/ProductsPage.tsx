@@ -24,6 +24,7 @@ import {
   XCircle,
   Sparkles,
   ScrollText,
+  FileUp,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -78,6 +79,7 @@ import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { lookupFromSupplierSource, fetchMatchedSupplierCodesFromBrand } from '@/lib/supplierSource'
 import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/utils'
 import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
+import { ProductImportModal } from './ProductImportModal'
 
 /** Dinamik arka plan rengi - style attribute yerine ref ile CSS değişkeni atar (linter uyumlu) */
 const DynamicBgSpan = forwardRef<HTMLSpanElement, { color: string; className?: string } & ComponentPropsWithoutRef<'span'>>(
@@ -719,6 +721,7 @@ export function ProductsPage() {
   const [bulkQuantity, setBulkQuantity] = useState<string>('0')
   const [bulkSaving, setBulkSaving] = useState(false)
   const [ideasoftBulkLoading, setIdeasoftBulkLoading] = useState(false)
+  const [productImportOpen, setProductImportOpen] = useState(false)
   const [ideasoftBulkTransferModalOpen, setIdeasoftBulkTransferModalOpen] = useState(false)
   const [ideasoftBulkSyncGeneral, setIdeasoftBulkSyncGeneral] = useState(false)
   const [ideasoftBulkSyncPrice, setIdeasoftBulkSyncPrice] = useState(false)
@@ -2942,6 +2945,14 @@ export function ProductsPage() {
               <TooltipContent>Satır seçerek toplu işlem yapabilirsiniz</TooltipContent>
             </Tooltip>
           )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="icon" onClick={() => setProductImportOpen(true)}>
+                <FileUp className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>İçe aktar</TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" size="icon" onClick={openNew}>
@@ -5228,6 +5239,13 @@ export function ProductsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ProductImportModal
+        open={productImportOpen}
+        onOpenChange={setProductImportOpen}
+        categories={categories}
+        onImported={() => void fetchData()}
+      />
 
       <Dialog open={!!imageUploadProduct} onOpenChange={(open) => !open && closeImageUploadModal()}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">

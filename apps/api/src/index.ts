@@ -1379,6 +1379,32 @@ app.get('/api/products/by-sku', async (c) => {
   }
 });
 
+/** İçe aktarımda: verilen kodların products tablosunda olup olmadığını kontrol eder (normalize edilmiş eşleşme). */
+app.post('/api/products/import-check', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      match_field: 'sku' | 'barcode' | 'supplier_code';
+      values: string[];
+    }>();
+    const field = body.match_field;
+    if (field !== 'sku' && field !== 'barcode' && field !== 'supplier_code') {
+      return c.json({ error: 'match_field: sku, barcode veya supplier_code olmalı' }, 400);
+    }
+    const rawVals = Array.isArray(body.values) ? body.values : [];
+    const values = [...new Set(rawVals.map((v) => String(v ?? '').trim()).filter(Boolean))].slice(0, 8000);
+    if (values.length === 0) return c.json({ existing: [] as string[] });
+    const { results } = await c.env.DB.prepare(
+      `SELECT TRIM(COALESCE(${field}, '')) as v FROM products WHERE is_deleted = 0 AND TRIM(COALESCE(${field}, '')) != ''`
+    ).all();
+    const dbNorm = new Set((results as { v: string }[]).map((r) => normalizeForSearch(r.v)));
+    const existing = values.filter((v) => dbNorm.has(normalizeForSearch(v)));
+    return c.json({ existing });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
+  }
+});
+
 /** Ana üründen e-ticaret fiyatı, para birimi ve KDV oranını model/SKU ile getirir (OpenCart Getir butonu için) */
 app.get('/api/products/ecommerce-price-by-sku', async (c) => {
   try {
