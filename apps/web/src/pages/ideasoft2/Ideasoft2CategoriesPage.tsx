@@ -1,14 +1,24 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { RefreshCw, RotateCcw, Search } from 'lucide-react'
+import { Link2, RefreshCw, RotateCcw, Search, Unlink } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type { IdeasoftCategoryRow } from '@/pages/ideasoft/IdeasoftCategoriesPage'
+import type { CategoryItem } from '@/components/CategorySelect'
+import { MasterCategoryTreePicker } from '@/components/MasterCategoryTreePicker'
+import { toastSuccess, toastError } from '@/lib/toast'
 
 /** LIST yanıtı — IdeasoftCategoriesPage ile aynı şema */
 function extractCategoriesList(json: unknown): { items: IdeasoftCategoryRow[]; total: number } {
@@ -375,6 +385,11 @@ function categoryNameCellClass(depth: number): string {
 
 type MasterByIdeasoftId = Map<number, { id: number; name: string }>
 
+type MasterProductCategoryRow = CategoryItem & {
+  ideasoft_category_id?: number | null
+  ideasoft_category_code?: string | null
+}
+
 /** Master satırındaki `ideasoft_category_id` = IdeaSoft kategori tablosundaki `id` */
 function buildMasterByIdeasoftId(
   rows: { id: number; name: string; ideasoft_category_id?: number | null }[]
@@ -400,29 +415,82 @@ function IdeasoftDistributorCell({ row }: { row: IdeasoftCategoryRow }) {
   )
 }
 
-function MasterMatchCell({ row, masterByIdeasoftId }: { row: IdeasoftCategoryRow; masterByIdeasoftId: MasterByIdeasoftId }) {
+function MasterMatchCell({
+  row,
+  masterByIdeasoftId,
+  onLink,
+  onUnlink,
+  busy,
+}: {
+  row: IdeasoftCategoryRow
+  masterByIdeasoftId: MasterByIdeasoftId
+  onLink: (row: IdeasoftCategoryRow) => void
+  onUnlink: (row: IdeasoftCategoryRow, masterId: number) => void
+  busy?: boolean
+}) {
   const m = masterByIdeasoftId.get(row.id)
   if (m) {
     return (
-      <span
-        className="text-xs font-medium text-emerald-700 dark:text-emerald-400"
-        title={`Master kategori #${m.id}`}
-      >
-        ✓ {m.name}
-      </span>
+      <div className="flex min-w-0 max-w-full items-center gap-0.5">
+        <span
+          className="min-w-0 flex-1 truncate text-xs font-medium text-emerald-700 dark:text-emerald-400"
+          title={`Master kategori #${m.id}: ${m.name}`}
+        >
+          ✓ {m.name}
+        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+              disabled={busy}
+              onClick={() => onUnlink(row, m.id)}
+              aria-label="Eşleştirmeyi kaldır"
+            >
+              <Unlink className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Eşleştirmeyi kaldır</TooltipContent>
+        </Tooltip>
+      </div>
     )
   }
-  return <span className="text-xs text-amber-700 dark:text-amber-400">Eşleşmedi</span>
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-8 w-8 shrink-0"
+          disabled={busy}
+          onClick={() => onLink(row)}
+          aria-label="Master ile eşleştir"
+        >
+          <Link2 className="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Master ile eşleştir</TooltipContent>
+    </Tooltip>
+  )
 }
 
 function CategoryTreeTable({
   nodes,
   depth,
   masterByIdeasoftId,
+  onLink,
+  onUnlink,
+  busy,
 }: {
   nodes: CatNode[]
   depth: number
   masterByIdeasoftId: MasterByIdeasoftId
+  onLink: (row: IdeasoftCategoryRow) => void
+  onUnlink: (row: IdeasoftCategoryRow, masterId: number) => void
+  busy?: boolean
 }) {
   return (
     <>
@@ -459,7 +527,13 @@ function CategoryTreeTable({
               <IdeasoftDistributorCell row={n.row} />
             </td>
             <td className="min-w-[120px] max-w-[200px] py-2.5 pr-3 align-middle">
-              <MasterMatchCell row={n.row} masterByIdeasoftId={masterByIdeasoftId} />
+              <MasterMatchCell
+                row={n.row}
+                masterByIdeasoftId={masterByIdeasoftId}
+                onLink={onLink}
+                onUnlink={onUnlink}
+                busy={busy}
+              />
             </td>
           </tr>
           {n.children.length > 0 ? (
@@ -467,6 +541,9 @@ function CategoryTreeTable({
               nodes={n.children}
               depth={depth + 1}
               masterByIdeasoftId={masterByIdeasoftId}
+              onLink={onLink}
+              onUnlink={onUnlink}
+              busy={busy}
             />
           ) : null}
         </Fragment>
@@ -477,11 +554,13 @@ function CategoryTreeTable({
 
 export function Ideasoft2CategoriesPage() {
   const [rows, setRows] = useState<IdeasoftCategoryRow[]>([])
-  const [masterRows, setMasterRows] = useState<
-    { id: number; name: string; ideasoft_category_id?: number | null; ideasoft_category_code?: string | null }[]
-  >([])
+  const [masterRows, setMasterRows] = useState<MasterProductCategoryRow[]>([])
   const [loading, setLoading] = useState(true)
   const [listError, setListError] = useState<string | null>(null)
+  const [matchDialogRow, setMatchDialogRow] = useState<IdeasoftCategoryRow | null>(null)
+  const [matchPickerSearch, setMatchPickerSearch] = useState('')
+  const [matchPickerSelectedMasterId, setMatchPickerSelectedMasterId] = useState<number | null>(null)
+  const [matchSaving, setMatchSaving] = useState(false)
   const [listState, setListState] = usePersistedListState('ideasoft2-categories-v1', listDefaults)
   const { search, cascadePath } = listState
   const cascadePathEffective = cascadePath.slice(0, CASCADE_MAX_DEPTH)
@@ -490,10 +569,33 @@ export function Ideasoft2CategoriesPage() {
     try {
       const res = await fetch(`${API_URL}/api/product-categories?limit=9999`)
       const json = await parseJsonResponse<{
-        data?: { id: number; name: string; ideasoft_category_id?: number | null; ideasoft_category_code?: string | null }[]
+        data?: {
+          id: number
+          name: string
+          code?: string | null
+          group_id?: number | null
+          category_id?: number | null
+          sort_order?: number
+          color?: string | null
+          ideasoft_category_id?: number | null
+          ideasoft_category_code?: string | null
+        }[]
       }>(res)
-      if (res.ok && Array.isArray(json.data)) setMasterRows(json.data)
-      else setMasterRows([])
+      if (res.ok && Array.isArray(json.data)) {
+        setMasterRows(
+          json.data.map((x) => ({
+            id: x.id,
+            name: x.name,
+            code: x.code ?? '',
+            group_id: x.group_id ?? undefined,
+            category_id: x.category_id ?? undefined,
+            sort_order: x.sort_order,
+            color: x.color ?? undefined,
+            ideasoft_category_id: x.ideasoft_category_id ?? null,
+            ideasoft_category_code: x.ideasoft_category_code ?? null,
+          }))
+        )
+      } else setMasterRows([])
     } catch {
       setMasterRows([])
     }
@@ -522,6 +624,106 @@ export function Ideasoft2CategoriesPage() {
   }, [loadMasters])
 
   const masterByIdeasoftId = useMemo(() => buildMasterByIdeasoftId(masterRows), [masterRows])
+
+  const masterCategoryItems = useMemo(
+    () =>
+      masterRows.map((c) => ({
+        id: c.id,
+        name: c.name,
+        code: c.code,
+        group_id: c.group_id,
+        category_id: c.category_id,
+        sort_order: c.sort_order,
+        color: c.color,
+      })),
+    [masterRows]
+  )
+
+  const matchDialogDisabledMasterIds = useMemo(() => {
+    if (!matchDialogRow) return new Set<number>() as ReadonlySet<number>
+    const rid = matchDialogRow.id
+    return new Set(
+      masterRows
+        .filter((m) => m.ideasoft_category_id != null && Number(m.ideasoft_category_id) !== rid)
+        .map((m) => m.id)
+    )
+  }, [matchDialogRow, masterRows])
+
+  const openMatchDialog = useCallback((row: IdeasoftCategoryRow) => {
+    setMatchDialogRow(row)
+    setMatchPickerSearch('')
+    setMatchPickerSelectedMasterId(null)
+  }, [])
+
+  const closeMatchDialog = useCallback(() => {
+    setMatchDialogRow(null)
+    setMatchPickerSearch('')
+    setMatchPickerSelectedMasterId(null)
+  }, [])
+
+  const saveMatchFromDialog = useCallback(async () => {
+    if (!matchDialogRow || matchPickerSelectedMasterId == null) return
+    setMatchSaving(true)
+    try {
+      const codeRaw = (matchDialogRow.distributor || '').trim()
+      const code = codeRaw || null
+      const isId = matchDialogRow.id
+      const other = masterRows.find(
+        (m) =>
+          m.ideasoft_category_id != null &&
+          Number(m.ideasoft_category_id) === isId &&
+          m.id !== matchPickerSelectedMasterId
+      )
+      if (other) {
+        const clearRes = await fetch(`${API_URL}/api/product-categories/${other.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ideasoft_category_id: null, ideasoft_category_code: null }),
+        })
+        const clearData = await parseJsonResponse<{ error?: string }>(clearRes)
+        if (!clearRes.ok) throw new Error(clearData.error || 'Çakışan master temizlenemedi')
+      }
+      const res = await fetch(`${API_URL}/api/product-categories/${matchPickerSelectedMasterId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ideasoft_category_id: isId,
+          ideasoft_category_code: code,
+        }),
+      })
+      const data = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+      toastSuccess('Eşleştirildi', 'IdeaSoft kategori master kayıtla bağlandı.')
+      closeMatchDialog()
+      await loadMasters()
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+    } finally {
+      setMatchSaving(false)
+    }
+  }, [matchDialogRow, matchPickerSelectedMasterId, masterRows, closeMatchDialog, loadMasters])
+
+  const removeMatch = useCallback(
+    async (_row: IdeasoftCategoryRow, masterId: number) => {
+      setMatchSaving(true)
+      try {
+        const res = await fetch(`${API_URL}/api/product-categories/${masterId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ideasoft_category_id: null, ideasoft_category_code: null }),
+        })
+        const data = await parseJsonResponse<{ error?: string }>(res)
+        if (!res.ok) throw new Error(data.error || 'Kaldırılamadı')
+        toastSuccess('Kaldırıldı', 'Master eşleştirmesi silindi.')
+        await loadMasters()
+      } catch (err) {
+        toastError('Hata', err instanceof Error ? err.message : 'Kaldırılamadı')
+      } finally {
+        setMatchSaving(false)
+      }
+    },
+    [loadMasters]
+  )
 
   const tree = useMemo(() => buildCategoryTree(rows), [rows])
   const treeForView = useMemo(
@@ -658,7 +860,14 @@ export function Ideasoft2CategoriesPage() {
                     </td>
                   </tr>
                 ) : (
-                  <CategoryTreeTable nodes={visibleTree} depth={0} masterByIdeasoftId={masterByIdeasoftId} />
+                  <CategoryTreeTable
+                    nodes={visibleTree}
+                    depth={0}
+                    masterByIdeasoftId={masterByIdeasoftId}
+                    onLink={openMatchDialog}
+                    onUnlink={removeMatch}
+                    busy={matchSaving}
+                  />
                 )}
               </tbody>
             </table>
@@ -683,6 +892,63 @@ export function Ideasoft2CategoriesPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      <Dialog open={matchDialogRow != null} onOpenChange={(open) => !open && closeMatchDialog()}>
+        <DialogContent className="flex max-h-[min(90vh,640px)] flex-col gap-0 overflow-hidden sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Master ile eşleştir</DialogTitle>
+            {matchDialogRow ? (
+              <p className="text-sm text-muted-foreground">
+                IdeaSoft:{' '}
+                <span className="font-medium text-foreground">
+                  {matchDialogRow.name?.trim() || `#${matchDialogRow.id}`}
+                </span>{' '}
+                <span className="tabular-nums">(id {matchDialogRow.id})</span>
+              </p>
+            ) : null}
+          </DialogHeader>
+          {matchDialogRow ? (
+            <>
+              <div className="relative mt-2 shrink-0">
+                <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Master kategori ara…"
+                  value={matchPickerSearch}
+                  onChange={(e) => setMatchPickerSearch(e.target.value)}
+                  className="h-9 pl-8"
+                />
+              </div>
+              <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border bg-muted/20">
+                {masterCategoryItems.length === 0 ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    Master kategori yok. Önce Parametreler › Kategoriler üzerinden ekleyin.
+                  </div>
+                ) : (
+                  <MasterCategoryTreePicker
+                    categories={masterCategoryItems}
+                    selectedId={matchPickerSelectedMasterId}
+                    onSelect={setMatchPickerSelectedMasterId}
+                    searchQuery={matchPickerSearch}
+                    disabledMasterIds={matchDialogDisabledMasterIds}
+                  />
+                )}
+              </div>
+              <DialogFooter className="mt-4 gap-2 sm:justify-end">
+                <Button type="button" variant="outline" onClick={closeMatchDialog} disabled={matchSaving}>
+                  İptal
+                </Button>
+                <Button
+                  type="button"
+                  disabled={matchSaving || matchPickerSelectedMasterId == null}
+                  onClick={() => void saveMatchFromDialog()}
+                >
+                  {matchSaving ? 'Kaydediliyor…' : 'Kaydet'}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </PageLayout>
   )
 }
