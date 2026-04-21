@@ -708,12 +708,38 @@ export function IdeasoftCategoriesPage() {
     setMatchPickerSelectedMasterId(null)
   }
 
+  const putMasterIdeasoftCategorySync = async (
+    masterId: number,
+    payload: { ideasoft_category_id: number | null; ideasoft_category_code: string | null }
+  ) => {
+    const res = await fetch(`${API_URL}/api/product-categories/${masterId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const data = await parseJsonResponse<{ error?: string }>(res)
+    if (!res.ok) throw new Error(data.error || 'Master kategori IdeaSoft alanları güncellenemedi')
+  }
+
   const saveCategoryMapping = async () => {
     if (!matchPickerRow || matchPickerSelectedMasterId == null) return
     const isKey = String(matchPickerRow.id)
     const masterKey = String(matchPickerSelectedMasterId)
+    const codeRaw = (matchPickerRow.distributor || '').trim()
+    const code = codeRaw || null
     setSavingMapping(true)
     try {
+      const prevMasterId = parseStrictPositiveId(categoryMappings[isKey])
+      if (prevMasterId != null && prevMasterId !== matchPickerSelectedMasterId) {
+        await putMasterIdeasoftCategorySync(prevMasterId, {
+          ideasoft_category_id: null,
+          ideasoft_category_code: null,
+        })
+      }
+      await putMasterIdeasoftCategorySync(matchPickerSelectedMasterId, {
+        ideasoft_category_id: matchPickerRow.id,
+        ideasoft_category_code: code,
+      })
       const next = applyIdeasoftCategoryMapping(categoryMappings, isKey, masterKey)
       const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
         method: 'PUT',
@@ -723,7 +749,10 @@ export function IdeasoftCategoriesPage() {
       const data = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
       setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
-      toastSuccess('Eşleştirildi', 'IdeaSoft kategorisi master kategori ile bağlandı.')
+      toastSuccess(
+        'Eşleştirildi',
+        'IdeaSoft kategorisi master ile bağlandı; IdeaSoft kategori ID ve kod master kaydına yazıldı.'
+      )
       closeMatchPicker()
     } catch (err) {
       toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
@@ -737,6 +766,13 @@ export function IdeasoftCategoriesPage() {
     const isKey = String(matchPickerRow.id)
     setSavingMapping(true)
     try {
+      const prevMasterId = parseStrictPositiveId(categoryMappings[isKey])
+      if (prevMasterId != null) {
+        await putMasterIdeasoftCategorySync(prevMasterId, {
+          ideasoft_category_id: null,
+          ideasoft_category_code: null,
+        })
+      }
       const next = removeIdeasoftCategoryMappingKey(categoryMappings, isKey)
       const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
         method: 'PUT',
@@ -746,7 +782,7 @@ export function IdeasoftCategoriesPage() {
       const data = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
       setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
-      toastSuccess('Kaldırıldı', 'Master kategori eşleştirmesi silindi.')
+      toastSuccess('Kaldırıldı', 'Master eşleştirmesi ve IdeaSoft ID/kod alanları silindi.')
       closeMatchPicker()
     } catch (err) {
       toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
@@ -762,6 +798,13 @@ export function IdeasoftCategoriesPage() {
     if (!categoryMappings[isKey]) return
     setSavingMapping(true)
     try {
+      const prevMasterId = parseStrictPositiveId(categoryMappings[isKey])
+      if (prevMasterId != null) {
+        await putMasterIdeasoftCategorySync(prevMasterId, {
+          ideasoft_category_id: null,
+          ideasoft_category_code: null,
+        })
+      }
       const next = removeIdeasoftCategoryMappingKey(categoryMappings, isKey)
       const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
         method: 'PUT',
@@ -782,6 +825,19 @@ export function IdeasoftCategoriesPage() {
   const clearAllIdeasoftCategoryMappings = async () => {
     setClearingAllMappings(true)
     try {
+      for (const masterStr of Object.values(categoryMappings)) {
+        const mid = parseStrictPositiveId(masterStr)
+        if (mid != null) {
+          try {
+            await putMasterIdeasoftCategorySync(mid, {
+              ideasoft_category_id: null,
+              ideasoft_category_code: null,
+            })
+          } catch {
+            /* devam — mapping yine de temizlensin */
+          }
+        }
+      }
       const res = await fetch(`${API_URL}/api/ideasoft/category-mappings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -792,7 +848,7 @@ export function IdeasoftCategoriesPage() {
       setCategoryMappings({})
       closeMatchPicker()
       setClearAllMappingsOpen(false)
-      toastSuccess('Temizlendi', 'Tüm IdeaSoft–master kategori eşleştirmeleri kaldırıldı.')
+      toastSuccess('Temizlendi', 'Tüm IdeaSoft–master eşleştirmeleri ve master IdeaSoft ID/kod alanları kaldırıldı.')
     } catch (err) {
       toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
     } finally {

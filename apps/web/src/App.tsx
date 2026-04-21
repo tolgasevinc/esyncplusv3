@@ -82,6 +82,18 @@ const IdeasoftProductExtraFieldsPage = lazy(() =>
 const IdeasoftBlogPagesPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftBlogPagesPage').then((m) => ({ default: m.IdeasoftBlogPagesPage }))
 )
+const Ideasoft2Page = lazy(() =>
+  import('@/pages/ideasoft2/Ideasoft2Page').then((m) => ({ default: m.Ideasoft2Page }))
+)
+const Ideasoft2ProductsPage = lazy(() =>
+  import('@/pages/ideasoft2/Ideasoft2ProductsPage').then((m) => ({ default: m.Ideasoft2ProductsPage }))
+)
+const Ideasoft2CategoriesPage = lazy(() =>
+  import('@/pages/ideasoft2/Ideasoft2CategoriesPage').then((m) => ({ default: m.Ideasoft2CategoriesPage }))
+)
+const Ideasoft2BrandsPage = lazy(() =>
+  import('@/pages/ideasoft2/Ideasoft2BrandsPage').then((m) => ({ default: m.Ideasoft2BrandsPage }))
+)
 const VeriAktarimPage = lazy(() => import('@/pages/VeriAktarimPage').then((m) => ({ default: m.VeriAktarimPage })))
 const TrendyolPage = lazy(() => import('@/pages/trendyol/TrendyolPage').then((m) => ({ default: m.TrendyolPage })))
 const TrendyolCategoriesPage = lazy(() =>
@@ -129,6 +141,10 @@ function App() {
         <Route path="/ideasoft/urun-etiketleri" element={<IdeasoftProductLabelsPage />} />
         <Route path="/ideasoft/ekstra-ozellikler" element={<IdeasoftProductExtraFieldsPage />} />
         <Route path="/ideasoft/blog" element={<IdeasoftBlogPagesPage />} />
+        <Route path="/ideasoft2" element={<Ideasoft2Page />} />
+        <Route path="/ideasoft2/urunler" element={<Ideasoft2ProductsPage />} />
+        <Route path="/ideasoft2/kategoriler" element={<Ideasoft2CategoriesPage />} />
+        <Route path="/ideasoft2/markalar" element={<Ideasoft2BrandsPage />} />
         <Route path="/veri-aktarim" element={<VeriAktarimPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/ayarlar/genel" element={<SettingsGeneralPage />} />

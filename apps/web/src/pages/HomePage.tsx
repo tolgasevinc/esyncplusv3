@@ -22,6 +22,7 @@ import {
   LayoutDashboard,
   Download,
   FolderTree,
+  Layers,
 } from 'lucide-react'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -349,6 +350,12 @@ export function HomePage() {
               description="Mağaza & katalog"
               icon={<FolderTree className="h-5 w-5" />}
               to="/ideasoft"
+            />
+            <IntegrationCard
+              name="IdeaSoft 2"
+              description="Ürün listesi (LIST)"
+              icon={<Layers className="h-5 w-5" />}
+              to="/ideasoft2"
             />
             <IntegrationCard
               name="Shopify"

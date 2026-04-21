@@ -38,6 +38,10 @@ interface ProductCategory {
   sort_order: number
   status?: number
   created_at?: string
+  /** IdeaSoft Admin API Category.distributor ile eşleşir (master ↔ mağaza kodu) */
+  ideasoft_category_code?: string | null
+  /** IdeaSoft kategori tablosundaki satır id — eşleştirme için birincil alan */
+  ideasoft_category_id?: number | null
 }
 
 interface ProductGroup {
@@ -59,6 +63,8 @@ const emptyForm = {
   category_id: '' as number | '',
   sort_order: 0,
   status: 1,
+  ideasoft_category_code: '',
+  ideasoft_category_id: '',
 }
 
 const kategorilerListDefaults = { search: '', activeGroupId: '' as string }
@@ -161,6 +167,8 @@ export function KategorilerPage() {
       category_id: item.category_id ?? '',
       sort_order: item.sort_order ?? 0,
       status: item.status ?? 1,
+      ideasoft_category_code: item.ideasoft_category_code ?? '',
+      ideasoft_category_id: item.ideasoft_category_id != null ? String(item.ideasoft_category_id) : '',
     })
     setModalOpen(true)
   }
@@ -184,6 +192,12 @@ export function KategorilerPage() {
     try {
       const url = editingId ? `${API_URL}/api/product-categories/${editingId}` : `${API_URL}/api/product-categories`
       const method = editingId ? 'PUT' : 'POST'
+      const rawIsId = String(form.ideasoft_category_id ?? '').trim()
+      let ideasoft_category_id: number | null = null
+      if (rawIsId) {
+        const n = parseInt(rawIsId, 10)
+        if (Number.isFinite(n) && n > 0) ideasoft_category_id = n
+      }
       const body = {
         ...form,
         code: form.code || form.name.slice(0, 2).toUpperCase(),
@@ -191,6 +205,10 @@ export function KategorilerPage() {
         group_id: (form.group_id === '' || form.group_id === undefined || form.group_id === null) ? undefined : Number(form.group_id),
         category_id: (form.category_id === '' || form.category_id === undefined || form.category_id === null) ? 0 : Number(form.category_id),
         status: form.status,
+        ideasoft_category_code: form.ideasoft_category_code.trim()
+          ? form.ideasoft_category_code.trim()
+          : null,
+        ideasoft_category_id,
       }
       const res = await fetch(url, {
         method,
@@ -474,6 +492,35 @@ export function KategorilerPage() {
             <div className="space-y-2">
               <Label htmlFor="code">Kod</Label>
               <Input id="code" value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="Örn: BL" />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ideasoft_category_code">IdeaSoft kategori kodu</Label>
+              <Input
+                id="ideasoft_category_code"
+                value={form.ideasoft_category_code}
+                onChange={(e) => setForm((f) => ({ ...f, ideasoft_category_code: e.target.value }))}
+                placeholder="Admin API Category.distributor ile aynı (eşleştirme)"
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                Mağaza kategorisindeki &quot;Kod&quot; (distributor) ile birebir eşleşmeli. IdeaSoft 2 › Kategoriler listesinde doğrulama gösterilir.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="ideasoft_category_id">IdeaSoft kategori ID</Label>
+              <Input
+                id="ideasoft_category_id"
+                type="number"
+                min={1}
+                inputMode="numeric"
+                value={form.ideasoft_category_id}
+                onChange={(e) => setForm((f) => ({ ...f, ideasoft_category_id: e.target.value }))}
+                placeholder="Örn: 42 (IdeaSoft kategori tablosundaki id)"
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                Eşleştirme için birincil alan: bu değer, IdeaSoft kategori listesindeki satır <code className="rounded bg-muted px-1">id</code> ile aynı olmalıdır. Boş bırakılırsa eşleşme kalkar.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="group_id">Grup</Label>

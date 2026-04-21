@@ -3,6 +3,7 @@ import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReactNode } from 'react'
+import { cn } from '@/lib/utils'
 
 interface PageLayoutProps {
   title: string
@@ -14,6 +15,8 @@ interface PageLayoutProps {
   showRefresh?: boolean
   /** Kart/Liste sayfaları: header sağ tarafı (arama, filtre, yeni, refresh, reset) */
   headerActions?: ReactNode
+  /** Başlık + açıklama satırının hemen altında tam genişlik araç çubuğu */
+  headerToolbar?: ReactNode
   /** Kart/Liste sayfaları: footer sol içeriği (sayfalama, kayıt sayıları) */
   footerContent?: ReactNode
   /** Ayarlar/form sayfaları: footer sağ tarafı (kaydet vb. butonlar) */
@@ -35,6 +38,7 @@ export function PageLayout({
   onRefresh,
   showRefresh = false,
   headerActions,
+  headerToolbar,
   footerContent,
   footerActions,
   contentRef,
@@ -45,40 +49,52 @@ export function PageLayout({
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Sabit Header */}
-      <header className="shrink-0 flex flex-wrap items-start justify-between gap-4 p-4 border-b theme-page-bg">
-        <div className="flex items-center gap-4 min-w-0">
-          {logo && (
-            <div className="shrink-0 w-9 h-9 flex items-center justify-center overflow-hidden rounded-lg bg-muted">
-              {logo}
+      <header className="shrink-0 border-b theme-page-bg">
+        <div
+          className={cn(
+            'flex flex-wrap items-start justify-between gap-4 px-4 pt-4',
+            headerToolbar ? 'pb-2' : 'pb-4'
+          )}
+        >
+          <div className="flex min-w-0 items-center gap-4">
+            {logo && (
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted">
+                {logo}
+              </div>
+            )}
+            {backTo && (
+              <Link to={backTo}>
+                <Button variant="outline" size="icon">
+                  <ArrowLeft className="h-5 w-5" />
+                </Button>
+              </Link>
+            )}
+            <div className="min-w-0">
+              <h1 className="truncate text-2xl font-bold text-foreground">{title}</h1>
+              {description && (
+                <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>
+              )}
             </div>
-          )}
-          {backTo && (
-            <Link to={backTo}>
-              <Button variant="outline" size="icon">
-                <ArrowLeft className="h-5 w-5" />
-              </Button>
-            </Link>
-          )}
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold text-foreground truncate">{title}</h1>
-            {description && (
-              <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+          </div>
+          <div className="flex min-w-0 max-w-full shrink-0 flex-nowrap items-center gap-2 overflow-x-auto pb-0.5 sm:ml-auto sm:pb-0">
+            {headerActions}
+            {showRefresh && onRefresh && !headerToolbar && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="ghost" size="icon" onClick={onRefresh}>
+                    <RefreshCw className="h-5 w-5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Yenile</TooltipContent>
+              </Tooltip>
             )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 shrink-0 min-w-0 sm:ml-auto">
-          {headerActions}
-          {showRefresh && onRefresh && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" onClick={onRefresh}>
-                  <RefreshCw className="h-5 w-5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Yenile</TooltipContent>
-            </Tooltip>
-          )}
-        </div>
+        {headerToolbar ? (
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t border-border px-4 py-3">
+            {headerToolbar}
+          </div>
+        ) : null}
       </header>
 
       {/* Content */}

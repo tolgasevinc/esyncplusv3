@@ -6470,8 +6470,8 @@ app.get('/api/product-categories', async (c) => {
     if (search) {
       const n = normalizeForSearch(search);
       const pat = `%${escapeLikePattern(n)}%`;
-      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ?)`;
-      params.push(pat, pat);
+      where += ` AND (${sqlNormalizeCol('name')} LIKE ? OR ${sqlNormalizeCol('code')} LIKE ? OR ${sqlNormalizeCol('ideasoft_category_code')} LIKE ? OR (ideasoft_category_id IS NOT NULL AND CAST(ideasoft_category_id AS TEXT) LIKE ?))`;
+      params.push(pat, pat, pat, pat);
     }
     if (groupId !== undefined && groupId !== '') {
       const gid = parseInt(groupId);
@@ -6497,7 +6497,7 @@ app.get('/api/product-categories', async (c) => {
       `SELECT COUNT(*) as total FROM product_categories ${where}`
     ).bind(...params).first<{ total: number }>();
     const { results } = await c.env.DB.prepare(
-      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at
+      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at, ideasoft_category_code, ideasoft_category_id
        FROM product_categories ${where} ORDER BY sort_order, name LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
@@ -6536,6 +6536,8 @@ app.post('/api/product-categories', async (c) => {
     const body = await c.req.json<{
       name: string; code?: string; slug?: string; group_id?: number; category_id?: number;
       description?: string; image?: string; icon?: string; color?: string; sort_order?: number; status?: number;
+      ideasoft_category_code?: string | null;
+      ideasoft_category_id?: number | null;
     }>();
     const name = (body.name || '').trim();
     if (!name) return c.json({ error: 'Kategori adı gerekli' }, 400);
@@ -6549,12 +6551,39 @@ app.post('/api/product-categories', async (c) => {
     const color = body.color?.trim() || null;
     const sort_order = body.sort_order ?? 0;
     const status = body.status !== undefined ? (body.status ? 1 : 0) : 1;
+    let ideasoft_category_code: string | null = null;
+    if (body.ideasoft_category_code !== undefined) {
+      const raw = body.ideasoft_category_code;
+      ideasoft_category_code =
+        raw === null || raw === undefined ? null : String(raw).trim() || null;
+    }
+    let ideasoft_category_id: number | null = null;
+    if (body.ideasoft_category_id !== undefined && body.ideasoft_category_id !== null) {
+      const n = typeof body.ideasoft_category_id === 'number' ? body.ideasoft_category_id : parseInt(String(body.ideasoft_category_id), 10);
+      ideasoft_category_id = Number.isFinite(n) && n > 0 ? n : null;
+    }
+    if (ideasoft_category_code) {
+      const dup = await c.env.DB.prepare(
+        `SELECT id FROM product_categories WHERE is_deleted = 0 AND lower(trim(ideasoft_category_code)) = lower(?) LIMIT 1`
+      ).bind(ideasoft_category_code).first<{ id: number }>();
+      if (dup) {
+        return c.json({ error: 'Bu IdeaSoft kategori kodu başka bir master kategoride kullanılıyor' }, 400);
+      }
+    }
+    if (ideasoft_category_id != null) {
+      const dupId = await c.env.DB.prepare(
+        `SELECT id FROM product_categories WHERE is_deleted = 0 AND ideasoft_category_id = ? LIMIT 1`
+      ).bind(ideasoft_category_id).first<{ id: number }>();
+      if (dupId) {
+        return c.json({ error: 'Bu IdeaSoft kategori ID başka bir master kategoride kullanılıyor' }, 400);
+      }
+    }
     await c.env.DB.prepare(
-      `INSERT INTO product_categories (name, code, slug, group_id, category_id, description, image, icon, color, sort_order, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(name, code, slug, group_id, category_id, description, image, icon, color, sort_order, status).run();
+      `INSERT INTO product_categories (name, code, slug, group_id, category_id, description, image, icon, color, sort_order, status, ideasoft_category_code, ideasoft_category_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(name, code, slug, group_id, category_id, description, image, icon, color, sort_order, status, ideasoft_category_code, ideasoft_category_id).run();
     const { results } = await c.env.DB.prepare(
-      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at
+      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at, ideasoft_category_code, ideasoft_category_id
        FROM product_categories WHERE id = last_insert_rowid()`
     ).all();
     return c.json(results![0], 201);
@@ -6570,6 +6599,8 @@ app.put('/api/product-categories/:id', async (c) => {
     const body = await c.req.json<{
       name?: string; code?: string; slug?: string; group_id?: number; category_id?: number;
       description?: string; image?: string; icon?: string; color?: string; sort_order?: number; status?: number;
+      ideasoft_category_code?: string | null;
+      ideasoft_category_id?: number | null;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM product_categories WHERE id = ? AND is_deleted = 0`).bind(id).first();
     if (!existing) return c.json({ error: 'Kategori bulunamadı' }, 404);
@@ -6592,12 +6623,44 @@ app.put('/api/product-categories/:id', async (c) => {
     if (body.color !== undefined) { updates.push('color = ?'); values.push(body.color?.trim() || null); }
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (body.ideasoft_category_code !== undefined) {
+      const raw = body.ideasoft_category_code;
+      const isc =
+        raw === null || raw === undefined ? null : String(raw).trim() || null;
+      if (isc) {
+        const dup = await c.env.DB.prepare(
+          `SELECT id FROM product_categories WHERE is_deleted = 0 AND lower(trim(ideasoft_category_code)) = lower(?) AND id != ? LIMIT 1`
+        ).bind(isc, id).first<{ id: number }>();
+        if (dup) {
+          return c.json({ error: 'Bu IdeaSoft kategori kodu başka bir master kategoride kullanılıyor' }, 400);
+        }
+      }
+      updates.push('ideasoft_category_code = ?');
+      values.push(isc);
+    }
+    if (body.ideasoft_category_id !== undefined) {
+      let isid: number | null = null;
+      if (body.ideasoft_category_id !== null) {
+        const n = typeof body.ideasoft_category_id === 'number' ? body.ideasoft_category_id : parseInt(String(body.ideasoft_category_id), 10);
+        isid = Number.isFinite(n) && n > 0 ? n : null;
+      }
+      if (isid != null) {
+        const dupI = await c.env.DB.prepare(
+          `SELECT id FROM product_categories WHERE is_deleted = 0 AND ideasoft_category_id = ? AND id != ? LIMIT 1`
+        ).bind(isid, id).first<{ id: number }>();
+        if (dupI) {
+          return c.json({ error: 'Bu IdeaSoft kategori ID başka bir master kategoride kullanılıyor' }, 400);
+        }
+      }
+      updates.push('ideasoft_category_id = ?');
+      values.push(isid);
+    }
     if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
     updates.push("updated_at = datetime('now')");
     values.push(id);
     await c.env.DB.prepare(`UPDATE product_categories SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
     const row = await c.env.DB.prepare(
-      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at, updated_at
+      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at, updated_at, ideasoft_category_code, ideasoft_category_id
        FROM product_categories WHERE id = ?`
     ).bind(id).first();
     return c.json(row);
@@ -12043,6 +12106,102 @@ app.post('/api/ideasoft/sync-master-images-from-store', async (c) => {
     });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Senkronizasyon hatası' }, 500);
+  }
+});
+
+// ========== IdeaSoft2 — yalnızca Product LIST (Admin API) ==========
+// https://apidoc.ideasoft.dev/docs/admin-api/6hvi6as48mv56-product-list
+app.get('/api/ideasoft2/products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const settings = await loadIdeasoftIntegrationSettings(c.env.DB);
+    const auth = getIdeasoftStoreAuth(settings);
+    if (!auth) {
+      return c.json(
+        {
+          error:
+            'IdeaSoft mağaza adresi ve erişim token’ı gerekli. Ayarlarda ideasoft kayıtları (store_base_url, IDEASOFT_ACCESS_TOKEN).',
+        },
+        400
+      );
+    }
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limitRaw = c.req.query('limit') ?? c.req.query('itemsPerPage') ?? '25';
+    const limit = Math.min(100, Math.max(1, parseInt(String(limitRaw), 10)));
+    const sort = (c.req.query('sort') || 'id').trim() || 'id';
+    const search = (c.req.query('s') || '').trim();
+    const status = (c.req.query('status') || '').trim();
+
+    const params = new URLSearchParams();
+    params.set('page', String(page));
+    params.set('limit', String(limit));
+    params.set('sort', sort);
+    if (search) params.set('s', search);
+    if (status === '0' || status === '1') params.set('status', status);
+
+    const pathAndQuery = `/products?${params.toString()}`;
+    const res = await ideasoftDoAdminRequestWithRefresh(
+      c.env.DB,
+      pathAndQuery,
+      { method: 'GET' },
+      settings,
+      auth
+    );
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = { _raw: text };
+    }
+    if (!res.ok) {
+      const parts = ideasoftProxyErrorParts(body, text, res.status);
+      return c.json(
+        { error: parts.error, ...(parts.hint ? { hint: parts.hint } : {}), body },
+        ideasoftProxyErrStatus(res)
+      );
+    }
+
+    /** Liste yanıtında hydra:totalItems bazen eksik; Product COUNT ile toplamı birleştir (Ideasoft Ürünler ile aynı sorgu). */
+    try {
+      const countRes = await ideasoftDoAdminRequestWithRefresh(
+        c.env.DB,
+        `/products/count?${params.toString()}`,
+        { method: 'GET' },
+        settings,
+        auth
+      );
+      const countText = await countRes.text();
+      let countJson: unknown = null;
+      try {
+        countJson = countText ? JSON.parse(countText) : null;
+      } catch {
+        countJson = null;
+      }
+      if (countRes.ok && countJson != null) {
+        let n: number | null = null;
+        if (typeof countJson === 'number' && Number.isFinite(countJson)) n = countJson;
+        else if (typeof countJson === 'object' && countJson !== null) {
+          const co = countJson as Record<string, unknown>;
+          const raw = co['hydra:totalItems'] ?? co.total ?? co.count;
+          if (typeof raw === 'number' && Number.isFinite(raw)) n = raw;
+          else if (typeof raw === 'string' && raw.trim() !== '') {
+            const p = parseInt(raw.trim(), 10);
+            if (Number.isFinite(p)) n = p;
+          }
+        }
+        if (n != null && body !== null && typeof body === 'object') {
+          const bo = body as Record<string, unknown>;
+          bo['hydra:totalItems'] = n;
+        }
+      }
+    } catch {
+      /* sayım başarısızsa liste gövdesi olduğu gibi */
+    }
+
+    return c.json(body);
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'İstek başarısız' }, 500);
   }
 });
 
