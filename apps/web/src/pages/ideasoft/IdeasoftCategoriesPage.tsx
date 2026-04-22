@@ -535,13 +535,14 @@ export function IdeasoftCategoriesPage() {
   const [loadDetailPending, setLoadDetailPending] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [masterCategoryItems, setMasterCategoryItems] = useState<CategoryItem[]>([])
+  const [masterCategoryItems, setMasterCategoryItems] = useState<
+    (CategoryItem & { ideasoft_category_id?: number | null })[]
+  >([])
   const [masterLoading, setMasterLoading] = useState(false)
   const [categoryMappings, setCategoryMappings] = useState<Record<string, string>>({})
   const [mappingsLoading, setMappingsLoading] = useState(false)
   const [matchPickerRow, setMatchPickerRow] = useState<IdeasoftCategoryRow | null>(null)
   const [matchPickerSearch, setMatchPickerSearch] = useState('')
-  const [matchPickerSelectedMasterId, setMatchPickerSelectedMasterId] = useState<number | null>(null)
   const [savingMapping, setSavingMapping] = useState(false)
   const [clearAllMappingsOpen, setClearAllMappingsOpen] = useState(false)
   const [clearingAllMappings, setClearingAllMappings] = useState(false)
@@ -552,8 +553,6 @@ export function IdeasoftCategoriesPage() {
   const parentListId = listParentId(cascadePathEffective)
   const hasFilter =
     search.length > 0 || statusFilter !== 'active' || cascadePathEffective.length > 0
-
-  const categoryMappingCount = useMemo(() => Object.keys(categoryMappings).length, [categoryMappings])
 
   const buildListParams = useCallback(() => {
     const params = new URLSearchParams({
@@ -632,7 +631,7 @@ export function IdeasoftCategoriesPage() {
   const fetchMasterCategories = useCallback(async () => {
     setMasterLoading(true)
     try {
-      const res = await fetch(`${API_URL}/api/product-categories?limit=9999`)
+      const res = await fetch(`${API_URL}/api/product-categories?limit=9999&include_inactive=1`)
       const data = await parseJsonResponse<{
         data?: {
           id: number
@@ -642,6 +641,7 @@ export function IdeasoftCategoriesPage() {
           category_id?: number | null
           sort_order?: number
           color?: string | null
+          ideasoft_category_id?: number | null
         }[]
         error?: string
       }>(res)
@@ -655,6 +655,7 @@ export function IdeasoftCategoriesPage() {
           category_id: x.category_id ?? undefined,
           sort_order: x.sort_order,
           color: x.color ?? undefined,
+          ideasoft_category_id: x.ideasoft_category_id ?? null,
         }))
       )
     } catch {
@@ -679,33 +680,72 @@ export function IdeasoftCategoriesPage() {
     [masterCategoryItems]
   )
 
+  /** IdeaSoft kategori id → master id (`product_categories.ideasoft_category_id`) */
+  const masterByIdeasoftCategoryId = useMemo(() => {
+    const m = new Map<number, number>()
+    for (const c of masterCategoryItems) {
+      const isid = c.ideasoft_category_id
+      if (isid == null || !Number.isFinite(Number(isid))) continue
+      const k = Number(isid)
+      if (k <= 0) continue
+      if (!m.has(k)) m.set(k, c.id)
+    }
+    return m
+  }, [masterCategoryItems])
+
+  const categoryMappingCount = useMemo(() => {
+    const ids = new Set<number>()
+    for (const k of Object.keys(categoryMappings)) {
+      const n = parseInt(k, 10)
+      if (Number.isFinite(n) && n > 0) ids.add(n)
+    }
+    for (const isid of masterByIdeasoftCategoryId.keys()) {
+      ids.add(isid)
+    }
+    return ids.size
+  }, [categoryMappings, masterByIdeasoftCategoryId])
+
+  const resolveIdeasoftToMasterId = useCallback(
+    (ideasoftCategoryId: number): number | null => {
+      const fromTable = masterByIdeasoftCategoryId.get(ideasoftCategoryId)
+      if (fromTable != null && validMasterIdSet.has(fromTable)) return fromTable
+      const fromJson = parseStrictPositiveId(categoryMappings[String(ideasoftCategoryId)])
+      if (fromJson != null && validMasterIdSet.has(fromJson)) return fromJson
+      return null
+    },
+    [masterByIdeasoftCategoryId, validMasterIdSet, categoryMappings]
+  )
+
   /** Yalnızca gerçekten master tabloda var olan id’ler — silinmiş/çöp eşleştirme ağacı kilitlemesin */
   const masterIdsOccupiedByOtherIdeasoft = useMemo(() => {
     if (!matchPickerRow) return new Set<number>() as ReadonlySet<number>
-    const cur = String(matchPickerRow.id)
+    const cur = matchPickerRow.id
     const s = new Set<number>()
     for (const [isKey, masterStr] of Object.entries(categoryMappings)) {
-      if (isKey === cur) continue
+      if (Number(isKey) === cur) continue
       const mid = parseStrictPositiveId(masterStr)
       if (mid == null || !validMasterIdSet.has(mid)) continue
       s.add(mid)
     }
+    for (const c of masterCategoryItems) {
+      const isid = c.ideasoft_category_id
+      if (isid == null || !Number.isFinite(Number(isid))) continue
+      if (Number(isid) === cur) continue
+      if (validMasterIdSet.has(c.id)) s.add(c.id)
+    }
     return s
-  }, [categoryMappings, matchPickerRow, validMasterIdSet])
+  }, [categoryMappings, matchPickerRow, validMasterIdSet, masterCategoryItems])
 
   const openMatchPicker = (row: IdeasoftCategoryRow, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
     setMatchPickerRow(row)
     setMatchPickerSearch('')
-    const m = parseStrictPositiveId(categoryMappings[String(row.id)])
-    setMatchPickerSelectedMasterId(m != null && validMasterIdSet.has(m) ? m : null)
   }
 
   const closeMatchPicker = () => {
     setMatchPickerRow(null)
     setMatchPickerSearch('')
-    setMatchPickerSelectedMasterId(null)
   }
 
   const putMasterIdeasoftCategorySync = async (
@@ -721,22 +761,22 @@ export function IdeasoftCategoriesPage() {
     if (!res.ok) throw new Error(data.error || 'Master kategori IdeaSoft alanları güncellenemedi')
   }
 
-  const saveCategoryMapping = async () => {
-    if (!matchPickerRow || matchPickerSelectedMasterId == null) return
+  const saveCategoryMapping = async (masterId: number) => {
+    if (!matchPickerRow) return
     const isKey = String(matchPickerRow.id)
-    const masterKey = String(matchPickerSelectedMasterId)
+    const masterKey = String(masterId)
     const codeRaw = (matchPickerRow.distributor || '').trim()
     const code = codeRaw || null
     setSavingMapping(true)
     try {
-      const prevMasterId = parseStrictPositiveId(categoryMappings[isKey])
-      if (prevMasterId != null && prevMasterId !== matchPickerSelectedMasterId) {
+      const prevMasterId = resolveIdeasoftToMasterId(matchPickerRow.id)
+      if (prevMasterId != null && prevMasterId !== masterId) {
         await putMasterIdeasoftCategorySync(prevMasterId, {
           ideasoft_category_id: null,
           ideasoft_category_code: null,
         })
       }
-      await putMasterIdeasoftCategorySync(matchPickerSelectedMasterId, {
+      await putMasterIdeasoftCategorySync(masterId, {
         ideasoft_category_id: matchPickerRow.id,
         ideasoft_category_code: code,
       })
@@ -749,6 +789,7 @@ export function IdeasoftCategoriesPage() {
       const data = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
       setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
+      await fetchMasterCategories()
       toastSuccess(
         'Eşleştirildi',
         'IdeaSoft kategorisi master ile bağlandı; IdeaSoft kategori ID ve kod master kaydına yazıldı.'
@@ -766,7 +807,7 @@ export function IdeasoftCategoriesPage() {
     const isKey = String(matchPickerRow.id)
     setSavingMapping(true)
     try {
-      const prevMasterId = parseStrictPositiveId(categoryMappings[isKey])
+      const prevMasterId = resolveIdeasoftToMasterId(matchPickerRow.id)
       if (prevMasterId != null) {
         await putMasterIdeasoftCategorySync(prevMasterId, {
           ideasoft_category_id: null,
@@ -782,6 +823,7 @@ export function IdeasoftCategoriesPage() {
       const data = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
       setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
+      await fetchMasterCategories()
       toastSuccess('Kaldırıldı', 'Master eşleştirmesi ve IdeaSoft ID/kod alanları silindi.')
       closeMatchPicker()
     } catch (err) {
@@ -795,10 +837,10 @@ export function IdeasoftCategoriesPage() {
     e.preventDefault()
     e.stopPropagation()
     const isKey = String(row.id)
-    if (!categoryMappings[isKey]) return
+    const prevMasterId = resolveIdeasoftToMasterId(row.id)
+    if (prevMasterId == null) return
     setSavingMapping(true)
     try {
-      const prevMasterId = parseStrictPositiveId(categoryMappings[isKey])
       if (prevMasterId != null) {
         await putMasterIdeasoftCategorySync(prevMasterId, {
           ideasoft_category_id: null,
@@ -814,6 +856,7 @@ export function IdeasoftCategoriesPage() {
       const data = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
       setCategoryMappings(sanitizeIdeasoftCategoryMappings(next as Record<string, unknown>))
+      await fetchMasterCategories()
       toastSuccess('Kaldırıldı', 'Eşleştirme kaldırıldı.')
     } catch (err) {
       toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
@@ -825,6 +868,17 @@ export function IdeasoftCategoriesPage() {
   const clearAllIdeasoftCategoryMappings = async () => {
     setClearingAllMappings(true)
     try {
+      for (const c of masterCategoryItems) {
+        if (c.ideasoft_category_id == null) continue
+        try {
+          await putMasterIdeasoftCategorySync(c.id, {
+            ideasoft_category_id: null,
+            ideasoft_category_code: null,
+          })
+        } catch {
+          /* devam */
+        }
+      }
       for (const masterStr of Object.values(categoryMappings)) {
         const mid = parseStrictPositiveId(masterStr)
         if (mid != null) {
@@ -846,6 +900,7 @@ export function IdeasoftCategoriesPage() {
       const data = await parseJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
       setCategoryMappings({})
+      await fetchMasterCategories()
       closeMatchPicker()
       setClearAllMappingsOpen(false)
       toastSuccess('Temizlendi', 'Tüm IdeaSoft–master eşleştirmeleri ve master IdeaSoft ID/kod alanları kaldırıldı.')
@@ -1181,7 +1236,7 @@ export function IdeasoftCategoriesPage() {
                       </td>
                       <td className="p-2 text-muted-foreground truncate max-w-[200px]">
                         {(() => {
-                          const mid = parseStrictPositiveId(categoryMappings[String(row.id)])
+                          const mid = resolveIdeasoftToMasterId(row.id)
                           if (mid == null || !validMasterIdSet.has(mid)) {
                             return mappingsLoading ? '…' : '—'
                           }
@@ -1220,7 +1275,7 @@ export function IdeasoftCategoriesPage() {
                             </TooltipTrigger>
                             <TooltipContent>Master kategori seç (Parametreler › Kategoriler)</TooltipContent>
                           </Tooltip>
-                          {parseStrictPositiveId(categoryMappings[String(row.id)]) != null && (
+                          {resolveIdeasoftToMasterId(row.id) != null && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
@@ -1541,7 +1596,7 @@ export function IdeasoftCategoriesPage() {
       </Dialog>
 
       <Dialog open={!!matchPickerRow} onOpenChange={(open) => !open && closeMatchPicker()}>
-        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
+        <DialogContent className="w-full max-w-3xl max-h-[85vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>
               Master kategori eşleştir
@@ -1555,7 +1610,7 @@ export function IdeasoftCategoriesPage() {
           {matchPickerRow && (
             <>
               {(() => {
-                const curMid = parseStrictPositiveId(categoryMappings[String(matchPickerRow.id)])
+                const curMid = resolveIdeasoftToMasterId(matchPickerRow.id)
                 if (curMid == null) return null
                 const c = masterById.get(curMid)
                 return (
@@ -1576,7 +1631,12 @@ export function IdeasoftCategoriesPage() {
                   className="pl-8 h-9"
                 />
               </div>
-              <div className="flex-1 min-h-0 overflow-y-auto rounded-md border bg-muted/20">
+              <div
+                className={cn(
+                  'flex-1 min-h-0 overflow-y-auto rounded-md border bg-muted/20',
+                  savingMapping && 'pointer-events-none opacity-60'
+                )}
+              >
                 {masterLoading ? (
                   <div className="p-6 text-center text-sm text-muted-foreground">
                     Master kategoriler yükleniyor…
@@ -1588,16 +1648,17 @@ export function IdeasoftCategoriesPage() {
                 ) : (
                   <MasterCategoryTreePicker
                     categories={masterCategoryItems}
-                    selectedId={matchPickerSelectedMasterId}
-                    onSelect={setMatchPickerSelectedMasterId}
+                    selectedId={null}
+                    onSelect={(id) => void saveCategoryMapping(id)}
                     searchQuery={matchPickerSearch}
                     disabledMasterIds={masterIdsOccupiedByOtherIdeasoft}
+                    defaultExpandAll
                   />
                 )}
               </div>
               <DialogFooter className="flex-col sm:flex-row gap-2 sm:justify-between sm:gap-0">
                 <div className="flex gap-2 w-full sm:w-auto">
-                  {parseStrictPositiveId(categoryMappings[String(matchPickerRow.id)]) != null && (
+                  {resolveIdeasoftToMasterId(matchPickerRow.id) != null && (
                     <Button
                       type="button"
                       variant="outline"
@@ -1612,14 +1673,6 @@ export function IdeasoftCategoriesPage() {
                 <div className="flex gap-2 justify-end w-full sm:w-auto">
                   <Button type="button" variant="outline" onClick={closeMatchPicker} disabled={savingMapping}>
                     İptal
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="save"
-                    disabled={savingMapping || matchPickerSelectedMasterId == null}
-                    onClick={() => void saveCategoryMapping()}
-                  >
-                    {savingMapping ? 'Kaydediliyor...' : 'Kaydet'}
                   </Button>
                 </div>
               </DialogFooter>

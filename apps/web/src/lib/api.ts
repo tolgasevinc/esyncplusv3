@@ -21,3 +21,19 @@ export function formatIdeasoftProxyErrorForUi(data: { error?: string; hint?: str
   const h = data.hint?.trim()
   return h ? `${e}\n\n${h}` : e
 }
+
+/** `/api/product-categories` ve benzeri: `data` dizi değilse veya sarmalanmışsa yine de satırları bul. */
+export function extractProductCategoryList(json: unknown): unknown[] {
+  if (Array.isArray(json)) return json
+  if (!json || typeof json !== 'object') return []
+  const o = json as Record<string, unknown>
+  if (Array.isArray(o.data)) return o.data
+  if (Array.isArray(o.results)) return o.results
+  if (o.data && typeof o.data === 'object') {
+    const inner = o.data as Record<string, unknown>
+    if (Array.isArray(inner.items)) return inner.items
+    if (Array.isArray(inner.records)) return inner.records
+    if (Array.isArray(inner.data)) return inner.data
+  }
+  return []
+}

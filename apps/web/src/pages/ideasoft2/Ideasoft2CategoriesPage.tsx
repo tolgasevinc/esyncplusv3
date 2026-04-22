@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link2, RefreshCw, RotateCcw, Search, Unlink } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -13,250 +13,22 @@ import {
 } from '@/components/ui/dialog'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
+import {
+  API_URL,
+  extractProductCategoryList,
+  formatIdeasoftProxyErrorForUi,
+  parseJsonResponse,
+} from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type { IdeasoftCategoryRow } from '@/pages/ideasoft/IdeasoftCategoriesPage'
 import type { CategoryItem } from '@/components/CategorySelect'
 import { MasterCategoryTreePicker } from '@/components/MasterCategoryTreePicker'
 import { toastSuccess, toastError } from '@/lib/toast'
-
-/** LIST yanıtı — IdeasoftCategoriesPage ile aynı şema */
-function extractCategoriesList(json: unknown): { items: IdeasoftCategoryRow[]; total: number } {
-  if (Array.isArray(json)) {
-    return { items: json as IdeasoftCategoryRow[], total: json.length }
-  }
-  if (json && typeof json === 'object') {
-    const o = json as Record<string, unknown>
-    const hydra = o['hydra:member']
-    if (Array.isArray(hydra)) {
-      const total =
-        typeof o['hydra:totalItems'] === 'number' ? (o['hydra:totalItems'] as number) : hydra.length
-      return { items: hydra as IdeasoftCategoryRow[], total }
-    }
-    const member = o.member
-    if (Array.isArray(member)) {
-      const total =
-        typeof o['hydra:totalItems'] === 'number'
-          ? (o['hydra:totalItems'] as number)
-          : typeof o.total === 'number'
-            ? o.total
-            : member.length
-      return { items: member as IdeasoftCategoryRow[], total }
-    }
-    if (Array.isArray(o.data)) {
-      const d = o.data as IdeasoftCategoryRow[]
-      const total = typeof o.total === 'number' ? o.total : d.length
-      return { items: d, total }
-    }
-    const items = o.items
-    if (Array.isArray(items)) {
-      const total = typeof o.total === 'number' ? o.total : items.length
-      return { items: items as IdeasoftCategoryRow[], total }
-    }
-    const categories = o.categories
-    if (Array.isArray(categories)) {
-      const total = typeof o.total === 'number' ? o.total : categories.length
-      return { items: categories as IdeasoftCategoryRow[], total }
-    }
-  }
-  return { items: [], total: 0 }
-}
-
-function parentIdFromCategoryListRow(row: Record<string, unknown>): number | null {
-  const p = row.parent
-  if (p == null) return null
-  if (typeof p === 'object' && p !== null && !Array.isArray(p) && 'id' in p) {
-    const id = Number((p as { id: unknown }).id)
-    return Number.isFinite(id) ? id : null
-  }
-  return null
-}
-
-/** `parent` gönderilmeden gelen listede yalnızca kök satırlar (IdeasoftCategoriesPage ile aynı). */
-function filterToRootLevelCategories(items: IdeasoftCategoryRow[]): IdeasoftCategoryRow[] {
-  const raw = items as unknown as Record<string, unknown>[]
-  const anyChildRow = raw.some((r) => {
-    const pid = parentIdFromCategoryListRow(r)
-    return pid != null && pid > 0
-  })
-  if (!anyChildRow) return items
-  return items.filter((_, i) => {
-    const pid = parentIdFromCategoryListRow(raw[i]!)
-    return pid == null || pid === 0
-  })
-}
-
-/**
- * IdeaSoft Admin API: kök için `parent` gönderilmez; üst kategori için `parent` eklenir.
- */
-function appendCategoryParentParam(params: URLSearchParams, parentId: number) {
-  if (parentId > 0) params.set('parent', String(parentId))
-}
-
-async function fetchCategoryOptions(parentId: number): Promise<{ id: number; name: string }[]> {
-  const params = new URLSearchParams({
-    limit: '100',
-    page: '1',
-    sort: 'id',
-  })
-  appendCategoryParentParam(params, parentId)
-  const res = await fetch(`${API_URL}/api/ideasoft/admin-api/categories?${params}`)
-  const data = await parseJsonResponse<unknown>(res)
-  if (!res.ok) return []
-  let { items } = extractCategoriesList(data)
-  if (parentId === 0) items = filterToRootLevelCategories(items)
-  return items.map((x) => ({ id: x.id, name: x.name ?? `#${x.id}` }))
-}
-
-const CASCADE_MAX_DEPTH = 3
-
-function CategoryCascadeThreeSelects({
-  path,
-  onPathChange,
-  disabled,
-}: {
-  path: number[]
-  onPathChange: (next: number[]) => void
-  disabled?: boolean
-}) {
-  const onPathChangeRef = useRef(onPathChange)
-  onPathChangeRef.current = onPathChange
-  const pathRef = useRef(path)
-  pathRef.current = path
-
-  const [opt1, setOpt1] = useState<{ id: number; name: string }[]>([])
-  const [opt2, setOpt2] = useState<{ id: number; name: string }[]>([])
-  const [opt3, setOpt3] = useState<{ id: number; name: string }[]>([])
-
-  const idL1 = path[0]
-  const idL2 = path[1]
-
-  useEffect(() => {
-    let cancel = false
-    void (async () => {
-      const o = await fetchCategoryOptions(0)
-      if (!cancel) setOpt1(o)
-    })()
-    return () => {
-      cancel = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancel = false
-    if (idL1 == null) {
-      setOpt2([])
-      return
-    }
-    void (async () => {
-      const o = await fetchCategoryOptions(idL1)
-      if (cancel) return
-      setOpt2(o)
-      const p = pathRef.current
-      if (p[1] != null && !o.some((x) => x.id === p[1])) {
-        onPathChangeRef.current(p.slice(0, 1))
-      }
-    })()
-    return () => {
-      cancel = true
-    }
-  }, [idL1])
-
-  useEffect(() => {
-    let cancel = false
-    if (idL2 == null) {
-      setOpt3([])
-      return
-    }
-    void (async () => {
-      const o = await fetchCategoryOptions(idL2)
-      if (cancel) return
-      setOpt3(o)
-      const p = pathRef.current
-      if (p[2] != null && !o.some((x) => x.id === p[2])) {
-        onPathChangeRef.current(p.slice(0, 2))
-      }
-    })()
-    return () => {
-      cancel = true
-    }
-  }, [idL2])
-
-  const setLevel = (levelIndex: number, raw: string) => {
-    if (raw === '') {
-      onPathChange(path.slice(0, levelIndex))
-      return
-    }
-    const id = parseInt(raw, 10)
-    if (!Number.isFinite(id)) return
-    const next = [...path.slice(0, levelIndex), id].slice(0, CASCADE_MAX_DEPTH)
-    onPathChange(next)
-  }
-
-  const v1 = path[0] != null ? String(path[0]) : ''
-  const v2 = path[1] != null ? String(path[1]) : ''
-  const v3 = path[2] != null ? String(path[2]) : ''
-
-  /** Sabit genişlik — seçenek metni uzunluğu satırı oynatmasın; taşan satır yatay kayar */
-  const selClass =
-    'h-9 w-[10.5rem] max-w-[10.5rem] shrink-0 rounded-md border border-input bg-background px-2 text-sm truncate'
-
-  return (
-    <div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto overflow-y-visible pb-0.5 [scrollbar-gutter:stable]">
-      <select
-        id="ideasoft2-cat-cascade-l1"
-        aria-label="1. seviye kategori"
-        className={cn(selClass, disabled && 'pointer-events-none opacity-50')}
-        value={v1}
-        disabled={disabled}
-        onChange={(e) => setLevel(0, e.target.value)}
-      >
-        <option value="">— Kategori —</option>
-        {opt1.map((o) => (
-          <option key={o.id} value={String(o.id)}>
-            {o.name}
-          </option>
-        ))}
-      </select>
-      <select
-        id="ideasoft2-cat-cascade-l2"
-        aria-label="2. seviye kategori"
-        className={cn(
-          selClass,
-          (disabled || idL1 == null) && 'pointer-events-none cursor-not-allowed opacity-50'
-        )}
-        value={v2}
-        disabled={disabled || idL1 == null}
-        onChange={(e) => setLevel(1, e.target.value)}
-      >
-        <option value="">— 2. seviye —</option>
-        {opt2.map((o) => (
-          <option key={o.id} value={String(o.id)}>
-            {o.name}
-          </option>
-        ))}
-      </select>
-      <select
-        id="ideasoft2-cat-cascade-l3"
-        aria-label="3. seviye kategori"
-        className={cn(
-          selClass,
-          (disabled || idL2 == null) && 'pointer-events-none cursor-not-allowed opacity-50'
-        )}
-        value={v3}
-        disabled={disabled || idL2 == null}
-        onChange={(e) => setLevel(2, e.target.value)}
-      >
-        <option value="">— 3. seviye —</option>
-        {opt3.map((o) => (
-          <option key={o.id} value={String(o.id)}>
-            {o.name}
-          </option>
-        ))}
-      </select>
-    </div>
-  )
-}
+import {
+  CategoryCascadeThreeSelects,
+  extractCategoriesList,
+  parentIdFromCategoryListRow,
+} from './ideasoft2-category-cascade'
 
 type CatNode = { row: IdeasoftCategoryRow; children: CatNode[] }
 
@@ -324,6 +96,8 @@ function pruneTree(nodes: CatNode[], q: string): CatNode[] {
   return out
 }
 
+const CASCADE_MAX_DEPTH = 3
+
 const listDefaults = {
   search: '',
   cascadePath: [] as number[],
@@ -337,9 +111,9 @@ async function fetchAllCategoriesFlat(): Promise<IdeasoftCategoryRow[]> {
   for (;;) {
     const params = new URLSearchParams({
       page: String(page),
-      limit: String(limit),
       sort: 'id',
     })
+    params.set('itemsPerPage', String(limit))
     const res = await fetch(`${API_URL}/api/ideasoft/admin-api/categories?${params}`)
     const data = await parseJsonResponse<unknown>(res)
     if (!res.ok) {
@@ -559,45 +333,72 @@ export function Ideasoft2CategoriesPage() {
   const [listError, setListError] = useState<string | null>(null)
   const [matchDialogRow, setMatchDialogRow] = useState<IdeasoftCategoryRow | null>(null)
   const [matchPickerSearch, setMatchPickerSearch] = useState('')
-  const [matchPickerSelectedMasterId, setMatchPickerSelectedMasterId] = useState<number | null>(null)
   const [matchSaving, setMatchSaving] = useState(false)
+  const [masterListLoading, setMasterListLoading] = useState(false)
+  const [masterListError, setMasterListError] = useState<string | null>(null)
   const [listState, setListState] = usePersistedListState('ideasoft2-categories-v1', listDefaults)
   const { search, cascadePath } = listState
   const cascadePathEffective = cascadePath.slice(0, CASCADE_MAX_DEPTH)
 
   const loadMasters = useCallback(async () => {
+    const toPositiveId = (v: unknown): number | null => {
+      if (v == null || v === '') return null
+      const n = typeof v === 'number' ? v : parseInt(String(v).trim(), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const toFk = (v: unknown): number | undefined => {
+      if (v == null || v === '') return undefined
+      const n = typeof v === 'number' ? v : parseInt(String(v).trim(), 10)
+      return Number.isFinite(n) ? n : undefined
+    }
+    setMasterListLoading(true)
+    setMasterListError(null)
     try {
-      const res = await fetch(`${API_URL}/api/product-categories?limit=9999`)
-      const json = await parseJsonResponse<{
-        data?: {
-          id: number
-          name: string
-          code?: string | null
-          group_id?: number | null
-          category_id?: number | null
-          sort_order?: number
-          color?: string | null
-          ideasoft_category_id?: number | null
-          ideasoft_category_code?: string | null
-        }[]
-      }>(res)
-      if (res.ok && Array.isArray(json.data)) {
-        setMasterRows(
-          json.data.map((x) => ({
-            id: x.id,
-            name: x.name,
-            code: x.code ?? '',
-            group_id: x.group_id ?? undefined,
-            category_id: x.category_id ?? undefined,
-            sort_order: x.sort_order,
-            color: x.color ?? undefined,
-            ideasoft_category_id: x.ideasoft_category_id ?? null,
-            ideasoft_category_code: x.ideasoft_category_code ?? null,
-          }))
-        )
-      } else setMasterRows([])
-    } catch {
+      const res = await fetch(`${API_URL}/api/product-categories?limit=9999&include_inactive=1`)
+      const json = await parseJsonResponse<{ error?: string }>(res)
+      if (!res.ok) {
+        const msg =
+          typeof json === 'object' && json && 'error' in json && typeof json.error === 'string'
+            ? json.error
+            : `HTTP ${res.status}`
+        setMasterListError(msg)
+        setMasterRows([])
+        return
+      }
+      const rawList = extractProductCategoryList(json)
+      const rows: MasterProductCategoryRow[] = []
+      for (const item of rawList) {
+        const x = item as Record<string, unknown>
+        const id = toPositiveId(x.id)
+        if (id == null) continue
+        let iscid: number | null = null
+        const rawIs = x.ideasoft_category_id
+        if (rawIs != null && rawIs !== '') {
+          const n = typeof rawIs === 'number' ? rawIs : parseInt(String(rawIs).trim(), 10)
+          if (Number.isFinite(n) && n > 0) iscid = n
+        }
+        const name = typeof x.name === 'string' ? x.name : String(x.name ?? '')
+        rows.push({
+          id,
+          name,
+          code: typeof x.code === 'string' ? x.code : x.code != null ? String(x.code) : '',
+          group_id: toFk(x.group_id),
+          category_id: toFk(x.category_id),
+          sort_order: typeof x.sort_order === 'number' ? x.sort_order : undefined,
+          color: typeof x.color === 'string' ? x.color : x.color != null ? String(x.color) : undefined,
+          ideasoft_category_id: iscid,
+          ideasoft_category_code:
+            x.ideasoft_category_code == null || x.ideasoft_category_code === ''
+              ? null
+              : String(x.ideasoft_category_code),
+        })
+      }
+      setMasterRows(rows)
+    } catch (e) {
+      setMasterListError(e instanceof Error ? e.message : 'Master listesi alınamadı')
       setMasterRows([])
+    } finally {
+      setMasterListLoading(false)
     }
   }, [])
 
@@ -623,6 +424,10 @@ export function Ideasoft2CategoriesPage() {
     void loadMasters()
   }, [loadMasters])
 
+  useEffect(() => {
+    if (matchDialogRow) void loadMasters()
+  }, [matchDialogRow, loadMasters])
+
   const masterByIdeasoftId = useMemo(() => buildMasterByIdeasoftId(masterRows), [masterRows])
 
   const masterCategoryItems = useMemo(
@@ -639,12 +444,18 @@ export function Ideasoft2CategoriesPage() {
     [masterRows]
   )
 
+  /** Zaten bir IdeaSoft kategorisine bağlı master satırları (bu satırdaki IS id hariç) — seçilemez */
   const matchDialogDisabledMasterIds = useMemo(() => {
     if (!matchDialogRow) return new Set<number>() as ReadonlySet<number>
     const rid = matchDialogRow.id
     return new Set(
       masterRows
-        .filter((m) => m.ideasoft_category_id != null && Number(m.ideasoft_category_id) !== rid)
+        .filter((m) => {
+          if (m.ideasoft_category_id == null) return false
+          const linked = Number(m.ideasoft_category_id)
+          if (!Number.isFinite(linked) || linked <= 0) return false
+          return linked !== rid
+        })
         .map((m) => m.id)
     )
   }, [matchDialogRow, masterRows])
@@ -652,56 +463,57 @@ export function Ideasoft2CategoriesPage() {
   const openMatchDialog = useCallback((row: IdeasoftCategoryRow) => {
     setMatchDialogRow(row)
     setMatchPickerSearch('')
-    setMatchPickerSelectedMasterId(null)
   }, [])
 
   const closeMatchDialog = useCallback(() => {
     setMatchDialogRow(null)
     setMatchPickerSearch('')
-    setMatchPickerSelectedMasterId(null)
   }, [])
 
-  const saveMatchFromDialog = useCallback(async () => {
-    if (!matchDialogRow || matchPickerSelectedMasterId == null) return
-    setMatchSaving(true)
-    try {
-      const codeRaw = (matchDialogRow.distributor || '').trim()
-      const code = codeRaw || null
-      const isId = matchDialogRow.id
-      const other = masterRows.find(
-        (m) =>
-          m.ideasoft_category_id != null &&
-          Number(m.ideasoft_category_id) === isId &&
-          m.id !== matchPickerSelectedMasterId
-      )
-      if (other) {
-        const clearRes = await fetch(`${API_URL}/api/product-categories/${other.id}`, {
+  const saveMatchWithMasterId = useCallback(
+    async (masterId: number) => {
+      if (!matchDialogRow) return
+      setMatchSaving(true)
+      try {
+        const codeRaw = (matchDialogRow.distributor || '').trim()
+        const code = codeRaw || null
+        const isId = matchDialogRow.id
+        const other = masterRows.find(
+          (m) =>
+            m.ideasoft_category_id != null &&
+            Number(m.ideasoft_category_id) === isId &&
+            m.id !== masterId
+        )
+        if (other) {
+          const clearRes = await fetch(`${API_URL}/api/product-categories/${other.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ideasoft_category_id: null, ideasoft_category_code: null }),
+          })
+          const clearData = await parseJsonResponse<{ error?: string }>(clearRes)
+          if (!clearRes.ok) throw new Error(clearData.error || 'Çakışan master temizlenemedi')
+        }
+        const res = await fetch(`${API_URL}/api/product-categories/${masterId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ideasoft_category_id: null, ideasoft_category_code: null }),
+          body: JSON.stringify({
+            ideasoft_category_id: isId,
+            ideasoft_category_code: code,
+          }),
         })
-        const clearData = await parseJsonResponse<{ error?: string }>(clearRes)
-        if (!clearRes.ok) throw new Error(clearData.error || 'Çakışan master temizlenemedi')
+        const data = await parseJsonResponse<{ error?: string }>(res)
+        if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
+        toastSuccess('Eşleştirildi', 'IdeaSoft kategori master kayıtla bağlandı.')
+        closeMatchDialog()
+        await loadMasters()
+      } catch (err) {
+        toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
+      } finally {
+        setMatchSaving(false)
       }
-      const res = await fetch(`${API_URL}/api/product-categories/${matchPickerSelectedMasterId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ideasoft_category_id: isId,
-          ideasoft_category_code: code,
-        }),
-      })
-      const data = await parseJsonResponse<{ error?: string }>(res)
-      if (!res.ok) throw new Error(data.error || 'Kaydedilemedi')
-      toastSuccess('Eşleştirildi', 'IdeaSoft kategori master kayıtla bağlandı.')
-      closeMatchDialog()
-      await loadMasters()
-    } catch (err) {
-      toastError('Hata', err instanceof Error ? err.message : 'Kaydedilemedi')
-    } finally {
-      setMatchSaving(false)
-    }
-  }, [matchDialogRow, matchPickerSelectedMasterId, masterRows, closeMatchDialog, loadMasters])
+    },
+    [matchDialogRow, masterRows, closeMatchDialog, loadMasters]
+  )
 
   const removeMatch = useCallback(
     async (_row: IdeasoftCategoryRow, masterId: number) => {
@@ -894,7 +706,7 @@ export function Ideasoft2CategoriesPage() {
       </Card>
 
       <Dialog open={matchDialogRow != null} onOpenChange={(open) => !open && closeMatchDialog()}>
-        <DialogContent className="flex max-h-[min(90vh,640px)] flex-col gap-0 overflow-hidden sm:max-w-lg">
+        <DialogContent className="flex max-h-[min(90vh,640px)] w-full max-w-3xl min-h-0 flex-col gap-0 overflow-y-hidden">
           <DialogHeader>
             <DialogTitle>Master ile eşleştir</DialogTitle>
             {matchDialogRow ? (
@@ -918,31 +730,45 @@ export function Ideasoft2CategoriesPage() {
                   className="h-9 pl-8"
                 />
               </div>
-              <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border bg-muted/20">
-                {masterCategoryItems.length === 0 ? (
+              <div
+                className={cn(
+                  'mt-2 h-[min(50vh,420px)] min-h-[220px] w-full min-w-0 overflow-y-auto overflow-x-hidden rounded-md border bg-muted/20',
+                  matchSaving && 'pointer-events-none opacity-60'
+                )}
+              >
+                {masterListLoading ? (
+                  <div className="p-6 text-center text-sm text-muted-foreground">Master kategoriler yükleniyor…</div>
+                ) : masterListError ? (
+                  <div className="flex flex-col gap-3 p-4">
+                    <p className="text-sm text-destructive">{masterListError}</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="self-start"
+                      onClick={() => void loadMasters()}
+                    >
+                      Yeniden dene
+                    </Button>
+                  </div>
+                ) : masterCategoryItems.length === 0 ? (
                   <div className="p-6 text-center text-sm text-muted-foreground">
                     Master kategori yok. Önce Parametreler › Kategoriler üzerinden ekleyin.
                   </div>
                 ) : (
                   <MasterCategoryTreePicker
                     categories={masterCategoryItems}
-                    selectedId={matchPickerSelectedMasterId}
-                    onSelect={setMatchPickerSelectedMasterId}
+                    selectedId={null}
+                    onSelect={(id) => void saveMatchWithMasterId(id)}
                     searchQuery={matchPickerSearch}
                     disabledMasterIds={matchDialogDisabledMasterIds}
+                    defaultExpandAll
                   />
                 )}
               </div>
               <DialogFooter className="mt-4 gap-2 sm:justify-end">
                 <Button type="button" variant="outline" onClick={closeMatchDialog} disabled={matchSaving}>
                   İptal
-                </Button>
-                <Button
-                  type="button"
-                  disabled={matchSaving || matchPickerSelectedMasterId == null}
-                  onClick={() => void saveMatchFromDialog()}
-                >
-                  {matchSaving ? 'Kaydediliyor…' : 'Kaydet'}
                 </Button>
               </DialogFooter>
             </>

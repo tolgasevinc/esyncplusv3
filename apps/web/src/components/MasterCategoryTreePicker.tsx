@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, type ComponentPropsWithoutRef } from 'react'
+import { useState, useMemo, useCallback, useEffect, type ComponentPropsWithoutRef } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { CategoryItem } from '@/components/CategorySelect'
@@ -51,6 +51,43 @@ function LevelDot({ color, tone }: { color?: string; tone: 'blue' | 'emerald' | 
 
 const OCCUPIED_TITLE = 'Bu master kayıt başka bir IdeaSoft kategori satırında kullanılıyor; seçilemez.'
 
+/** D1 / JSON bazen FK alanlarını string döndürür; `!"0"` yanlış negatif üretir. */
+function coerceFk(v: unknown): number | null {
+  if (v == null || v === '') return null
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  const n = parseInt(String(v).trim(), 10)
+  return Number.isFinite(n) ? n : null
+}
+
+function coercePositiveId(v: unknown): number | null {
+  if (v == null || v === '') return null
+  if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? v : null
+  const n = parseInt(String(v).trim(), 10)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function isRootSlot(v: number | null): boolean {
+  return v == null || v === 0
+}
+
+function normalizeCategoryItem(c: CategoryItem): CategoryItem | null {
+  const id = coercePositiveId(c.id)
+  if (id == null) return null
+  const group_id = coerceFk(c.group_id)
+  const category_id = coerceFk(c.category_id)
+  return {
+    ...c,
+    id,
+    group_id: group_id == null ? undefined : group_id,
+    category_id: category_id == null ? undefined : category_id,
+  }
+}
+
+function lenientPositiveId(c: CategoryItem): number | null {
+  const r = c as unknown as Record<string, unknown>
+  return coercePositiveId(r.id ?? r.ID)
+}
+
 export interface MasterCategoryTreePickerProps {
   categories: CategoryItem[]
   selectedId: number | null
@@ -62,6 +99,8 @@ export interface MasterCategoryTreePickerProps {
    * Ağaçta pasif, tıklanamaz listelenir.
    */
   disabledMasterIds?: ReadonlySet<number>
+  /** true ise ilk yüklemede tüm gruplar ve alt kategorili ana satırlar açılır (varsayılan: kapalı) */
+  defaultExpandAll?: boolean
 }
 
 /**
@@ -74,9 +113,28 @@ export function MasterCategoryTreePicker({
   onSelect,
   searchQuery,
   disabledMasterIds,
+  defaultExpandAll = false,
 }: MasterCategoryTreePickerProps) {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set())
   const [expandedCategories, setExpandedCategories] = useState<Set<number>>(new Set())
+
+  const normalized = useMemo(
+    () => categories.map(normalizeCategoryItem).filter((c): c is CategoryItem => c != null),
+    [categories]
+  )
+
+  const effectiveNormalized = useMemo(() => {
+    if (normalized.length > 0) return normalized
+    if (categories.length === 0) return []
+    const salvaged = categories
+      .map((c) => {
+        const id = lenientPositiveId(c)
+        if (id == null) return null
+        return normalizeCategoryItem({ ...c, id } as CategoryItem)
+      })
+      .filter((c): c is CategoryItem => c != null)
+    return salvaged
+  }, [categories, normalized])
 
   const isMasterOccupiedElsewhere = useCallback(
     (id: number) => disabledMasterIds?.has(id) ?? false,
@@ -84,19 +142,27 @@ export function MasterCategoryTreePicker({
   )
 
   const groups = useMemo(
-    () => categories.filter((c) => (!c.group_id || c.group_id === 0) && (!c.category_id || c.category_id === 0)),
-    [categories]
+    () =>
+      effectiveNormalized.filter((c) => {
+        const g = coerceFk(c.group_id)
+        const cat = coerceFk(c.category_id)
+        return isRootSlot(g) && isRootSlot(cat)
+      }),
+    [effectiveNormalized]
   )
   const mainCats = useMemo(
-    () => categories.filter((c) => !c.category_id || c.category_id === 0),
-    [categories]
+    () => effectiveNormalized.filter((c) => isRootSlot(coerceFk(c.category_id))),
+    [effectiveNormalized]
   )
-  const subCats = useMemo(() => categories.filter((c) => c.category_id && c.category_id > 0), [categories])
+  const subCats = useMemo(
+    () => effectiveNormalized.filter((c) => !isRootSlot(coerceFk(c.category_id))),
+    [effectiveNormalized]
+  )
 
   const byGroup = useMemo(() => {
     const m = new Map<number, CategoryItem[]>()
     mainCats.forEach((c) => {
-      const gid = c.group_id ?? 0
+      const gid = coerceFk(c.group_id) ?? 0
       if (gid > 0) {
         if (!m.has(gid)) m.set(gid, [])
         m.get(gid)!.push(c)
@@ -108,7 +174,8 @@ export function MasterCategoryTreePicker({
   const byParent = useMemo(() => {
     const m = new Map<number, CategoryItem[]>()
     subCats.forEach((c) => {
-      const pid = c.category_id!
+      const pid = coerceFk(c.category_id)
+      if (pid == null || pid <= 0) return
       if (!m.has(pid)) m.set(pid, [])
       m.get(pid)!.push(c)
     })
@@ -116,7 +183,10 @@ export function MasterCategoryTreePicker({
   }, [subCats])
 
   const noGroupCats = useMemo(
-    () => mainCats.filter((c) => c.group_id == null && !groups.some((g) => g.id === c.id)),
+    () =>
+      mainCats.filter(
+        (c) => isRootSlot(coerceFk(c.group_id)) && !groups.some((g) => g.id === c.id)
+      ),
     [mainCats, groups]
   )
 
@@ -171,10 +241,38 @@ export function MasterCategoryTreePicker({
       [...groups].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)),
     [groups]
   )
+
+  /** Üst grup satırı listeye hiç düşmüyorsa (pasif/silinmiş/eşleşmeyen veri) ana kategoriler burada gösterilir */
+  const groupIdsInTree = useMemo(() => new Set(groups.map((g) => g.id)), [groups])
+  const orphanGroupIds = useMemo(() => {
+    const out: number[] = []
+    for (const k of byGroup.keys()) {
+      if (k > 0 && !groupIdsInTree.has(k)) out.push(k)
+    }
+    return out.sort((a, b) => a - b)
+  }, [byGroup, groupIdsInTree])
+
   const sortedNoGroup = useMemo(
     () =>
       [...noGroupCats].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name)),
     [noGroupCats]
+  )
+
+  useEffect(() => {
+    if (!defaultExpandAll) return
+    setExpandedGroups(new Set(groups.map((g) => g.id)))
+    const mainsWithKids = mainCats.filter((c) => (byParent.get(c.id) || []).length > 0)
+    setExpandedCategories(new Set(mainsWithKids.map((c) => c.id)))
+  }, [defaultExpandAll, groups, mainCats, byParent])
+
+  /** Grup/ana satırı yoksa (veya id tipi yüzünden Map eşleşmiyorsa) ağaç boş kalırdı — düz liste. */
+  const needFlatFallback = useMemo(
+    () =>
+      effectiveNormalized.length > 0 &&
+      sortedGroups.length === 0 &&
+      sortedNoGroup.length === 0 &&
+      orphanGroupIds.length === 0,
+    [effectiveNormalized, sortedGroups, sortedNoGroup, orphanGroupIds]
   )
 
   const selectedCls = (id: number) =>
@@ -322,7 +420,58 @@ export function MasterCategoryTreePicker({
   const filteredGroups = q ? sortedGroups.filter((g) => groupMatches(g)) : sortedGroups
   const filteredNoGroup = q ? sortedNoGroup.filter((c) => categoryMatches(c)) : sortedNoGroup
 
+  const orphanGroupMatches = useCallback(
+    (gid: number) => {
+      const groupCats = byGroup.get(gid) || []
+      if (q) return groupCats.some((c) => categoryMatches(c))
+      return groupCats.length > 0
+    },
+    [byGroup, categoryMatches, q]
+  )
+
   if (categories.length === 0) return null
+
+  if (needFlatFallback) {
+    const flatList = [...effectiveNormalized]
+      .filter((c) => matches(c))
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+    return (
+      <div className="p-2 space-y-0.5">
+        <p className="px-2 pb-1 text-xs text-muted-foreground">
+          Hiyerarşi okunamadı veya yalnızca alt seviye kayıtlar var; tüm master satırlar düz listede.
+        </p>
+        {flatList.map((c) => (
+          <TreeIndentButton
+            key={`flat-${c.id}`}
+            paddingLeftPx={12}
+            onClick={() => onSelect(c.id)}
+            disabled={isMasterOccupiedElsewhere(c.id)}
+            title={isMasterOccupiedElsewhere(c.id) ? OCCUPIED_TITLE : undefined}
+            className={cn(
+              'w-full text-left flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-muted/40',
+              !isMasterOccupiedElsewhere(c.id) && 'hover:bg-muted/70',
+              selectedCls(c.id),
+              takenCls(c.id)
+            )}
+          >
+            <LevelDot color={c.color} tone="emerald" />
+            <span
+              className={cn(
+                'break-words whitespace-normal min-w-0',
+                isMasterOccupiedElsewhere(c.id) ? 'text-muted-foreground' : 'font-medium text-foreground'
+              )}
+            >
+              {c.name} [{c.code}]
+            </span>
+            <span className="text-xs tabular-nums shrink-0 ml-auto text-muted-foreground">#{c.id}</span>
+          </TreeIndentButton>
+        ))}
+        {flatList.length === 0 ? (
+          <div className="py-6 text-center text-sm text-muted-foreground">{q ? 'Sonuç yok.' : 'Gösterilecek kategori yok.'}</div>
+        ) : null}
+      </div>
+    )
+  }
 
   return (
     <div className="p-2 space-y-0.5">
@@ -380,10 +529,47 @@ export function MasterCategoryTreePicker({
           </div>
         )
       })}
+      {orphanGroupIds
+        .filter((ogid) => orphanGroupMatches(ogid))
+        .map((ogid) => {
+          const pseudoGroup: CategoryItem = {
+            id: ogid,
+            name: `Grup #${ogid}`,
+            code: '—',
+            group_id: 0,
+            category_id: 0,
+          }
+          const groupCats = (byGroup.get(ogid) || [])
+            .filter((c) => !q || categoryMatches(c))
+            .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+          if (groupCats.length === 0) return null
+          return (
+            <div key={`orphan-grp-${ogid}`} className="space-y-0.5">
+              <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-50/80 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                Üst grup satırı listede yok veya pasif; yine de bu gruba bağlı ana kategoriler:
+              </div>
+              <div className="space-y-0.5 pl-1">
+                {groupCats.map((cat) => renderCat(cat, pseudoGroup, 1))}
+              </div>
+            </div>
+          )
+        })}
       {filteredNoGroup.map((cat) => renderCat(cat, undefined, 0))}
-      {q && filteredGroups.length === 0 && filteredNoGroup.length === 0 && (
+      {q &&
+        filteredGroups.length === 0 &&
+        filteredNoGroup.length === 0 &&
+        !orphanGroupIds.some((ogid) => orphanGroupMatches(ogid)) && (
         <div className="py-6 text-center text-sm text-muted-foreground">Sonuç yok.</div>
       )}
+      {!q &&
+        filteredGroups.length === 0 &&
+        filteredNoGroup.length === 0 &&
+        !orphanGroupIds.some((ogid) => (byGroup.get(ogid) || []).length > 0) &&
+        categories.length > 0 && (
+          <div className="py-6 text-center text-sm text-muted-foreground">
+            Kategori ağacı oluşturulamadı; veri yapısını kontrol edin.
+          </div>
+        )}
     </div>
   )
 }

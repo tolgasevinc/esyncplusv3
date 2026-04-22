@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
 import { ImageIcon, Search, X, Banknote } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -15,6 +16,7 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
 import type { IdeasoftProductImageRow } from '@/pages/ideasoft/IdeasoftProductImagesPage'
+import { CategoryCascadeThreeSelects } from './ideasoft2-category-cascade'
 
 const FX_STORAGE_KEY = 'ideasoft2-fx-v1'
 
@@ -53,6 +55,7 @@ interface Ideasoft2ProductListRow {
 
 const listDefaults = {
   search: '',
+  categoryPath: [] as number[],
   page: 1,
   pageSize: 25 as PageSizeValue,
   fitLimit: 10,
@@ -67,25 +70,6 @@ function parseCollectionTotal(o: Record<string, unknown>, fallbackLen: number): 
     if (Number.isFinite(n) && n >= 0) return n
   }
   return fallbackLen
-}
-
-/** Ideasoft Ürünler sayfası ile aynı — Product COUNT yanıtı */
-function parseProductCount(json: unknown): number | null {
-  if (typeof json === 'number' && Number.isFinite(json)) return json
-  if (json && typeof json === 'object') {
-    const o = json as Record<string, unknown>
-    if (typeof o.total === 'number' && Number.isFinite(o.total)) return o.total
-    if (typeof o.count === 'number' && Number.isFinite(o.count)) return o.count
-    if (typeof o['hydra:totalItems'] === 'number' && Number.isFinite(o['hydra:totalItems'] as number)) {
-      return o['hydra:totalItems'] as number
-    }
-    const raw = o['hydra:totalItems'] ?? o.total ?? o.count
-    if (typeof raw === 'string' && raw.trim() !== '') {
-      const n = parseInt(raw.trim(), 10)
-      if (Number.isFinite(n) && n >= 0) return n
-    }
-  }
-  return null
 }
 
 function extractProductsList(json: unknown): { items: Ideasoft2ProductListRow[]; total: number } {
@@ -276,15 +260,105 @@ function displayProductName(row: Ideasoft2ProductListRow): string {
   return n || '—'
 }
 
+/** Master ürünler ile IdeaSoft SKU eşlemesi (trim + küçük harf). */
+function normalizeSkuKey(raw: string | undefined | null): string {
+  return (raw ?? '').trim().toLowerCase()
+}
+
+interface MasterProductSkuRow {
+  id: number
+  name: string
+  sku: string
+  ideasoft_product_id: number | null
+}
+
+type SkuMatchUi =
+  | { kind: 'loading' }
+  | { kind: 'error' }
+  | { kind: 'no_sku' }
+  | { kind: 'no_master' }
+  | { kind: 'duplicate'; masters: MasterProductSkuRow[] }
+  | { kind: 'id_mismatch'; master: MasterProductSkuRow; boundId: number }
+  | { kind: 'ok'; master: MasterProductSkuRow }
+
+function resolveSkuMatch(
+  row: Ideasoft2ProductListRow,
+  byKey: Map<string, MasterProductSkuRow[]>,
+  masterStatus: 'idle' | 'loading' | 'ready' | 'error'
+): SkuMatchUi {
+  if (masterStatus === 'idle' || masterStatus === 'loading') return { kind: 'loading' }
+  if (masterStatus === 'error') return { kind: 'error' }
+  const k = normalizeSkuKey(row.sku)
+  if (!k) return { kind: 'no_sku' }
+  const list = byKey.get(k)
+  if (!list?.length) return { kind: 'no_master' }
+  if (list.length > 1) return { kind: 'duplicate', masters: list }
+  const master = list[0]
+  const ip = master.ideasoft_product_id
+  if (ip != null && ip > 0 && ip !== row.id) {
+    return { kind: 'id_mismatch', master, boundId: ip }
+  }
+  return { kind: 'ok', master }
+}
+
+async function fetchMasterProductsSkuIndex(): Promise<Map<string, MasterProductSkuRow[]>> {
+  const byKey = new Map<string, MasterProductSkuRow[]>()
+  let page = 1
+  const limit = 9999
+  let total = 0
+  let hasMore = true
+  while (hasMore) {
+    const res = await fetch(
+      `${API_URL}/api/products?page=${page}&limit=${limit}&sort_by=sku&sort_order=asc`
+    )
+    const json = await parseJsonResponse<{ data?: unknown[]; total?: number }>(res)
+    if (!res.ok) {
+      const msg =
+        json && typeof json === 'object' && 'error' in json
+          ? String((json as { error?: string }).error)
+          : 'Master ürün listesi alınamadı'
+      throw new Error(msg)
+    }
+    const rows = Array.isArray(json.data) ? json.data : []
+    total = typeof json.total === 'number' ? json.total : rows.length
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') continue
+      const o = raw as Record<string, unknown>
+      const id = typeof o.id === 'number' ? o.id : parseInt(String(o.id ?? ''), 10)
+      if (!Number.isFinite(id)) continue
+      const skuRaw = o.sku
+      const sku = skuRaw == null ? '' : String(skuRaw)
+      const k = normalizeSkuKey(sku)
+      if (!k) continue
+      const name = o.name != null ? String(o.name) : ''
+      let ideasoft_product_id: number | null = null
+      if (o.ideasoft_product_id != null && o.ideasoft_product_id !== '') {
+        const ip = Number(o.ideasoft_product_id)
+        ideasoft_product_id = Number.isFinite(ip) && ip > 0 ? ip : null
+      }
+      const entry: MasterProductSkuRow = { id, name, sku, ideasoft_product_id }
+      const arr = byKey.get(k) ?? []
+      arr.push(entry)
+      byKey.set(k, arr)
+    }
+    if (rows.length < limit || page * limit >= total) hasMore = false
+    else page += 1
+  }
+  return byKey
+}
+
 export function Ideasoft2ProductsPage() {
   const [listState, setListState] = usePersistedListState('ideasoft2-products-v1', listDefaults)
-  const { search, page, pageSize, fitLimit } = listState
+  const { search, categoryPath, page, pageSize, fitLimit } = listState
   const contentRef = useRef<HTMLDivElement>(null)
   const [items, setItems] = useState<Ideasoft2ProductListRow[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [listError, setListError] = useState<string | null>(null)
   const [imageByProductId, setImageByProductId] = useState<Record<number, IdeasoftProductImageRow[]>>({})
+  const [masterSkuByKey, setMasterSkuByKey] = useState<Map<string, MasterProductSkuRow[]>>(() => new Map())
+  const [masterSkuStatus, setMasterSkuStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [masterSkuError, setMasterSkuError] = useState<string | null>(null)
 
   /** Manuel EUR/USD kurları — tarayıcıda kalıcı (ilk yüklemede boş string ile üzerine yazma hatası giderildi) */
   const [manualFx, setManualFx] = useState(() => getInitialFxFromStorage())
@@ -313,8 +387,11 @@ export function Ideasoft2ProductsPage() {
       sort: 'id',
     })
     if (search.trim()) params.set('s', search.trim())
+    const catLeaf =
+      categoryPath.length > 0 ? categoryPath[categoryPath.length - 1]! : null
+    if (catLeaf != null && catLeaf > 0) params.set('category_id', String(catLeaf))
     return params
-  }, [page, limit, search])
+  }, [page, limit, search, categoryPath])
 
   const fetchList = useCallback(async () => {
     setLoading(true)
@@ -322,11 +399,8 @@ export function Ideasoft2ProductsPage() {
     setImageByProductId({})
     try {
       const params = buildListParams()
-      /** IdeaSoft Ürünler ile aynı proxy — Worker’daki /ideasoft2 özel route’a bağlı kalmadan sayfalama çalışır */
-      const [res, resCount] = await Promise.all([
-        fetch(`${API_URL}/api/ideasoft/admin-api/products?${params}`),
-        fetch(`${API_URL}/api/ideasoft/admin-api/products/count?${params}`),
-      ])
+      /** Sunucu `/products/count` ile hydra:totalItems birleştirir; count’a page/limit gitmez (toplam kayıt doğru kalır). */
+      const res = await fetch(`${API_URL}/api/ideasoft2/products?${params}`)
       const data = await parseJsonResponse<unknown>(res)
       if (!res.ok) {
         setListError(
@@ -337,16 +411,7 @@ export function Ideasoft2ProductsPage() {
         setImageByProductId({})
         return
       }
-      let { items: rows, total: t } = extractProductsList(data)
-      if (resCount.ok) {
-        try {
-          const countData = await parseJsonResponse<unknown>(resCount)
-          const c = parseProductCount(countData)
-          if (c != null) t = c
-        } catch {
-          /* COUNT okunamazsa liste hydra toplamı */
-        }
-      }
+      const { items: rows, total: t } = extractProductsList(data)
       setItems(rows)
       setTotal(t)
       const imageEntries = await Promise.all(
@@ -372,15 +437,44 @@ export function Ideasoft2ProductsPage() {
     void fetchList()
   }, [fetchList])
 
+  useEffect(() => {
+    let cancelled = false
+    setMasterSkuStatus('loading')
+    setMasterSkuError(null)
+    void (async () => {
+      try {
+        const map = await fetchMasterProductsSkuIndex()
+        if (!cancelled) {
+          setMasterSkuByKey(map)
+          setMasterSkuStatus('ready')
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setMasterSkuByKey(new Map())
+          setMasterSkuStatus('error')
+          setMasterSkuError(e instanceof Error ? e.message : 'Master SKU haritası yüklenemedi')
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   return (
     <PageLayout
       title="IdeaSoft 2 › Ürünler"
-      description="Yayınlanan sütunu iskontolu net fiyatı KDV dahil gösterir; TL manuel EUR/USD kurlarıyla hesaplanır."
+      description="Kategori filtresi seçilen IdeaSoft kategori id’si ile ürün listesini daraltır (Admin API categories.id). Yayınlanan sütunu iskontolu net fiyatı KDV dahil gösterir; Master (SKU) ana ürün eşleşmesini gösterir."
       backTo="/ideasoft2"
       contentRef={contentRef}
       contentOverflow="hidden"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
+          <CategoryCascadeThreeSelects
+            path={categoryPath}
+            idPrefix="ideasoft2-prod-cat"
+            onPathChange={(next) => setListState({ categoryPath: next, page: 1 })}
+          />
           <div className="relative w-full min-w-[200px] max-w-sm sm:w-64">
             <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -462,7 +556,7 @@ export function Ideasoft2ProductsPage() {
           onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
           onFitLimitChange={(fl) => setListState({ fitLimit: fl })}
           tableContainerRef={contentRef}
-          hasFilter={search.trim().length > 0}
+          hasFilter={search.trim().length > 0 || categoryPath.length > 0}
         />
       }
     >
@@ -470,6 +564,11 @@ export function Ideasoft2ProductsPage() {
         <CardContent className="flex flex-1 min-h-0 flex-col overflow-hidden p-0">
           {listError ? (
             <div className="shrink-0 border-b border-border px-4 py-3 text-sm text-destructive">{listError}</div>
+          ) : null}
+          {masterSkuError ? (
+            <div className="shrink-0 border-b border-border px-4 py-3 text-sm text-destructive">
+              Master SKU kontrolü: {masterSkuError}
+            </div>
           ) : null}
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-auto">
             <table className="w-full min-w-[720px] border-separate border-spacing-0 text-sm">
@@ -484,6 +583,10 @@ export function Ideasoft2ProductsPage() {
                   </th>
                   <th className="sticky top-0 z-20 border-b border-border bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_0_hsl(var(--border))] min-w-[200px]">
                     Ürün
+                  </th>
+                  <th className="sticky top-0 z-20 border-b border-border bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_0_hsl(var(--border))] min-w-[140px]">
+                    <span className="block leading-tight">Master (SKU)</span>
+                    <span className="block text-xs font-normal text-muted-foreground">Ana ürün eşleşmesi</span>
                   </th>
                   <th className="sticky top-0 z-20 border-b border-border bg-muted px-3 py-2 text-right font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
                     Stok
@@ -506,18 +609,19 @@ export function Ideasoft2ProductsPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
                       Yükleniyor…
                     </td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
                       Kayıt yok
                     </td>
                   </tr>
                 ) : (
                   items.map((row) => {
+                    const skuMatch = resolveSkuMatch(row, masterSkuByKey, masterSkuStatus)
                     const net = netPriceAfterDiscount(row)
                     const published =
                       net != null && Number.isFinite(net) ? toTaxInclusiveAmount(net, row) : null
@@ -567,6 +671,51 @@ export function Ideasoft2ProductsPage() {
                           <div className="mt-0.5 font-mono text-xs text-muted-foreground">
                             {(row.sku || '').trim() || '—'}
                           </div>
+                        </td>
+                        <td className="px-3 py-2 align-top text-xs">
+                          {skuMatch.kind === 'loading' ? (
+                            <span className="text-muted-foreground">…</span>
+                          ) : skuMatch.kind === 'error' ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : skuMatch.kind === 'no_sku' ? (
+                            <Badge variant="outline" className="font-normal text-muted-foreground">
+                              SKU yok
+                            </Badge>
+                          ) : skuMatch.kind === 'no_master' ? (
+                            <Badge variant="outline" className="font-normal text-amber-700 dark:text-amber-400">
+                              Master yok
+                            </Badge>
+                          ) : skuMatch.kind === 'duplicate' ? (
+                            <span
+                              className="text-destructive"
+                              title={skuMatch.masters.map((m) => `#${m.id} ${m.name}`).join('; ')}
+                            >
+                              Çoklu master ({skuMatch.masters.map((m) => `#${m.id}`).join(', ')})
+                            </span>
+                          ) : skuMatch.kind === 'id_mismatch' ? (
+                            <span
+                              className="text-destructive"
+                              title={`Bu satır IS id=${row.id}; master kaydı IS id=${skuMatch.boundId} ile bağlı`}
+                            >
+                              SKU eşleşir, IS id farklı (master #{skuMatch.master.id} → IS {skuMatch.boundId})
+                            </span>
+                          ) : (
+                            <Link
+                              to="/products"
+                              className="inline-flex flex-col gap-0.5 text-left hover:underline"
+                              title={skuMatch.master.name}
+                            >
+                              <Badge variant="secondary" className="w-fit font-normal tabular-nums">
+                                Eşleşiyor #{skuMatch.master.id}
+                              </Badge>
+                              {skuMatch.master.ideasoft_product_id === row.id ? (
+                                <span className="text-[10px] text-muted-foreground">IS id eşleşti</span>
+                              ) : skuMatch.master.ideasoft_product_id == null ||
+                                skuMatch.master.ideasoft_product_id === 0 ? (
+                                <span className="text-[10px] text-muted-foreground">IS id master’da boş</span>
+                              ) : null}
+                            </Link>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums align-top">
                           {row.stockAmount != null && Number.isFinite(Number(row.stockAmount))

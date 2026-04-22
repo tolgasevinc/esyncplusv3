@@ -936,9 +936,7 @@ app.get('/api/product-brands', async (c) => {
     ).bind(...params).first<{ total: number }>();
 
     const { results } = await c.env.DB.prepare(
-      `SELECT id, name, code, slug, image, description, website, country, sort_order, status, created_at
-       FROM product_brands ${where}
-       ORDER BY sort_order, name LIMIT ? OFFSET ?`
+      `SELECT * FROM product_brands ${where} ORDER BY sort_order, name LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
 
     return c.json({
@@ -970,8 +968,7 @@ app.get('/api/product-brands/:id', async (c) => {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
     const id = c.req.param('id');
     const row = await c.env.DB.prepare(
-      `SELECT id, name, code, slug, image, description, website, country, sort_order, status, created_at, updated_at
-       FROM product_brands WHERE id = ? AND is_deleted = 0`
+      `SELECT * FROM product_brands WHERE id = ? AND is_deleted = 0`
     ).bind(id).first();
     if (!row) return c.json({ error: 'Marka bulunamadı' }, 404);
     return c.json(row);
@@ -987,6 +984,7 @@ app.post('/api/product-brands', async (c) => {
     const body = await c.req.json<{
       name: string; code?: string; slug?: string; image?: string;
       description?: string; website?: string; country?: string; sort_order?: number; status?: number;
+      ideasoft_brand_id?: number | null;
     }>();
     const name = (body.name || '').trim();
     if (!name) return c.json({ error: 'Marka adı gerekli' }, 400);
@@ -999,6 +997,17 @@ app.post('/api/product-brands', async (c) => {
     const country = body.country?.trim() || null;
     const sort_order = body.sort_order ?? 0;
     const status = body.status ? 1 : 0;
+    let ideasoft_brand_id: number | null = null;
+    if (body.ideasoft_brand_id !== undefined && body.ideasoft_brand_id !== null) {
+      const n = typeof body.ideasoft_brand_id === 'number' ? body.ideasoft_brand_id : parseInt(String(body.ideasoft_brand_id), 10);
+      ideasoft_brand_id = Number.isFinite(n) && n > 0 ? n : null;
+    }
+    if (ideasoft_brand_id != null) {
+      const dupIs = await c.env.DB.prepare(
+        `SELECT id FROM product_brands WHERE is_deleted = 0 AND ideasoft_brand_id = ? LIMIT 1`
+      ).bind(ideasoft_brand_id).first();
+      if (dupIs) return c.json({ error: 'Bu IdeaSoft marka ID başka bir master markada kullanılıyor' }, 400);
+    }
 
     const existing = await c.env.DB.prepare(
       `SELECT id FROM product_brands WHERE code = ? AND is_deleted = 0`
@@ -1006,13 +1015,12 @@ app.post('/api/product-brands', async (c) => {
     if (existing) return c.json({ error: 'Bu kod zaten kullanılıyor' }, 409);
 
     await c.env.DB.prepare(
-      `INSERT INTO product_brands (name, code, slug, image, description, website, country, sort_order, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(name, code, slug, image, description, website, country, sort_order, status).run();
+      `INSERT INTO product_brands (name, code, slug, image, description, website, country, sort_order, status, ideasoft_brand_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(name, code, slug, image, description, website, country, sort_order, status, ideasoft_brand_id).run();
 
     const { results } = await c.env.DB.prepare(
-      `SELECT id, name, code, slug, image, description, website, country, sort_order, created_at
-       FROM product_brands WHERE id = last_insert_rowid()`
+      `SELECT * FROM product_brands WHERE id = last_insert_rowid()`
     ).all();
     return c.json(results![0], 201);
   } catch (err: unknown) {
@@ -1028,6 +1036,7 @@ app.put('/api/product-brands/:id', async (c) => {
     const body = await c.req.json<{
       name?: string; code?: string; slug?: string; image?: string;
       description?: string; website?: string; country?: string; sort_order?: number; status?: number;
+      ideasoft_brand_id?: number | null;
     }>();
 
     const existing = await c.env.DB.prepare(
@@ -1047,6 +1056,23 @@ app.put('/api/product-brands/:id', async (c) => {
     if (body.country !== undefined) { updates.push('country = ?'); values.push(body.country?.trim() || null); }
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (body.ideasoft_brand_id !== undefined) {
+      let isid: number | null = null;
+      if (body.ideasoft_brand_id !== null) {
+        const n = typeof body.ideasoft_brand_id === 'number' ? body.ideasoft_brand_id : parseInt(String(body.ideasoft_brand_id), 10);
+        isid = Number.isFinite(n) && n > 0 ? n : null;
+      }
+      if (isid != null) {
+        const dupI = await c.env.DB.prepare(
+          `SELECT id FROM product_brands WHERE is_deleted = 0 AND ideasoft_brand_id = ? AND id != ? LIMIT 1`
+        ).bind(isid, id).first<{ id: number }>();
+        if (dupI) {
+          return c.json({ error: 'Bu IdeaSoft marka ID başka bir master markada kullanılıyor' }, 400);
+        }
+      }
+      updates.push('ideasoft_brand_id = ?');
+      values.push(isid);
+    }
 
     if (updates.length === 0) return c.json({ error: 'Güncellenecek alan yok' }, 400);
 
@@ -1058,8 +1084,7 @@ app.put('/api/product-brands/:id', async (c) => {
     ).bind(...values).run();
 
     const row = await c.env.DB.prepare(
-      `SELECT id, name, code, slug, image, description, website, country, sort_order, status, created_at, updated_at
-       FROM product_brands WHERE id = ?`
+      `SELECT * FROM product_brands WHERE id = ?`
     ).bind(id).first();
     return c.json(row);
   } catch (err: unknown) {
@@ -1504,6 +1529,69 @@ function ideasoftExtractProductListRows(json: unknown): Record<string, unknown>[
   return [];
 }
 
+/** IdeaSoft Admin API (API Platform) — sayfalama ve toplam kayıt çıkarımı */
+function ideasoftParseNonNegInt(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const t = Math.trunc(v);
+    return t >= 0 ? t : null;
+  }
+  if (typeof v === 'string' && v.trim() !== '') {
+    const t = parseInt(v.trim(), 10);
+    return Number.isFinite(t) && t >= 0 ? t : null;
+  }
+  return null;
+}
+
+function ideasoftReadHydraTotalItemsFromBody(body: Record<string, unknown>): number | null {
+  return ideasoftParseNonNegInt(body['hydra:totalItems'] ?? body['totalItems']);
+}
+
+function ideasoftHydraViewHasNext(body: Record<string, unknown>): boolean {
+  const view = body['hydra:view'];
+  if (!view || typeof view !== 'object' || Array.isArray(view)) return false;
+  const n = (view as Record<string, unknown>)['hydra:next'];
+  return typeof n === 'string' && n.trim().length > 0;
+}
+
+/** Son sayfadaysak hydra:last içindeki page ile tam toplamı hesapla (count uçuğu başarısızsa). */
+function ideasoftInferTotalFromHydraLastPage(
+  body: Record<string, unknown>,
+  itemsPerPage: number,
+  page: number
+): number | null {
+  const hydra = body['hydra:member'];
+  if (!Array.isArray(hydra)) return null;
+  const view = body['hydra:view'];
+  if (!view || typeof view !== 'object' || Array.isArray(view)) return null;
+  const last = (view as Record<string, unknown>)['hydra:last'];
+  if (typeof last !== 'string' || !last.trim()) return null;
+  try {
+    const u = new URL(last, 'https://ideasoft.invalid');
+    const lastPage = ideasoftParseNonNegInt(u.searchParams.get('page'));
+    if (lastPage == null || lastPage < 1) return null;
+    if (page === lastPage) return (lastPage - 1) * itemsPerPage + hydra.length;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function ideasoftParseProductCountResponse(json: unknown): number | null {
+  if (json == null) return null;
+  if (typeof json === 'number' && Number.isFinite(json) && json >= 0) return Math.trunc(json);
+  if (typeof json !== 'object') return null;
+  const o = json as Record<string, unknown>;
+  for (const k of ['hydra:totalItems', 'totalItems', 'total', 'count']) {
+    const n = ideasoftParseNonNegInt(o[k]);
+    if (n != null) return n;
+  }
+  const mem = o['hydra:member'];
+  if (Array.isArray(mem) && mem.length === 1 && mem[0] && typeof mem[0] === 'object') {
+    return ideasoftParseProductCountResponse(mem[0]);
+  }
+  return null;
+}
+
 function parseProductImageStoragePaths(imageField: string | null | undefined): string[] {
   if (!imageField?.trim()) return [];
   const s = imageField.trim();
@@ -1584,7 +1672,7 @@ async function ideasoftFetchFirstProductIdBySku(
   | { ok: false; error: string; hint?: string }
   | { ok: true; id: number | null }
 > {
-  const sp = new URLSearchParams({ page: '1', limit: '40', sort: 'id', s: sku });
+  const sp = new URLSearchParams({ page: '1', limit: '40', itemsPerPage: '40', sort: 'id', s: sku });
   const listRes = await ideasoftDoAdminRequestWithRefresh(
     db,
     `/products?${sp.toString()}`,
@@ -6465,7 +6553,11 @@ app.get('/api/product-categories', async (c) => {
     const page = Math.max(1, parseInt(c.req.query('page') || '1'));
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
     const offset = (page - 1) * limit;
-    let where = 'WHERE is_deleted = 0 AND (status = 1 OR status IS NULL)';
+    const includeInactive = c.req.query('include_inactive') === '1' || c.req.query('all_status') === '1';
+    let where = 'WHERE is_deleted = 0';
+    if (!includeInactive) {
+      where += ' AND (status = 1 OR status IS NULL)';
+    }
     const params: (string | number)[] = [];
     if (search) {
       const n = normalizeForSearch(search);
@@ -6496,9 +6588,10 @@ app.get('/api/product-categories', async (c) => {
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM product_categories ${where}`
     ).bind(...params).first<{ total: number }>();
+    // SELECT * — bazı ortamlarda ideasoft/color sütunları migration henüz uygulanmamış olabiliyor;
+    // sabit sütun listesi "no such column" ile 500 üretiyordu.
     const { results } = await c.env.DB.prepare(
-      `SELECT id, group_id, category_id, name, code, slug, description, image, icon, color, sort_order, status, created_at, ideasoft_category_code, ideasoft_category_id
-       FROM product_categories ${where} ORDER BY sort_order, name LIMIT ? OFFSET ?`
+      `SELECT * FROM product_categories ${where} ORDER BY sort_order, name LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
     return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
   } catch (err: unknown) {
@@ -11347,7 +11440,12 @@ app.get('/api/ideasoft/store-api/brands', async (c) => {
         400
       );
     }
-    const qs = new URL(c.req.url).searchParams.toString();
+    const u = new URL(c.req.url);
+    const sp = u.searchParams;
+    if (sp.get('limit')?.trim() && !sp.get('itemsPerPage')?.trim()) {
+      sp.set('itemsPerPage', sp.get('limit')!.trim());
+    }
+    const qs = sp.toString();
     const path = `/brands${qs ? `?${qs}` : ''}`;
     const res = await ideasoftDoStoreRequestWithRefresh(c.env.DB, path, { method: 'GET' }, settings, auth);
     const text = await res.text();
@@ -12131,13 +12229,28 @@ app.get('/api/ideasoft2/products', async (c) => {
     const sort = (c.req.query('sort') || 'id').trim() || 'id';
     const search = (c.req.query('s') || '').trim();
     const status = (c.req.query('status') || '').trim();
+    const category_id_raw = c.req.query('category_id');
+    const category_id =
+      category_id_raw != null && String(category_id_raw).trim() !== ''
+        ? Math.max(0, parseInt(String(category_id_raw), 10))
+        : 0;
 
+    /**
+     * IdeaSoft Admin API ürün listesi (çalışan ekranlar: IdeasoftProductsPage, ProductImages): `page` + `limit` + `sort`.
+     * Yalnızca `itemsPerPage` göndermek bazı mağazalarda sayfalamayı tamamen yok saydırıyor (her zaman 1. sayfa).
+     * API Platform kurulumları için aynı değer `itemsPerPage` ile de iletilir.
+     */
     const params = new URLSearchParams();
     params.set('page', String(page));
     params.set('limit', String(limit));
+    params.set('itemsPerPage', String(limit));
     params.set('sort', sort);
     if (search) params.set('s', search);
     if (status === '0' || status === '1') params.set('status', status);
+    /** Admin API ürün–kategori ilişkisi (API Platform SearchFilter) */
+    if (Number.isFinite(category_id) && category_id > 0) {
+      params.set('categories.id', String(category_id));
+    }
 
     const pathAndQuery = `/products?${params.toString()}`;
     const res = await ideasoftDoAdminRequestWithRefresh(
@@ -12162,41 +12275,60 @@ app.get('/api/ideasoft2/products', async (c) => {
       );
     }
 
-    /** Liste yanıtında hydra:totalItems bazen eksik; Product COUNT ile toplamı birleştir (Ideasoft Ürünler ile aynı sorgu). */
-    try {
-      const countRes = await ideasoftDoAdminRequestWithRefresh(
-        c.env.DB,
-        `/products/count?${params.toString()}`,
-        { method: 'GET' },
-        settings,
-        auth
-      );
-      const countText = await countRes.text();
-      let countJson: unknown = null;
-      try {
-        countJson = countText ? JSON.parse(countText) : null;
-      } catch {
-        countJson = null;
+    /** Toplam: geçersiz / şüpheli hydra:totalItems düzelt; gerekirse COUNT veya hydra:last ile tamamla. */
+    if (body !== null && typeof body === 'object') {
+      const bo = body as Record<string, unknown>;
+      const member = bo['hydra:member'];
+      const mlen = Array.isArray(member) ? member.length : 0;
+      const minValidTotal = (page - 1) * limit + mlen;
+
+      let merged: number | null = ideasoftReadHydraTotalItemsFromBody(bo);
+      if (merged != null && merged < minValidTotal) merged = null;
+      if (
+        merged != null &&
+        limit > 0 &&
+        mlen === limit &&
+        merged === mlen &&
+        ideasoftHydraViewHasNext(bo)
+      ) {
+        merged = null;
       }
-      if (countRes.ok && countJson != null) {
-        let n: number | null = null;
-        if (typeof countJson === 'number' && Number.isFinite(countJson)) n = countJson;
-        else if (typeof countJson === 'object' && countJson !== null) {
-          const co = countJson as Record<string, unknown>;
-          const raw = co['hydra:totalItems'] ?? co.total ?? co.count;
-          if (typeof raw === 'number' && Number.isFinite(raw)) n = raw;
-          else if (typeof raw === 'string' && raw.trim() !== '') {
-            const p = parseInt(raw.trim(), 10);
-            if (Number.isFinite(p)) n = p;
+
+      if (merged == null) {
+        merged = ideasoftInferTotalFromHydraLastPage(bo, limit, page);
+      }
+
+      if (merged == null) {
+        const countParams = new URLSearchParams();
+        if (search) countParams.set('s', search);
+        if (status === '0' || status === '1') countParams.set('status', status);
+        if (Number.isFinite(category_id) && category_id > 0) {
+          countParams.set('categories.id', String(category_id));
+        }
+        try {
+          const countRes = await ideasoftDoAdminRequestWithRefresh(
+            c.env.DB,
+            `/products/count${countParams.toString() ? `?${countParams.toString()}` : ''}`,
+            { method: 'GET' },
+            settings,
+            auth
+          );
+          const countText = await countRes.text();
+          let countJson: unknown = null;
+          try {
+            countJson = countText ? JSON.parse(countText) : null;
+          } catch {
+            countJson = null;
           }
-        }
-        if (n != null && body !== null && typeof body === 'object') {
-          const bo = body as Record<string, unknown>;
-          bo['hydra:totalItems'] = n;
+          if (countRes.ok && countJson != null) {
+            merged = ideasoftParseProductCountResponse(countJson);
+          }
+        } catch {
+          /* yut */
         }
       }
-    } catch {
-      /* sayım başarısızsa liste gövdesi olduğu gibi */
+
+      if (merged != null) bo['hydra:totalItems'] = merged;
     }
 
     return c.json(body);
