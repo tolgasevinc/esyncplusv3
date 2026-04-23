@@ -111,9 +111,9 @@ async function fetchAllCategoriesFlat(): Promise<IdeasoftCategoryRow[]> {
   for (;;) {
     const params = new URLSearchParams({
       page: String(page),
+      limit: String(limit),
       sort: 'id',
     })
-    params.set('itemsPerPage', String(limit))
     const res = await fetch(`${API_URL}/api/ideasoft/admin-api/categories?${params}`)
     const data = await parseJsonResponse<unknown>(res)
     if (!res.ok) {

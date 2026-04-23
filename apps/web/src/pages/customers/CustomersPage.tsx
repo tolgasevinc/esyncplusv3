@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { Search, Plus, X, Trash2, Save, UserPlus, Pencil, RefreshCw } from 'lucide-react'
+import { Search, Plus, X, Trash2, Save, UserPlus, Pencil, RefreshCw, ALargeSmall, Layers } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,6 +21,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { toastSuccess, toastError } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL } from '@/lib/api'
+import { listCustomerTitleFixes, type CustomerTitleFixPreview } from '@/lib/turkishTitleCase'
+import {
+  findDuplicateCustomerNames,
+  countDuplicateInvolved,
+  type CustomerDuplicateNameGroup,
+} from '@/lib/customerDuplicateNames'
 import { formatPhone, formatPhoneInput } from '@/lib/utils'
 import { PhoneInput } from '@/components/PhoneInput'
 import { CustomerTitleInput } from '@/components/CustomerTitleInput'
@@ -142,6 +148,13 @@ export function CustomersPage() {
     customerId?: number
     onSuccess?: () => void
   }>({ open: false, type: 'customer', id: null })
+  const [titleFixModalOpen, setTitleFixModalOpen] = useState(false)
+  const [titleFixLoading, setTitleFixLoading] = useState(false)
+  const [titleFixPreview, setTitleFixPreview] = useState<CustomerTitleFixPreview[]>([])
+  const [titleFixApplying, setTitleFixApplying] = useState(false)
+  const [dupModalOpen, setDupModalOpen] = useState(false)
+  const [dupLoading, setDupLoading] = useState(false)
+  const [dupGroups, setDupGroups] = useState<CustomerDuplicateNameGroup[]>([])
   const contentRef = useRef<HTMLDivElement>(null)
 
   const emptyContactForm = { full_name: '', role: '', phone: '', phone_mobile: '', email: '', is_primary: false, notes: '' }
@@ -568,10 +581,97 @@ export function CustomersPage() {
     return name.includes('şahıs') || name.includes('sahis') || name.includes('birey')
   }
 
+  const openTitleFixModal = useCallback(async () => {
+    setTitleFixLoading(true)
+    setTitleFixPreview([])
+    try {
+      const res = await fetch(`${API_URL}/api/customers?page=1&limit=9999`)
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Liste yüklenemedi')
+      const all: { id: number; title: string }[] = json.data || []
+      const preview = listCustomerTitleFixes(all)
+      if (preview.length === 0) {
+        toastSuccess(
+          'Düzeltilecek kayıt yok',
+          'Tüm metin küçük harfli ve başlık biçiminden farklı olacak müşteri bulunamadı.'
+        )
+        return
+      }
+      setTitleFixPreview(preview)
+      setTitleFixModalOpen(true)
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Analiz başarısız')
+    } finally {
+      setTitleFixLoading(false)
+    }
+  }, [])
+
+  const applyTitleFixes = useCallback(async () => {
+    if (titleFixPreview.length === 0) return
+    setTitleFixApplying(true)
+    let ok = 0
+    const failures: string[] = []
+    try {
+      for (const row of titleFixPreview) {
+        const res = await fetch(`${API_URL}/api/customers/${row.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: row.to }),
+        })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          failures.push(`#${row.id}: ${(json as { error?: string }).error || res.statusText}`)
+        } else {
+          ok += 1
+        }
+      }
+      setTitleFixModalOpen(false)
+      setTitleFixPreview([])
+      setListState({ page: 1 })
+      fetchData()
+      if (failures.length === 0) {
+        toastSuccess('Güncellendi', `${ok} müşteri adı düzeltildi.`)
+      } else {
+        toastError(
+          'Kısmen tamamlandı',
+          `${ok} kayıt güncellendi, ${failures.length} hata. ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? '…' : ''}`
+        )
+      }
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Güncelleme başarısız')
+    } finally {
+      setTitleFixApplying(false)
+    }
+  }, [titleFixPreview, fetchData, setListState])
+
+  const openDuplicateModal = useCallback(async () => {
+    setDupLoading(true)
+    setDupGroups([])
+    try {
+      const res = await fetch(`${API_URL}/api/customers?page=1&limit=9999`)
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Liste yüklenemedi')
+      const all = (json.data || []) as Customer[]
+      const groups = findDuplicateCustomerNames(
+        all.map((c) => ({ id: c.id, title: c.title, code: c.code }))
+      )
+      if (groups.length === 0) {
+        toastSuccess('Mükerrer yok', 'Aynı isimle (büyük/küçük harf ayrımı olmadan) birden fazla kayıt bulunamadı.')
+        return
+      }
+      setDupGroups(groups)
+      setDupModalOpen(true)
+    } catch (err) {
+      toastError('Hata', err instanceof Error ? err.message : 'Analiz başarısız')
+    } finally {
+      setDupLoading(false)
+    }
+  }, [])
+
   return (
     <PageLayout
       title="Müşteriler"
-      description="Müşteri listesini yönetin"
+      description="Müşteri listesini yönetin. Aa: küçük harf isim düzeltme; katman ikonu: aynı isimli mükerrerler."
       backTo="/parametreler"
       contentRef={contentRef}
       showRefresh
@@ -590,6 +690,34 @@ export function CustomersPage() {
               className="pl-8 w-64 h-9"
             />
           </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={openTitleFixModal}
+                disabled={titleFixLoading}
+                aria-label="Küçük harf isimlerini başlık biçimine çevir"
+              >
+                {titleFixLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ALargeSmall className="h-4 w-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Tamamı küçük harfli isimleri düzelt (önce önizleme)</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={openDuplicateModal}
+                disabled={dupLoading}
+                aria-label="Aynı isimli mükerrer kayıtları"
+              >
+                {dupLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Layers className="h-4 w-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Aynı isimle mükerrer kayıtlar (özet)</TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" size="icon" onClick={openNew}>
@@ -1014,6 +1142,126 @@ export function CustomersPage() {
               </div>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={titleFixModalOpen}
+        onOpenChange={(open) => {
+          if (!open && !titleFixApplying) {
+            setTitleFixModalOpen(false)
+            setTitleFixPreview([])
+          }
+        }}
+      >
+        <DialogContent className="max-w-3xl max-h-[min(90vh,720px)] flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>İsim biçimini düzelt</DialogTitle>
+            <DialogDescription>
+              Tamamı Türkçe küçük harfle yazılmış kayıtlar, kelimelerin ilk harfi büyük (İ, I, Ğ, Ü, …) olacak şekilde güncellenecek. Aşağıdaki
+              {titleFixPreview.length} kayıt değişecek; onayladığınızda uygulanır.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/50 sticky top-0">
+                  <th className="text-left p-2 font-medium w-16">ID</th>
+                  <th className="text-left p-2 font-medium">Mevcut</th>
+                  <th className="text-left p-2 font-medium">Yeni</th>
+                </tr>
+              </thead>
+              <tbody>
+                {titleFixPreview.map((row) => (
+                  <tr key={row.id} className="border-b last:border-0">
+                    <td className="p-2 text-muted-foreground tabular-nums align-top">{row.id}</td>
+                    <td className="p-2 align-top break-words text-muted-foreground">{row.from}</td>
+                    <td className="p-2 align-top break-words font-medium">{row.to}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <DialogFooter className="shrink-0 gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                if (!titleFixApplying) {
+                  setTitleFixModalOpen(false)
+                  setTitleFixPreview([])
+                }
+              }}
+              disabled={titleFixApplying}
+            >
+              İptal
+            </Button>
+            <Button type="button" onClick={applyTitleFixes} disabled={titleFixApplying || titleFixPreview.length === 0}>
+              {titleFixApplying ? 'Uygulanıyor…' : 'Değişiklikleri uygula'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={dupModalOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDupModalOpen(false)
+            setDupGroups([])
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl max-h-[min(90vh,640px)] flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>Mükerrer isim özeti</DialogTitle>
+            <DialogDescription>
+              Aynı ünvan, Türkçe kurallarına göre büyük/küçük harf ve baş/son boşluk dikkate alınmadan eşleştirildi.
+              {dupGroups.length > 0 ? (
+                <>
+                  {' '}
+                  {dupGroups.length} isim çakışması, toplam {countDuplicateInvolved(dupGroups)} kayıt bu gruplarda.
+                </>
+              ) : null}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            {dupGroups.map((g) => (
+              <div key={g.key} className="rounded-lg border p-3 space-y-2">
+                <p className="text-sm font-semibold">{g.displayTitle}</p>
+                <p className="text-xs text-muted-foreground">{g.rows.length} kayıt</p>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-left text-muted-foreground text-xs">
+                      <th className="py-1 pr-2 w-16">ID</th>
+                      <th className="py-1 pr-2">Kod</th>
+                      <th className="py-1">Kayıttaki ad</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.rows.map((r) => (
+                      <tr key={r.id} className="border-b border-border/50 last:border-0">
+                        <td className="py-1.5 pr-2 tabular-nums text-muted-foreground">{r.id}</td>
+                        <td className="py-1.5 pr-2 font-mono text-xs">{r.code || '—'}</td>
+                        <td className="py-1.5 break-words">{r.title}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              onClick={() => {
+                setDupModalOpen(false)
+                setDupGroups([])
+              }}
+            >
+              Kapat
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

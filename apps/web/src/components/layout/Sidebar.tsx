@@ -47,6 +47,7 @@ export function Sidebar() {
       '/customers',
       '/teklifler',
       '/parasut/products',
+      '/parasut/customers',
       '/ideasoft/para-birimleri',
       '/ideasoft/markalar',
       '/ideasoft/kategoriler',

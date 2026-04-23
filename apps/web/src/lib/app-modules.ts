@@ -51,6 +51,7 @@ export const APP_MODULES: AppModule[] = [
   { id: 'ideasoft2-markalar', label: 'IdeaSoft 2 › Markalar', path: '/ideasoft2/markalar' },
   { id: 'parasut', label: 'Paraşüt', path: '/parasut' },
   { id: 'parasut-products', label: 'Paraşüt › Ürünler', path: '/parasut/products' },
+  { id: 'parasut-customers', label: 'Paraşüt › Müşteriler', path: '/parasut/customers' },
   { id: 'parasut-brands', label: 'Paraşüt › Marka Eşleştirme', path: '/parasut/brands' },
   { id: 'ayarlar-hesaplamalar', label: 'settings › calculations', path: '/ayarlar/hesaplamalar' },
   { id: 'ayarlar-erisim', label: 'settings › access', path: '/ayarlar/erisim' },

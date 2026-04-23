@@ -45,7 +45,8 @@ export function extractCategoriesList(json: unknown): { items: IdeasoftCategoryR
   return { items: [], total: 0 }
 }
 
-function parentIdFromIriString(s: string): number | null {
+/** Ürün/kategori yanıtındaki `/categories/{id}` veya tam IRI; Admin API / JSON-LD @id için */
+export function ideasoftCategoryIdFromIriString(s: string): number | null {
   const t = s.trim()
   const m = t.match(/\/categories\/(\d+)(?:\/)?(?:\?.*)?$/i) ?? t.match(/^(\d+)$/)
   if (!m) return null
@@ -57,7 +58,7 @@ export function parentIdFromCategoryListRow(row: Record<string, unknown>): numbe
   const p = row.parent
   if (p == null) return null
   if (typeof p === 'number' && Number.isFinite(p) && p >= 0) return p
-  if (typeof p === 'string') return parentIdFromIriString(p)
+  if (typeof p === 'string') return ideasoftCategoryIdFromIriString(p)
   if (typeof p === 'object' && p !== null && !Array.isArray(p)) {
     const o = p as Record<string, unknown>
     if ('id' in o) {
@@ -65,7 +66,7 @@ export function parentIdFromCategoryListRow(row: Record<string, unknown>): numbe
       return Number.isFinite(id) ? id : null
     }
     const at = o['@id']
-    if (typeof at === 'string') return parentIdFromIriString(at)
+    if (typeof at === 'string') return ideasoftCategoryIdFromIriString(at)
   }
   return null
 }
@@ -92,12 +93,12 @@ export function appendCategoryParentParam(params: URLSearchParams, parentId: num
 }
 
 export async function fetchCategoryOptions(parentId: number): Promise<{ id: number; name: string }[]> {
-  /** Ürün listesiyle aynı: IdeaSoft Admin API sayfalama `itemsPerPage` (yalnız `limit` yetersiz/yanlış sayfa). */
+  /** Category LIST (Admin API PDF): `page`, `limit`, `sort`, `parent`. */
   const params = new URLSearchParams({
+    limit: '100',
     page: '1',
     sort: 'id',
   })
-  params.set('itemsPerPage', '100')
   appendCategoryParentParam(params, parentId)
   const res = await fetch(`${API_URL}/api/ideasoft/admin-api/categories?${params}`)
   const data = await parseJsonResponse<unknown>(res)

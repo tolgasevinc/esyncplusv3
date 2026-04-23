@@ -1553,37 +1553,225 @@ function ideasoftHydraViewHasNext(body: Record<string, unknown>): boolean {
   return typeof n === 'string' && n.trim().length > 0;
 }
 
-/** Son sayfadaysak hydra:last içindeki page ile tam toplamı hesapla (count uçuğu başarısızsa). */
-function ideasoftInferTotalFromHydraLastPage(
-  body: Record<string, unknown>,
-  itemsPerPage: number,
-  page: number
-): number | null {
-  const hydra = body['hydra:member'];
-  if (!Array.isArray(hydra)) return null;
+/** hydra:view.hydra:last içindeki page= */
+function ideasoftParseLastPageFromHydraView(body: Record<string, unknown>): number | null {
   const view = body['hydra:view'];
   if (!view || typeof view !== 'object' || Array.isArray(view)) return null;
   const last = (view as Record<string, unknown>)['hydra:last'];
   if (typeof last !== 'string' || !last.trim()) return null;
   try {
-    const u = new URL(last, 'https://ideasoft.invalid');
-    const lastPage = ideasoftParseNonNegInt(u.searchParams.get('page'));
-    if (lastPage == null || lastPage < 1) return null;
-    if (page === lastPage) return (lastPage - 1) * itemsPerPage + hydra.length;
+    const s = last.trim();
+    const abs = /^https?:\/\//i.test(s)
+      ? s
+      : s.startsWith('?')
+        ? `https://ideasoft.invalid/_${s}`
+        : `https://ideasoft.invalid${s.startsWith('/') ? '' : '/'}${s}`;
+    const u = new URL(abs);
+    const p = u.searchParams.get('page') ?? u.searchParams.get('Page');
+    return ideasoftParseNonNegInt(p);
   } catch {
     return null;
   }
-  return null;
+}
+
+function ideasoftPickProductRowId(row: unknown): number | null {
+  if (row == null || typeof row !== 'object') return null;
+  const idRaw = (row as Record<string, unknown>).id;
+  return ideasoftParseNonNegInt(idRaw);
+}
+
+async function ideasoftFetchProductsExactTotalViaLastPage(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  lastPage: number,
+  limit: number,
+  baseParams: URLSearchParams
+): Promise<number | null> {
+  if (lastPage < 2 || limit < 1) return null;
+  const p = new URLSearchParams(baseParams.toString());
+  p.set('page', String(lastPage));
+  p.set('limit', String(limit));
+  ideasoftAdminProductListParamsEnsurePaginationAliases(p);
+  const res = await ideasoftDoAdminRequestWithRefresh(
+    db,
+    `/products?${p.toString()}`,
+    { method: 'GET' },
+    settings,
+    auth
+  );
+  const text = await res.text();
+  if (!res.ok) return null;
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+  if (body == null || typeof body !== 'object') return null;
+  const member = (body as Record<string, unknown>)['hydra:member'];
+  if (!Array.isArray(member)) return null;
+  return (lastPage - 1) * limit + member.length;
+}
+
+/** Aynı LIST uç noktası — ekstra sayfalarla gerçek toplam (COUNT/hydra ~100 tavanı için). */
+async function ideasoftWalkProductListTotal(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  filterParams: URLSearchParams,
+  sort: string,
+  limit: number,
+  firstPageLen: number,
+  maxExtraPages: number,
+  firstPageFirstId: number | null = null
+): Promise<number | null> {
+  if (limit < 1 || firstPageLen < 1) return null;
+  const cap = Math.min(Math.max(2, maxExtraPages), 2000);
+  let lastNonEmpty = 1;
+  let lastLen = firstPageLen;
+  for (let p = 2; p <= cap; p++) {
+    const params = new URLSearchParams(filterParams.toString());
+    params.set('sort', sort);
+    params.set('page', String(p));
+    params.set('limit', String(limit));
+    ideasoftAdminProductListParamsEnsurePaginationAliases(params);
+    const res = await ideasoftDoAdminRequestWithRefresh(
+      db,
+      `/products?${params.toString()}`,
+      { method: 'GET' },
+      settings,
+      auth
+    );
+    const text = await res.text();
+    if (!res.ok) break;
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      break;
+    }
+    if (body == null || typeof body !== 'object') break;
+    const member = (body as Record<string, unknown>)['hydra:member'];
+    if (!Array.isArray(member) || member.length === 0) break;
+    const id0 = ideasoftPickProductRowId(member[0]);
+    if (p === 2 && firstPageFirstId != null && id0 != null && id0 === firstPageFirstId) {
+      // Muhtemel sayfalama hatası (limit/itemsPerPage uyumsuzluğu gibi); yanlış toplam (tek sayfa) verme
+      return null;
+    }
+    lastNonEmpty = p;
+    lastLen = member.length;
+    if (member.length < limit) break;
+  }
+  return (lastNonEmpty - 1) * limit + lastLen;
+}
+
+/** Kategori LIST — kök için `parent` gönderilmez (IdeaSoft 400). */
+function ideasoftAppendCategoriesListParentParam(params: URLSearchParams, parentId: number) {
+  if (parentId > 0) params.set('parent', String(parentId));
+}
+
+function ideasoftExtractCategoryRowIdsFromListBody(body: unknown): number[] {
+  if (body == null || typeof body !== 'object') return [];
+  const member = (body as Record<string, unknown>)['hydra:member'];
+  if (!Array.isArray(member)) return [];
+  const out: number[] = [];
+  for (const row of member) {
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      const id = ideasoftPickProductRowId(row);
+      if (id != null && id > 0) out.push(id);
+    }
+  }
+  return out;
+}
+
+async function ideasoftFetchDirectChildCategoryIds(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  parentId: number
+): Promise<number[]> {
+  const params = new URLSearchParams({
+    page: '1',
+    limit: '100',
+    sort: 'id',
+  });
+  ideasoftAppendCategoriesListParentParam(params, parentId);
+  const res = await ideasoftDoAdminRequestWithRefresh(
+    db,
+    `/categories?${params.toString()}`,
+    { method: 'GET' },
+    settings,
+    auth
+  );
+  const text = await res.text();
+  if (!res.ok) return [];
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    return [];
+  }
+  return ideasoftExtractCategoryRowIdsFromListBody(body);
+}
+
+/**
+ * PDF Product LIST: `category` (tekil), `categoryIds` (virgülle çoklu). Üst kategori seçiminde alt id’ler
+ * Category LIST `parent` ile BFS toplanır.
+ */
+async function ideasoftExpandCategoryTreeIdsForProductFilter(
+  db: D1Database,
+  settings: Record<string, string>,
+  auth: { storeBase: string; token: string },
+  rootId: number,
+  maxIds: number
+): Promise<number[]> {
+  if (rootId < 1 || maxIds < 1) return [];
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const queue: number[] = [rootId];
+  while (queue.length > 0 && out.length < maxIds) {
+    const pid = queue.shift()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    out.push(pid);
+    if (out.length >= maxIds) break;
+    const children = await ideasoftFetchDirectChildCategoryIds(db, settings, auth, pid);
+    for (const cid of children) {
+      if (!seen.has(cid)) queue.push(cid);
+    }
+  }
+  return out;
+}
+
+/**
+ * Admin API Product LIST: PDF `limit` + API Platform alışkanlığı `itemsPerPage` — ikisini aynı değere eşle.
+ * Sadece biri giderse sayfa boyutu/offset yanlış kalıp tüm sayfalar 1. sayfa gibi dönebiliyor.
+ */
+function ideasoftAdminProductListParamsEnsurePaginationAliases(params: URLSearchParams): void {
+  const limit = params.get('limit')?.trim();
+  const ipp = params.get('itemsPerPage')?.trim();
+  if (limit && !ipp) params.set('itemsPerPage', limit);
+  if (ipp && !limit) params.set('limit', ipp);
 }
 
 function ideasoftParseProductCountResponse(json: unknown): number | null {
   if (json == null) return null;
   if (typeof json === 'number' && Number.isFinite(json) && json >= 0) return Math.trunc(json);
+  if (typeof json === 'string' && json.trim() !== '') {
+    const n = ideasoftParseNonNegInt(json);
+    if (n != null) return n;
+  }
   if (typeof json !== 'object') return null;
   const o = json as Record<string, unknown>;
-  for (const k of ['hydra:totalItems', 'totalItems', 'total', 'count']) {
+  for (const k of ['hydra:totalItems', 'totalItems', 'total', 'count', 'memberTotal', 'itemsTotal']) {
     const n = ideasoftParseNonNegInt(o[k]);
     if (n != null) return n;
+  }
+  const data = o.data;
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const nested = ideasoftParseProductCountResponse(data);
+    if (nested != null) return nested;
   }
   const mem = o['hydra:member'];
   if (Array.isArray(mem) && mem.length === 1 && mem[0] && typeof mem[0] === 'object') {
@@ -1672,7 +1860,8 @@ async function ideasoftFetchFirstProductIdBySku(
   | { ok: false; error: string; hint?: string }
   | { ok: true; id: number | null }
 > {
-  const sp = new URLSearchParams({ page: '1', limit: '40', itemsPerPage: '40', sort: 'id', s: sku });
+  const sp = new URLSearchParams({ page: '1', limit: '40', sort: 'id', s: sku });
+  ideasoftAdminProductListParamsEnsurePaginationAliases(sp);
   const listRes = await ideasoftDoAdminRequestWithRefresh(
     db,
     `/products?${sp.toString()}`,
@@ -11926,6 +12115,7 @@ app.post('/api/ideasoft/sync-master-by-sku-scan', async (c) => {
         sort: 'id',
       });
       if (!allStatus) sp.set('status', '1');
+      ideasoftAdminProductListParamsEnsurePaginationAliases(sp);
 
       const listRes = await ideasoftDoAdminRequestWithRefresh(
         c.env.DB,
@@ -12234,32 +12424,45 @@ app.get('/api/ideasoft2/products', async (c) => {
       category_id_raw != null && String(category_id_raw).trim() !== ''
         ? Math.max(0, parseInt(String(category_id_raw), 10))
         : 0;
+    const catId = Number.isFinite(category_id) && category_id > 0 ? category_id : 0;
 
     /**
-     * IdeaSoft Admin API ürün listesi (çalışan ekranlar: IdeasoftProductsPage, ProductImages): `page` + `limit` + `sort`.
-     * Yalnızca `itemsPerPage` göndermek bazı mağazalarda sayfalamayı tamamen yok saydırıyor (her zaman 1. sayfa).
-     * API Platform kurulumları için aynı değer `itemsPerPage` ile de iletilir.
+     * Product LIST / COUNT — Admin API PDF: `page`, `limit`, `sort`, `s`, `status`, `category`, `categoryIds`.
      */
-    const params = new URLSearchParams();
-    params.set('page', String(page));
-    params.set('limit', String(limit));
-    params.set('itemsPerPage', String(limit));
-    params.set('sort', sort);
-    if (search) params.set('s', search);
-    if (status === '0' || status === '1') params.set('status', status);
-    /** Admin API ürün–kategori ilişkisi (API Platform SearchFilter) */
-    if (Number.isFinite(category_id) && category_id > 0) {
-      params.set('categories.id', String(category_id));
+    const filterParams = new URLSearchParams();
+    if (search) filterParams.set('s', search);
+    if (status === '0' || status === '1') filterParams.set('status', status);
+    if (catId > 0) {
+      const treeIds = await ideasoftExpandCategoryTreeIdsForProductFilter(
+        c.env.DB,
+        settings,
+        auth,
+        catId,
+        120
+      );
+      const rawIds = treeIds.length > 0 ? treeIds : [catId];
+      const uniq = [...new Set(rawIds.filter((n) => Number.isFinite(n) && n > 0))];
+      if (uniq.length === 1) {
+        filterParams.set('category', String(uniq[0]));
+      } else if (uniq.length > 1) {
+        filterParams.set('categoryIds', uniq.join(','));
+      }
     }
 
-    const pathAndQuery = `/products?${params.toString()}`;
-    const res = await ideasoftDoAdminRequestWithRefresh(
-      c.env.DB,
-      pathAndQuery,
-      { method: 'GET' },
-      settings,
-      auth
-    );
+    const listParams = new URLSearchParams(filterParams.toString());
+    listParams.set('page', String(page));
+    listParams.set('limit', String(limit));
+    listParams.set('sort', sort);
+    ideasoftAdminProductListParamsEnsurePaginationAliases(listParams);
+
+    const listUrl = `/products?${listParams.toString()}`;
+    const countUrl = `/products/count${filterParams.toString() ? `?${filterParams.toString()}` : ''}`;
+
+    const [res, countRes] = await Promise.all([
+      ideasoftDoAdminRequestWithRefresh(c.env.DB, listUrl, { method: 'GET' }, settings, auth),
+      ideasoftDoAdminRequestWithRefresh(c.env.DB, countUrl, { method: 'GET' }, settings, auth),
+    ]);
+
     const text = await res.text();
     let body: unknown = null;
     try {
@@ -12275,60 +12478,92 @@ app.get('/api/ideasoft2/products', async (c) => {
       );
     }
 
-    /** Toplam: geçersiz / şüpheli hydra:totalItems düzelt; gerekirse COUNT veya hydra:last ile tamamla. */
+    let countJson: unknown = null;
+    if (countRes.ok) {
+      try {
+        const countText = await countRes.text();
+        countJson = countText ? JSON.parse(countText) : null;
+      } catch {
+        countJson = null;
+      }
+    }
+
     if (body !== null && typeof body === 'object') {
       const bo = body as Record<string, unknown>;
       const member = bo['hydra:member'];
       const mlen = Array.isArray(member) ? member.length : 0;
-      const minValidTotal = (page - 1) * limit + mlen;
 
-      let merged: number | null = ideasoftReadHydraTotalItemsFromBody(bo);
-      if (merged != null && merged < minValidTotal) merged = null;
+      const countN = ideasoftParseProductCountResponse(countJson);
+      let source: 'product_count' | 'list_hydra' | 'list_walk' | 'list_last_page' = 'list_hydra';
+      let finalTotal: number | null = countN;
+      if (finalTotal != null) {
+        source = 'product_count';
+      } else {
+        finalTotal = ideasoftReadHydraTotalItemsFromBody(bo);
+      }
+
+      const lastPageFromView = ideasoftParseLastPageFromHydraView(bo);
+
       if (
-        merged != null &&
-        limit > 0 &&
-        mlen === limit &&
-        merged === mlen &&
-        ideasoftHydraViewHasNext(bo)
+        lastPageFromView != null &&
+        lastPageFromView >= 2 &&
+        finalTotal != null &&
+        finalTotal < (lastPageFromView - 1) * limit + 1
       ) {
-        merged = null;
-      }
-
-      if (merged == null) {
-        merged = ideasoftInferTotalFromHydraLastPage(bo, limit, page);
-      }
-
-      if (merged == null) {
-        const countParams = new URLSearchParams();
-        if (search) countParams.set('s', search);
-        if (status === '0' || status === '1') countParams.set('status', status);
-        if (Number.isFinite(category_id) && category_id > 0) {
-          countParams.set('categories.id', String(category_id));
-        }
-        try {
-          const countRes = await ideasoftDoAdminRequestWithRefresh(
-            c.env.DB,
-            `/products/count${countParams.toString() ? `?${countParams.toString()}` : ''}`,
-            { method: 'GET' },
-            settings,
-            auth
-          );
-          const countText = await countRes.text();
-          let countJson: unknown = null;
-          try {
-            countJson = countText ? JSON.parse(countText) : null;
-          } catch {
-            countJson = null;
-          }
-          if (countRes.ok && countJson != null) {
-            merged = ideasoftParseProductCountResponse(countJson);
-          }
-        } catch {
-          /* yut */
+        const baseLast = new URLSearchParams(filterParams.toString());
+        baseLast.set('sort', sort);
+        const viaLast = await ideasoftFetchProductsExactTotalViaLastPage(
+          c.env.DB,
+          settings,
+          auth,
+          lastPageFromView,
+          limit,
+          baseLast
+        );
+        if (viaLast != null) {
+          finalTotal = viaLast;
+          source = 'list_last_page';
         }
       }
 
-      if (merged != null) bo['hydra:totalItems'] = merged;
+      const walkFirstLen = page === 1 ? mlen : limit;
+      const countOrHydraLooksCapped =
+        mlen === limit &&
+        limit > 0 &&
+        (finalTotal == null ||
+          finalTotal <= walkFirstLen ||
+          (ideasoftHydraViewHasNext(bo) && finalTotal <= limit));
+
+      const hydraLastMissingOrSingle =
+        lastPageFromView == null || lastPageFromView <= 1;
+
+      if (countOrHydraLooksCapped && hydraLastMissingOrSingle) {
+        const firstId =
+          page === 1 && Array.isArray(member) && member[0]
+            ? ideasoftPickProductRowId(member[0])
+            : null;
+        const walked = await ideasoftWalkProductListTotal(
+          c.env.DB,
+          settings,
+          auth,
+          filterParams,
+          sort,
+          limit,
+          walkFirstLen,
+          2000,
+          firstId
+        );
+        if (walked != null) {
+          finalTotal = walked;
+          source = 'list_walk';
+        }
+      }
+
+      if (finalTotal != null) {
+        bo['hydra:totalItems'] = finalTotal;
+        bo['esyncListTotal'] = finalTotal;
+        bo['esyncListTotalSource'] = source;
+      }
     }
 
     return c.json(body);
@@ -12461,6 +12696,71 @@ app.get('/api/parasut/products', async (c) => {
     });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Paraşüt ürünleri alınamadı' }, 500);
+  }
+});
+
+/** Paraşüt API müşteri (contact, account_type=customer) listesi */
+app.get('/api/parasut/contacts', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const auth = await getParasutAuth(c);
+    if (!auth) return c.json({ error: 'Paraşüt ayarları eksik veya geçersiz. Ayarlar > Entegrasyonlar > Paraşüt bölümünü doldurun.' }, 400);
+
+    const base = 'https://api.parasut.com';
+    const filterName = (c.req.query('filter_name') || '').trim();
+    const pageNum = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '25', 10)));
+    const sort = (c.req.query('sort') || 'name').trim() || 'name';
+
+    const params = new URLSearchParams();
+    if (filterName) params.set('filter[name]', filterName);
+    params.set('filter[account_type]', 'customer');
+    params.set('page[number]', String(pageNum));
+    params.set('page[size]', String(pageSize));
+    params.set('sort', sort);
+
+    const res = await fetch(`${base}/v4/${auth.companyId}/contacts?${params.toString()}`, {
+      headers: {
+        'Authorization': `Bearer ${auth.token}`,
+        'Accept': 'application/json',
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errMsg = (json as { errors?: Array<{ detail?: string; title?: string }> }).errors?.[0]?.detail
+        || (json as { errors?: Array<{ title?: string }> }).errors?.[0]?.title
+        || (json as { error?: string }).error
+        || `HTTP ${res.status}`;
+      return c.json({ error: `Paraşüt API hatası: ${errMsg}` }, 400);
+    }
+
+    const rawList = (json as { data?: unknown }).data;
+    const data: unknown[] = Array.isArray(rawList)
+      ? rawList
+      : rawList != null && typeof rawList === 'object'
+        ? [rawList]
+        : [];
+    const meta = (json as { meta?: { total_count?: number; current_page?: number; total_pages?: number } }).meta ?? {};
+
+    return c.json({
+      data: data.map((item: unknown) => {
+        const d = item as { id?: string; type?: string; attributes?: Record<string, unknown> };
+        const attrs = (d.attributes ?? {}) as Record<string, unknown>;
+        return {
+          id: d.id,
+          type: d.type,
+          ...attrs,
+        };
+      }),
+      meta: {
+        total: meta.total_count ?? data.length,
+        page: meta.current_page ?? pageNum,
+        total_pages: meta.total_pages ?? 1,
+        per_page: pageSize,
+      },
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Paraşüt müşterileri alınamadı' }, 500);
   }
 });
 

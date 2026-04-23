@@ -54,6 +54,7 @@ const SalesDashboardPage = lazy(() => import('@/pages/SalesDashboardPage').then(
 const ParasutProductsPage = lazy(() => import('@/pages/parasut/ParasutProductsPage').then((m) => ({ default: m.ParasutProductsPage })))
 const ParasutCategoriesPage = lazy(() => import('@/pages/parasut/ParasutCategoriesPage').then((m) => ({ default: m.ParasutCategoriesPage })))
 const ParasutBrandsPage = lazy(() => import('@/pages/parasut/ParasutBrandsPage').then((m) => ({ default: m.ParasutBrandsPage })))
+const ParasutCustomersPage = lazy(() => import('@/pages/parasut/ParasutCustomersPage').then((m) => ({ default: m.ParasutCustomersPage })))
 const IdeasoftPage = lazy(() => import('@/pages/ideasoft/IdeasoftPage').then((m) => ({ default: m.IdeasoftPage })))
 const IdeasoftCurrenciesPage = lazy(() =>
   import('@/pages/ideasoft/IdeasoftCurrenciesPage').then((m) => ({ default: m.IdeasoftCurrenciesPage }))
@@ -129,6 +130,7 @@ function App() {
         <Route path="/" element={<HomePage />} />
         <Route path="/parasut" element={<ParasutPage />} />
         <Route path="/parasut/products" element={<ParasutProductsPage />} />
+        <Route path="/parasut/customers" element={<ParasutCustomersPage />} />
         <Route path="/parasut/categories" element={<ParasutCategoriesPage />} />
         <Route path="/parasut/brands" element={<ParasutBrandsPage />} />
         <Route path="/ideasoft" element={<IdeasoftPage />} />

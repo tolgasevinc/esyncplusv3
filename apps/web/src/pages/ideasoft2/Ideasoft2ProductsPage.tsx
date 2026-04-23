@@ -15,8 +15,10 @@ import {
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
+import { toastSuccess } from '@/lib/toast'
 import type { IdeasoftProductImageRow } from '@/pages/ideasoft/IdeasoftProductImagesPage'
 import { CategoryCascadeThreeSelects } from './ideasoft2-category-cascade'
+import { Ideasoft2ProductDetailModal } from './Ideasoft2ProductDetailModal'
 
 const FX_STORAGE_KEY = 'ideasoft2-fx-v1'
 
@@ -61,8 +63,30 @@ const listDefaults = {
   fitLimit: 10,
 }
 
+/** `/api/ideasoft2/products` BFF alanı — katalog toplamı */
+function readEsyncListTotal(o: Record<string, unknown>): number | null {
+  const v = o.esyncListTotal
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return Math.trunc(v)
+  return null
+}
+
+/** BFF — toplamın kaynağı (COUNT öncelikli; tavanlı yanıtta LIST yürüyüş / son sayfa). */
+function readEsyncListTotalSource(
+  o: Record<string, unknown>
+): 'product_count' | 'list_hydra' | 'list_walk' | 'list_last_page' | null {
+  const s = o.esyncListTotalSource
+  return s === 'product_count' ||
+    s === 'list_hydra' ||
+    s === 'list_walk' ||
+    s === 'list_last_page'
+    ? s
+    : null
+}
+
 /** Hydra / bazı API’ler total’i string döndürebilir — sayfalama için sayıya çevir */
 function parseCollectionTotal(o: Record<string, unknown>, fallbackLen: number): number {
+  const fromBff = readEsyncListTotal(o)
+  if (fromBff != null) return fromBff
   const raw = o['hydra:totalItems'] ?? o.totalItems ?? o.total ?? o.count
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw
   if (typeof raw === 'string' && raw.trim() !== '') {
@@ -88,12 +112,16 @@ function extractProductsList(json: unknown): { items: Ideasoft2ProductListRow[];
     }
     if (Array.isArray(o.data)) {
       const d = o.data as Ideasoft2ProductListRow[]
-      const total = typeof o.total === 'number' ? o.total : parseCollectionTotal(o, d.length)
+      const bff = readEsyncListTotal(o)
+      const total =
+        bff != null ? bff : typeof o.total === 'number' ? o.total : parseCollectionTotal(o, d.length)
       return { items: d, total }
     }
     if (Array.isArray(o.items)) {
       const items = o.items as Ideasoft2ProductListRow[]
-      const total = typeof o.total === 'number' ? o.total : parseCollectionTotal(o, items.length)
+      const bff = readEsyncListTotal(o)
+      const total =
+        bff != null ? bff : typeof o.total === 'number' ? o.total : parseCollectionTotal(o, items.length)
       return { items, total }
     }
   }
@@ -281,6 +309,16 @@ type SkuMatchUi =
   | { kind: 'id_mismatch'; master: MasterProductSkuRow; boundId: number }
   | { kind: 'ok'; master: MasterProductSkuRow }
 
+function masterIdForProductDetailModal(
+  row: Ideasoft2ProductListRow,
+  byKey: Map<string, MasterProductSkuRow[]>,
+  status: 'idle' | 'loading' | 'ready' | 'error'
+): number | null {
+  const m = resolveSkuMatch(row, byKey, status)
+  if (m.kind === 'ok' || m.kind === 'id_mismatch') return m.master.id
+  return null
+}
+
 function resolveSkuMatch(
   row: Ideasoft2ProductListRow,
   byKey: Map<string, MasterProductSkuRow[]>,
@@ -359,6 +397,7 @@ export function Ideasoft2ProductsPage() {
   const [masterSkuByKey, setMasterSkuByKey] = useState<Map<string, MasterProductSkuRow[]>>(() => new Map())
   const [masterSkuStatus, setMasterSkuStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [masterSkuError, setMasterSkuError] = useState<string | null>(null)
+  const [detailRow, setDetailRow] = useState<Ideasoft2ProductListRow | null>(null)
 
   /** Manuel EUR/USD kurları — tarayıcıda kalıcı (ilk yüklemede boş string ile üzerine yazma hatası giderildi) */
   const [manualFx, setManualFx] = useState(() => getInitialFxFromStorage())
@@ -414,6 +453,36 @@ export function Ideasoft2ProductsPage() {
       const { items: rows, total: t } = extractProductsList(data)
       setItems(rows)
       setTotal(t)
+      if (page === 1 && data && typeof data === 'object') {
+        const meta = data as Record<string, unknown>
+        const src = readEsyncListTotalSource(meta)
+        const n = t.toLocaleString('tr-TR')
+        if (src === 'product_count') {
+          toastSuccess(
+            'IdeaSoft ürün toplamı',
+            `Product COUNT (Admin API): ${n} kayıt — aynı liste filtreleriyle sayım.`
+          )
+        } else if (src === 'list_hydra') {
+          toastSuccess(
+            'IdeaSoft ürün toplamı',
+            `COUNT yok veya kullanılamadı; LIST hydra:totalItems: ${n} kayıt.`
+          )
+        } else if (src === 'list_walk') {
+          toastSuccess(
+            'IdeaSoft ürün toplamı',
+            `COUNT/hydra ~sayfa boyutunda kaldı; LIST ile sayfa yürüyüşü: ${n} kayıt.`
+          )
+        } else if (src === 'list_last_page') {
+          toastSuccess(
+            'IdeaSoft ürün toplamı',
+            `hydra:last son sayfa LIST ile: ${n} kayıt.`
+          )
+        } else if (readEsyncListTotal(meta) != null) {
+          toastSuccess('IdeaSoft ürün toplamı', `Toplam: ${n} kayıt.`)
+        } else {
+          toastSuccess('IdeaSoft ürün listesi', `Bu sayfada ${rows.length} kayıt; toplam bilgisi yok.`)
+        }
+      }
       const imageEntries = await Promise.all(
         rows.map(async (r) => {
           const list = await fetchImagesForProduct(r.id)
@@ -431,7 +500,7 @@ export function Ideasoft2ProductsPage() {
     } finally {
       setLoading(false)
     }
-  }, [buildListParams])
+  }, [buildListParams, page])
 
   useEffect(() => {
     void fetchList()
@@ -464,7 +533,7 @@ export function Ideasoft2ProductsPage() {
   return (
     <PageLayout
       title="IdeaSoft 2 › Ürünler"
-      description="Kategori filtresi seçilen IdeaSoft kategori id’si ile ürün listesini daraltır (Admin API categories.id). Yayınlanan sütunu iskontolu net fiyatı KDV dahil gösterir; Master (SKU) ana ürün eşleşmesini gösterir."
+      description="Kategori filtresi Admin API Product LIST `category` / `categoryIds` (seçilen düğüm ve alt kategoriler) ile daraltılır. Yayınlanan sütunu iskontolu net fiyatı KDV dahil gösterir; Master (SKU) ana ürün eşleşmesini gösterir."
       backTo="/ideasoft2"
       contentRef={contentRef}
       contentOverflow="hidden"
@@ -557,9 +626,23 @@ export function Ideasoft2ProductsPage() {
           onFitLimitChange={(fl) => setListState({ fitLimit: fl })}
           tableContainerRef={contentRef}
           hasFilter={search.trim().length > 0 || categoryPath.length > 0}
+          showTotalInRecordRange
         />
       }
     >
+      <Ideasoft2ProductDetailModal
+        open={detailRow != null}
+        onOpenChange={(o) => {
+          if (!o) setDetailRow(null)
+        }}
+        productId={detailRow?.id ?? null}
+        listPreviewName={detailRow ? displayProductName(detailRow) : undefined}
+        masterProductId={
+          detailRow
+            ? masterIdForProductDetailModal(detailRow, masterSkuByKey, masterSkuStatus)
+            : null
+        }
+      />
       <Card className="flex flex-1 min-h-0 flex-col overflow-hidden border-border">
         <CardContent className="flex flex-1 min-h-0 flex-col overflow-hidden p-0">
           {listError ? (
@@ -637,7 +720,17 @@ export function Ideasoft2ProductsPage() {
                     return (
                       <tr
                         key={row.id}
-                        className="border-b border-border/80 transition-colors last:border-0 hover:bg-muted/50"
+                        className="border-b border-border/80 transition-colors last:border-0 hover:bg-muted/50 cursor-pointer"
+                        onClick={() => setDetailRow(row)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            setDetailRow(row)
+                          }
+                        }}
+                        tabIndex={0}
+                        role="button"
+                        aria-label={`${displayProductName(row)} detayı`}
                       >
                         <td className="w-[72px] px-2 py-2 align-top">
                           <div className="relative inline-flex">
@@ -704,6 +797,7 @@ export function Ideasoft2ProductsPage() {
                               to="/products"
                               className="inline-flex flex-col gap-0.5 text-left hover:underline"
                               title={skuMatch.master.name}
+                              onClick={(e) => e.stopPropagation()}
                             >
                               <Badge variant="secondary" className="w-fit font-normal tabular-nums">
                                 Eşleşiyor #{skuMatch.master.id}

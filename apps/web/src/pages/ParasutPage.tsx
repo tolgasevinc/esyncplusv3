@@ -5,7 +5,7 @@ import { PageLayout } from '@/components/layout/PageLayout'
 
 const topSections = [
   { id: 'urunler', title: 'Ürünler', icon: Package, path: '/parasut/products' },
-  { id: 'musteriler', title: 'Müşteriler', icon: Users, path: '/customers' },
+  { id: 'musteriler', title: 'Müşteriler', icon: Users, path: '/parasut/customers' },
   { id: 'tedarikciler', title: 'Tedarikçiler', icon: Truck, path: '/parametreler/tedarikciler' },
 ]
 

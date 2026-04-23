@@ -38,6 +38,8 @@ interface TablePaginationFooterProps {
   onFitLimitChange?: (limit: number) => void
   tableContainerRef?: React.RefObject<HTMLDivElement | null>
   hasFilter?: boolean
+  /** true ise "Kayıt" satırı: 1–25 / 437 (toplam aynı satırda) */
+  showTotalInRecordRange?: boolean
 }
 
 function getPageNumbers(current: number, totalPages: number): (number | 'ellipsis')[] {
@@ -65,6 +67,7 @@ export function TablePaginationFooter({
   onFitLimitChange,
   tableContainerRef,
   hasFilter,
+  showTotalInRecordRange = false,
 }: TablePaginationFooterProps) {
   const recalcFit = useCallback(() => {
     if (!tableContainerRef?.current || !onFitLimitChange) return
@@ -113,14 +116,25 @@ export function TablePaginationFooter({
   const totalPages = Math.max(1, Math.ceil(total / effectiveLimit))
   const start = total === 0 ? 0 : (page - 1) * effectiveLimit + 1
   const end = total === 0 ? 0 : Math.min(page * effectiveLimit, total)
-  const rangeText = total === 0 ? '0' : start === end ? `${start}` : `${start}-${end}`
+  const rangeText =
+    total === 0
+      ? '0'
+      : showTotalInRecordRange
+        ? start === end
+          ? `${start} / ${total}`
+          : `${start}–${end} / ${total}`
+        : start === end
+          ? `${start}`
+          : `${start}–${end}`
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-4">
       <div className="flex flex-wrap items-center gap-4">
-        <span className="text-sm font-semibold tabular-nums text-red-600 dark:text-red-400 shrink-0">
-          Toplam: {total}
-        </span>
+        {!showTotalInRecordRange ? (
+          <span className="text-sm font-semibold tabular-nums text-red-600 dark:text-red-400 shrink-0">
+            Toplam: {total}
+          </span>
+        ) : null}
         <span className="text-sm">
           Kayıt: <span className="font-semibold text-foreground">{rangeText}</span>
           {hasFilter && <span className="text-muted-foreground"> (filtrelenmiş)</span>}
