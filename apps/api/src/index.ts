@@ -1222,6 +1222,7 @@ app.get('/api/products', async (c) => {
       category_name: 'sub.name',
       price: 'p.price',
       sort_order: 'p.sort_order',
+      created_at: 'p.created_at',
     };
     const orderCol = validSortColumns[sort_by] || 'p.sort_order';
     const countRes = await c.env.DB.prepare(

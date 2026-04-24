@@ -516,8 +516,24 @@ interface PackageItem {
   item_price?: number
 }
 
-type SortBy = 'name' | 'sku' | 'brand_name' | 'category_name' | 'price' | 'sort_order'
+type SortBy = 'name' | 'sku' | 'brand_name' | 'category_name' | 'price' | 'sort_order' | 'created_at'
 type SortOrder = 'asc' | 'desc'
+
+const PRODUCT_LIST_SORT_PRESETS: { id: string; label: string; sortBy: SortBy; sortOrder: SortOrder }[] = [
+  { id: 'created_at:desc', label: 'Eklenme (yeni → eski)', sortBy: 'created_at', sortOrder: 'desc' },
+  { id: 'created_at:asc', label: 'Eklenme (eski → yeni)', sortBy: 'created_at', sortOrder: 'asc' },
+  { id: 'sort_order:asc', label: 'Sıra numarası', sortBy: 'sort_order', sortOrder: 'asc' },
+  { id: 'name:asc', label: 'Ad (A → Z)', sortBy: 'name', sortOrder: 'asc' },
+  { id: 'name:desc', label: 'Ad (Z → A)', sortBy: 'name', sortOrder: 'desc' },
+  { id: 'sku:asc', label: 'SKU (A → Z)', sortBy: 'sku', sortOrder: 'asc' },
+  { id: 'sku:desc', label: 'SKU (Z → A)', sortBy: 'sku', sortOrder: 'desc' },
+  { id: 'brand_name:asc', label: 'Marka (A → Z)', sortBy: 'brand_name', sortOrder: 'asc' },
+  { id: 'brand_name:desc', label: 'Marka (Z → A)', sortBy: 'brand_name', sortOrder: 'desc' },
+  { id: 'category_name:asc', label: 'Kategori (A → Z)', sortBy: 'category_name', sortOrder: 'asc' },
+  { id: 'category_name:desc', label: 'Kategori (Z → A)', sortBy: 'category_name', sortOrder: 'desc' },
+  { id: 'price:asc', label: 'Fiyat (düşük → yüksek)', sortBy: 'price', sortOrder: 'asc' },
+  { id: 'price:desc', label: 'Fiyat (yüksek → düşük)', sortBy: 'price', sortOrder: 'desc' },
+]
 
 const ECOMMERCE_AI_RULES_LS_KEY = 'esyncplus_ecommerce_ai_rules'
 
@@ -532,8 +548,8 @@ const productsListDefaults = {
   filterNoImage: false,
   /** Ürün listesi: eşleştirme sütunu sunucu filtresi */
   filterIntegration: '' as '' | 'parasut' | 'ideasoft',
-  sortBy: 'sort_order' as SortBy,
-  sortOrder: 'asc' as SortOrder,
+  sortBy: 'created_at' as SortBy,
+  sortOrder: 'desc' as SortOrder,
   page: 1,
   pageSize: 'fit' as PageSizeValue,
   fitLimit: 10,
@@ -823,9 +839,15 @@ export function ProductsPage() {
     if (sortBy === col) {
       setListState({ sortOrder: sortOrder === 'asc' ? 'desc' : 'asc', page: 1 })
     } else {
-      setListState({ sortBy: col, sortOrder: 'asc', page: 1 })
+      const defaultOrder: SortOrder = col === 'created_at' || col === 'price' ? 'desc' : 'asc'
+      setListState({ sortBy: col, sortOrder: defaultOrder, page: 1 })
     }
   }
+
+  const productListSortSelectValue = useMemo(() => {
+    const id = `${sortBy}:${sortOrder}`
+    return PRODUCT_LIST_SORT_PRESETS.some((p) => p.id === id) ? id : '__other__'
+  }, [sortBy, sortOrder])
 
   const handleResetFilters = () => {
     setListState({
@@ -2781,6 +2803,32 @@ export function ProductsPage() {
                 ))}
               </select>
             </div>
+            <select
+              aria-label="Liste sıralaması"
+              title="Sıralama"
+              className="h-9 min-w-[9.5rem] max-w-[14rem] cursor-pointer shrink-0 truncate rounded-md border border-input bg-background px-1.5 py-0.5 text-xs text-foreground shadow-sm"
+              value={productListSortSelectValue}
+              onChange={(e) => {
+                const v = e.target.value
+                if (v === '__other__') return
+                const last = v.lastIndexOf(':')
+                if (last <= 0) return
+                setListState({
+                  sortBy: v.slice(0, last) as SortBy,
+                  sortOrder: v.slice(last + 1) as SortOrder,
+                  page: 1,
+                })
+              }}
+            >
+              {productListSortSelectValue === '__other__' ? (
+                <option value="__other__">Tablo sütununa göre</option>
+              ) : null}
+              {PRODUCT_LIST_SORT_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
