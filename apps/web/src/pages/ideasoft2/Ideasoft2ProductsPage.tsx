@@ -1385,15 +1385,6 @@ export function Ideasoft2ProductsPage() {
                         key={row.id}
                         className="border-b border-border/80 transition-colors last:border-0 hover:bg-muted/50 cursor-pointer"
                         onClick={() => openDetailModal(row)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            openDetailModal(row)
-                          }
-                        }}
-                        tabIndex={0}
-                        role="button"
-                        aria-label={`${displayProductName(row)} detayı`}
                       >
                         <td className="w-[44px] px-2 py-2 text-center align-top">
                           <Checkbox
@@ -1430,7 +1421,16 @@ export function Ideasoft2ProductsPage() {
                         </td>
                         <td className="px-3 py-2 align-top">
                           <div className="flex items-start gap-1.5 font-medium text-foreground leading-snug">
-                            <span className="min-w-0 break-words">{productName}</span>
+                            <button
+                              type="button"
+                              className="min-w-0 break-words text-left font-medium leading-snug rounded-sm hover:underline hover:underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                openDetailModal(row)
+                              }}
+                            >
+                              {productName}
+                            </button>
                             <button
                               type="button"
                               className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
