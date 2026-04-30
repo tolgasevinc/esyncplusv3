@@ -41,6 +41,7 @@ import {
   type Ideasoft2ProductDetailFocusField,
   type Ideasoft2ProductDetailInitialPanel,
 } from './Ideasoft2ProductDetailModal'
+import { Ideasoft2BulkProductFeaturesModal } from './Ideasoft2BulkProductFeaturesModal'
 
 const FX_STORAGE_KEY = 'ideasoft2-fx-v1'
 
@@ -710,6 +711,7 @@ export function Ideasoft2ProductsPage() {
   const [bulkSpecialTitleOpen, setBulkSpecialTitleOpen] = useState(false)
   const [bulkSpecialTitleDraft, setBulkSpecialTitleDraft] = useState(DEFAULT_SPECIAL_TITLE)
   const [bulkSpecialTitleSaving, setBulkSpecialTitleSaving] = useState(false)
+  const [bulkFeaturesOpen, setBulkFeaturesOpen] = useState(false)
   const [specialContentSavingIds, setSpecialContentSavingIds] = useState<Set<number>>(() => new Set())
 
   /** Manuel EUR/USD kurları — tarayıcıda kalıcı (ilk yüklemede boş string ile üzerine yazma hatası giderildi) */
@@ -735,6 +737,10 @@ export function Ideasoft2ProductsPage() {
   const selectedRows = useMemo(
     () => items.filter((row) => selectedProductIds.has(row.id)),
     [items, selectedProductIds]
+  )
+  const bulkFeatureProductRefs = useMemo(
+    () => selectedRows.map((row) => ({ id: row.id, name: displayProductName(row) })),
+    [selectedRows]
   )
   const allVisibleSelected =
     items.length > 0 && items.every((row) => selectedProductIds.has(row.id))
@@ -778,6 +784,25 @@ export function Ideasoft2ProductsPage() {
     }
   }, [])
 
+  const refreshFeaturesForProductIds = useCallback(async (ids: number[]) => {
+    const unique = [...new Set(ids)].filter(
+      (x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0
+    )
+    if (unique.length === 0) return
+    const CHUNK = 8
+    const patch: Record<number, Ideasoft2ProductFeaturesCell> = {}
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const part = unique.slice(i, i + CHUNK)
+      const tuples = await Promise.all(
+        part.map(async (id) => [id, await fetchEmbeddedExtraSummaryForProduct(id)] as const)
+      )
+      for (const [id, cell] of tuples) {
+        patch[id] = cell
+      }
+    }
+    setFeaturesByProductId((prev) => ({ ...prev, ...patch }))
+  }, [])
+
   const refreshSpecialInfoStatusForRow = useCallback(async (productId: number) => {
     try {
       const status = await fetchSpecialInfoStatusForProduct(productId)
@@ -816,6 +841,10 @@ export function Ideasoft2ProductsPage() {
   const openBulkSpecialTitleModal = useCallback(() => {
     setBulkSpecialTitleDraft(DEFAULT_SPECIAL_TITLE)
     setBulkSpecialTitleOpen(true)
+  }, [])
+
+  const openBulkProductFeaturesModal = useCallback(() => {
+    setBulkFeaturesOpen(true)
   }, [])
 
   const saveBulkSpecialTitle = useCallback(async () => {
@@ -1048,6 +1077,9 @@ export function Ideasoft2ProductsPage() {
               <DropdownMenuItem onSelect={openBulkSpecialTitleModal}>
                 Özel Başlık güncelle
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={openBulkProductFeaturesModal}>
+                Ürün özelliği yönet
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <div className="relative w-full min-w-[200px] max-w-sm sm:w-64">
@@ -1175,6 +1207,12 @@ export function Ideasoft2ProductsPage() {
             ? masterIdForProductDetailModal(detailRow, masterSkuByKey, masterSkuStatus)
             : null
         }
+      />
+      <Ideasoft2BulkProductFeaturesModal
+        open={bulkFeaturesOpen}
+        onOpenChange={setBulkFeaturesOpen}
+        products={bulkFeatureProductRefs}
+        onCompleted={() => void refreshFeaturesForProductIds(bulkFeatureProductRefs.map((p) => p.id))}
       />
       <Dialog open={bulkSpecialTitleOpen} onOpenChange={setBulkSpecialTitleOpen}>
         <DialogContent>

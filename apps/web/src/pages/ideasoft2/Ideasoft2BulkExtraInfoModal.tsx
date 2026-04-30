@@ -11,16 +11,14 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
-import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { toastError, toastSuccess, toastWarning } from '@/lib/toast'
 import {
   extractExtraInfoDefinitionsList,
-  extractExtraInfoList,
   type IdeasoftExtraInfoDefinition,
-  type IdeasoftProductExtraInfoRow,
 } from '@/pages/ideasoft/IdeasoftProductExtraFieldsPage'
 import { fetchAllIdeasoftAdminPagedList } from './ideasoft2-admin-paged-list'
+import { upsertExtraInfoForProduct } from './ideasoft2-product-extra-info-helpers'
 
 const BULK_CONCURRENCY = 4
 
@@ -29,68 +27,6 @@ function sortDefinitions(defs: IdeasoftExtraInfoDefinition[]): IdeasoftExtraInfo
     (a, b) =>
       a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, 'tr') || a.id - b.id
   )
-}
-
-async function setExtraInfoValueForProduct(
-  productId: number,
-  def: IdeasoftExtraInfoDefinition,
-  value: string
-): Promise<void> {
-  const rows = await fetchAllIdeasoftAdminPagedList<IdeasoftProductExtraInfoRow>(
-    'extra_info_to_products',
-    extractExtraInfoList,
-    'ProductExtraInfo alınamadı',
-    productId
-  )
-  const match = rows.find((r) => (r.extraInfo?.id ?? 0) === def.id)
-
-  if (match) {
-    const body: Record<string, unknown> = {
-      ...match,
-      value,
-      extraInfo: { id: def.id, name: def.name, sortOrder: def.sortOrder },
-    }
-    const res = await fetch(`${API_URL}/api/ideasoft/admin-api/extra_info_to_products/${match.id}`, {
-      method: 'PUT',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    const data = await parseJsonResponse<unknown>(res)
-    if (!res.ok) {
-      throw new Error(
-        formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) || `PUT #${match.id} başarısız`
-      )
-    }
-    return
-  }
-
-  const pres = await fetch(`${API_URL}/api/ideasoft/admin-api/products/${productId}`)
-  const pdata = await parseJsonResponse<unknown>(pres)
-  if (!pres.ok) {
-    throw new Error(
-      formatIdeasoftProxyErrorForUi(pdata as { error?: string; hint?: string }) || 'Ürün GET başarısız'
-    )
-  }
-  if (!pdata || typeof pdata !== 'object') {
-    throw new Error('Geçersiz ürün yanıtı')
-  }
-  const postBody = {
-    id: 0,
-    value,
-    extraInfo: { id: def.id, name: def.name, sortOrder: def.sortOrder },
-    product: pdata as Record<string, unknown>,
-  }
-  const res = await fetch(`${API_URL}/api/ideasoft/admin-api/extra_info_to_products`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(postBody),
-  })
-  const data = await parseJsonResponse<unknown>(res)
-  if (!res.ok) {
-    throw new Error(
-      formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) || 'POST başarısız'
-    )
-  }
 }
 
 function validateManual(
@@ -206,7 +142,7 @@ export function Ideasoft2BulkExtraInfoModal({
     for (let i = 0; i < productIds.length; i += BULK_CONCURRENCY) {
       const batch = productIds.slice(i, i + BULK_CONCURRENCY)
       const results = await Promise.allSettled(
-        batch.map((pid) => setExtraInfoValueForProduct(pid, r.def, v))
+        batch.map((pid) => upsertExtraInfoForProduct(pid, r.def, v))
       )
       for (let j = 0; j < batch.length; j += 1) {
         const pid = batch[j]!
