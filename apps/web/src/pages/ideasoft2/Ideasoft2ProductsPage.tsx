@@ -28,7 +28,14 @@ import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib
 import { extractIdeasoftProductSearchKeywords } from '@/lib/ideasoft-product-seo'
 import { toastError, toastSuccess } from '@/lib/toast'
 import type { IdeasoftProductImageRow } from '@/pages/ideasoft/IdeasoftProductImagesPage'
+import { extractExtraInfoList } from '@/pages/ideasoft/IdeasoftProductExtraFieldsPage'
+import { IDEASOFT_ADMIN_LIST_MAX_PAGES } from './ideasoft2-admin-paged-list'
 import { CategoryCascadeThreeSelects } from './ideasoft2-category-cascade'
+import {
+  buildIdeasoftProductFeatureSummary,
+  unwrapIdeasoftProductBody,
+  type Ideasoft2ProductFeaturesCell,
+} from './ideasoft2-product-features-list'
 import {
   Ideasoft2ProductDetailModal,
   type Ideasoft2ProductDetailFocusField,
@@ -252,6 +259,89 @@ async function fetchSpecialInfoStatusForProduct(productId: number): Promise<Spec
     titlePreview,
     contentPreview,
   }
+}
+
+async function fetchEmbeddedExtraSummaryForProduct(productId: number): Promise<Omit<Ideasoft2ProductFeaturesCell, 'loading'>> {
+  try {
+    const params = new URLSearchParams({
+      product: String(productId),
+      limit: '100',
+      page: '1',
+      sort: 'id',
+    })
+    const [productRes, apiRes] = await Promise.all([
+      fetch(`${API_URL}/api/ideasoft/admin-api/products/${productId}`),
+      fetch(`${API_URL}/api/ideasoft/admin-api/extra_info_to_products?${params}`),
+    ])
+    const [productRaw, apiRaw] = await Promise.all([
+      parseJsonResponse<unknown>(productRes),
+      parseJsonResponse<unknown>(apiRes),
+    ])
+    const productBody = productRes.ok ? unwrapIdeasoftProductBody(productRaw) : null
+    const apiRows = apiRes.ok ? extractExtraInfoList(apiRaw).items : []
+    if ((!productBody || typeof productBody !== 'object') && apiRows.length === 0) {
+      return { has: false, summary: '' }
+    }
+    return buildIdeasoftProductFeatureSummary(
+      productBody && typeof productBody === 'object' ? productBody : {},
+      apiRows
+    )
+  } catch {
+    return { has: false, summary: '' }
+  }
+}
+
+const FETCH_ALL_CHUNK = 25
+
+async function prefetchProductListSideData(
+  rows: Ideasoft2ProductListRow[]
+): Promise<
+  [
+    Record<number, IdeasoftProductImageRow[]>,
+    Record<number, SpecialInfoStatus>,
+    Record<number, Ideasoft2ProductFeaturesCell>,
+  ]
+> {
+  const nextImages: Record<number, IdeasoftProductImageRow[]> = {}
+  const nextSpecialInfoStatus: Record<number, SpecialInfoStatus> = {}
+  const nextFeatures: Record<number, Ideasoft2ProductFeaturesCell> = {}
+  for (let i = 0; i < rows.length; i += FETCH_ALL_CHUNK) {
+    const slice = rows.slice(i, i + FETCH_ALL_CHUNK)
+    const [imageEntries, specialInfoEntries, featureEntries] = await Promise.all([
+      Promise.all(
+        slice.map(async (r) => {
+          const list = await fetchImagesForProduct(r.id)
+          return [r.id, list] as const
+        })
+      ),
+      Promise.all(
+        slice.map(async (r) => {
+          const status = await fetchSpecialInfoStatusForProduct(r.id)
+          return [r.id, status] as const
+        })
+      ),
+      Promise.all(
+        slice.map(async (r) => {
+          const cell = await fetchEmbeddedExtraSummaryForProduct(r.id)
+          return [r.id, cell] as const
+        })
+      ),
+    ])
+    for (const [id, list] of imageEntries) nextImages[id] = list
+    for (const [id, status] of specialInfoEntries) nextSpecialInfoStatus[id] = status
+    for (const [id, cell] of featureEntries) nextFeatures[id] = cell
+  }
+  return [nextImages, nextSpecialInfoStatus, nextFeatures]
+}
+
+/** Kategori filtresi için liste isteği tabanı (sayfa/limit sonra eklenir) */
+function buildIdeasoft2ListBaseSearchParams(search: string, categoryPath: number[]): URLSearchParams {
+  const params = new URLSearchParams({ sort: 'id' })
+  if (search.trim()) params.set('s', search.trim())
+  const catLeaf =
+    categoryPath.length > 0 ? categoryPath[categoryPath.length - 1]! : null
+  if (catLeaf != null && catLeaf > 0) params.set('category_id', String(catLeaf))
+  return params
 }
 
 async function fetchSpecialInfoRowsForProduct(productId: number): Promise<Ideasoft2ProductSpecialInfoRow[]> {
@@ -605,6 +695,9 @@ export function Ideasoft2ProductsPage() {
   const [loading, setLoading] = useState(true)
   const [listError, setListError] = useState<string | null>(null)
   const [imageByProductId, setImageByProductId] = useState<Record<number, IdeasoftProductImageRow[]>>({})
+  const [featuresByProductId, setFeaturesByProductId] = useState<
+    Record<number, Ideasoft2ProductFeaturesCell>
+  >({})
   const [specialInfoStatusByProductId, setSpecialInfoStatusByProductId] = useState<Record<number, SpecialInfoStatus>>({})
   const [masterSkuByKey, setMasterSkuByKey] = useState<Map<string, MasterProductSkuRow[]>>(() => new Map())
   const [masterSkuStatus, setMasterSkuStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
@@ -778,89 +871,130 @@ export function Ideasoft2ProductsPage() {
     [refreshSpecialInfoStatusForRow]
   )
 
+  const categoryLeaf =
+    categoryPath.length > 0 ? categoryPath[categoryPath.length - 1]! : null
+  const categoryFullListMode = categoryLeaf != null && categoryLeaf > 0
+
   const fetchList = useCallback(async () => {
     setLoading(true)
     setListError(null)
     setImageByProductId({})
+    setFeaturesByProductId({})
     setSpecialInfoStatusByProductId({})
     try {
-      const params = buildListParams()
-      /** Sunucu `/products/count` ile hydra:totalItems birleştirir; count’a page/limit gitmez (toplam kayıt doğru kalır). */
-      const res = await fetch(`${API_URL}/api/ideasoft2/products?${params}`)
-      const data = await parseJsonResponse<unknown>(res)
-      if (!res.ok) {
-        setListError(
-          formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) || 'Liste alınamadı'
-        )
-        setItems([])
-        setTotal(0)
-        setImageByProductId({})
-        setSpecialInfoStatusByProductId({})
-        return
-      }
-      const { items: rows, total: t } = extractProductsList(data)
-      setItems(rows)
-      setTotal(t)
-      if (page === 1 && data && typeof data === 'object') {
-        const meta = data as Record<string, unknown>
-        const src = readEsyncListTotalSource(meta)
-        const n = t.toLocaleString('tr-TR')
-        if (src === 'product_count') {
+      let rows: Ideasoft2ProductListRow[]
+
+      if (categoryFullListMode) {
+        const base = buildIdeasoft2ListBaseSearchParams(search, categoryPath)
+        const merged: Ideasoft2ProductListRow[] = []
+        const seenIds = new Set<number>()
+        for (let p = 1; p <= IDEASOFT_ADMIN_LIST_MAX_PAGES; p += 1) {
+          const params = new URLSearchParams(base)
+          params.set('page', String(p))
+          params.set('limit', '100')
+          params.set('sort', 'id')
+          const res = await fetch(`${API_URL}/api/ideasoft2/products?${params}`)
+          const data = await parseJsonResponse<unknown>(res)
+          if (!res.ok) {
+            setListError(
+              formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) ||
+                'Liste alınamadı'
+            )
+            setItems([])
+            setTotal(0)
+            setImageByProductId({})
+            setFeaturesByProductId({})
+            setSpecialInfoStatusByProductId({})
+            return
+          }
+          const { items: pageRows } = extractProductsList(data)
+          if (pageRows.length === 0) break
+          for (const r of pageRows) {
+            if (seenIds.has(r.id)) continue
+            seenIds.add(r.id)
+            merged.push(r)
+          }
+          if (pageRows.length < 100) break
+        }
+        rows = merged
+        setItems(rows)
+        setTotal(rows.length)
+        if (rows.length > 0) {
           toastSuccess(
-            'IdeaSoft ürün toplamı',
-            `Product COUNT (Admin API): ${n} kayıt — aynı liste filtreleriyle sayım.`
+            'Kategori ürün listesi',
+            `${rows.length.toLocaleString('tr-TR')} ürün — tüm sayfalar birleştirildi (sayfa başı limiti yok).`
           )
-        } else if (src === 'list_hydra') {
-          toastSuccess(
-            'IdeaSoft ürün toplamı',
-            `COUNT yok veya kullanılamadı; LIST hydra:totalItems: ${n} kayıt.`
+        }
+      } else {
+        const params = buildListParams()
+        /** Sunucu `/products/count` ile hydra:totalItems birleştirir; count’a page/limit gitmez (toplam kayıt doğru kalır). */
+        const res = await fetch(`${API_URL}/api/ideasoft2/products?${params}`)
+        const data = await parseJsonResponse<unknown>(res)
+        if (!res.ok) {
+          setListError(
+            formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) || 'Liste alınamadı'
           )
-        } else if (src === 'list_walk') {
-          toastSuccess(
-            'IdeaSoft ürün toplamı',
-            `COUNT/hydra ~sayfa boyutunda kaldı; LIST ile sayfa yürüyüşü: ${n} kayıt.`
-          )
-        } else if (src === 'list_last_page') {
-          toastSuccess(
-            'IdeaSoft ürün toplamı',
-            `hydra:last son sayfa LIST ile: ${n} kayıt.`
-          )
-        } else if (readEsyncListTotal(meta) != null) {
-          toastSuccess('IdeaSoft ürün toplamı', `Toplam: ${n} kayıt.`)
-        } else {
-          toastSuccess('IdeaSoft ürün listesi', `Bu sayfada ${rows.length} kayıt; toplam bilgisi yok.`)
+          setItems([])
+          setTotal(0)
+          setImageByProductId({})
+          setFeaturesByProductId({})
+          setSpecialInfoStatusByProductId({})
+          return
+        }
+        const { items: pageItems, total: t } = extractProductsList(data)
+        rows = pageItems
+        setItems(rows)
+        setTotal(t)
+        if (page === 1 && data && typeof data === 'object') {
+          const meta = data as Record<string, unknown>
+          const src = readEsyncListTotalSource(meta)
+          const n = t.toLocaleString('tr-TR')
+          if (src === 'product_count') {
+            toastSuccess(
+              'IdeaSoft ürün toplamı',
+              `Product COUNT (Admin API): ${n} kayıt — aynı liste filtreleriyle sayım.`
+            )
+          } else if (src === 'list_hydra') {
+            toastSuccess(
+              'IdeaSoft ürün toplamı',
+              `COUNT yok veya kullanılamadı; LIST hydra:totalItems: ${n} kayıt.`
+            )
+          } else if (src === 'list_walk') {
+            toastSuccess(
+              'IdeaSoft ürün toplamı',
+              `COUNT/hydra ~sayfa boyutunda kaldı; LIST ile sayfa yürüyüşü: ${n} kayıt.`
+            )
+          } else if (src === 'list_last_page') {
+            toastSuccess(
+              'IdeaSoft ürün toplamı',
+              `hydra:last son sayfa LIST ile: ${n} kayıt.`
+            )
+          } else if (readEsyncListTotal(meta) != null) {
+            toastSuccess('IdeaSoft ürün toplamı', `Toplam: ${n} kayıt.`)
+          } else {
+            toastSuccess(
+              'IdeaSoft ürün listesi',
+              `Bu sayfada ${rows.length} kayıt; toplam bilgisi yok.`
+            )
+          }
         }
       }
-      const [imageEntries, specialInfoEntries] = await Promise.all([
-        Promise.all(
-          rows.map(async (r) => {
-            const list = await fetchImagesForProduct(r.id)
-            return [r.id, list] as const
-          })
-        ),
-        Promise.all(
-          rows.map(async (r) => {
-            const status = await fetchSpecialInfoStatusForProduct(r.id)
-            return [r.id, status] as const
-          })
-        ),
-      ])
-      const nextImages: Record<number, IdeasoftProductImageRow[]> = {}
-      for (const [id, list] of imageEntries) nextImages[id] = list
+
+      const [nextImages, nextSpecialInfoStatus, nextFeatures] = await prefetchProductListSideData(rows)
       setImageByProductId(nextImages)
-      const nextSpecialInfoStatus: Record<number, SpecialInfoStatus> = {}
-      for (const [id, status] of specialInfoEntries) nextSpecialInfoStatus[id] = status
       setSpecialInfoStatusByProductId(nextSpecialInfoStatus)
+      setFeaturesByProductId(nextFeatures)
     } catch {
       setListError('Liste alınamadı')
       setItems([])
       setTotal(0)
       setImageByProductId({})
+      setFeaturesByProductId({})
       setSpecialInfoStatusByProductId({})
     } finally {
       setLoading(false)
     }
-  }, [buildListParams, page])
+  }, [buildListParams, page, search, categoryPath, categoryFullListMode])
 
   useEffect(() => {
     void fetchList()
@@ -893,7 +1027,7 @@ export function Ideasoft2ProductsPage() {
   return (
     <PageLayout
       title="IdeaSoft 2 › Ürünler"
-      description="Kategori filtresi Admin API Product LIST `category` / `categoryIds` (seçilen düğüm ve alt kategoriler) ile daraltılır. Yayınlanan sütunu iskontolu net fiyatı KDV dahil gösterir; Master (SKU) ana ürün eşleşmesini gösterir."
+      description="Kategori seçildiğinde aynı filtre altındaki tüm ürünler (liste limiti 100’lük sayfalar birleştirilir) tek ekranda listelenir. Kategori yokken klasik sayfalama kullanılır. “Ürün özelliği” sütunu, ürün GET/LIST gövdesindeki `products.extraInfos` (+ alt `extraInfo`, `subExtraInfos` vb.) ve `productExtraFields` alanlarından özet üretir. Yayınlanan sütunu KDV dahil TL; Master (SKU) eşlemesi SKU ile yapılır."
       backTo="/ideasoft2"
       contentRef={contentRef}
       contentOverflow="hidden"
@@ -988,18 +1122,36 @@ export function Ideasoft2ProductsPage() {
         </div>
       }
       footerContent={
-        <TablePaginationFooter
-          total={total}
-          page={page}
-          pageSize={pageSize}
-          fitLimit={fitLimit}
-          onPageChange={(p) => setListState({ page: p })}
-          onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
-          onFitLimitChange={(fl) => setListState({ fitLimit: fl })}
-          tableContainerRef={contentRef}
-          hasFilter={search.trim().length > 0 || categoryPath.length > 0}
-          showTotalInRecordRange
-        />
+        categoryFullListMode ? (
+          <div className="flex shrink-0 items-center gap-3 border-t border-border bg-background px-3 py-2 text-sm text-muted-foreground">
+            <span aria-live="polite">
+              {loading ? (
+                'Yükleniyor…'
+              ) : (
+                <>
+                  Liste:{' '}
+                  <span className="font-medium tabular-nums text-foreground">
+                    {total.toLocaleString('tr-TR')}
+                  </span>{' '}
+                  ürün (kategori için tam liste, sayfa başı limit uygulanmaz)
+                </>
+              )}
+            </span>
+          </div>
+        ) : (
+          <TablePaginationFooter
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            fitLimit={fitLimit}
+            onPageChange={(p) => setListState({ page: p })}
+            onPageSizeChange={(s) => setListState({ pageSize: s, page: 1 })}
+            onFitLimitChange={(fl) => setListState({ fitLimit: fl })}
+            tableContainerRef={contentRef}
+            hasFilter={search.trim().length > 0 || categoryPath.length > 0}
+            showTotalInRecordRange
+          />
+        )
       }
     >
       <Ideasoft2ProductDetailModal
@@ -1082,7 +1234,7 @@ export function Ideasoft2ProductsPage() {
             </div>
           ) : null}
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-auto">
-            <table className="w-full min-w-[1100px] border-separate border-spacing-0 text-sm">
+            <table className="w-full min-w-[1280px] border-separate border-spacing-0 text-sm">
               <thead>
                 <tr className="text-muted-foreground">
                   <th
@@ -1119,6 +1271,12 @@ export function Ideasoft2ProductsPage() {
                     <span className="block leading-tight">Detay</span>
                     <span className="block text-xs font-normal text-muted-foreground">Açıklama</span>
                   </th>
+                  <th className="sticky top-0 z-20 min-w-[140px] max-w-[220px] border-b border-border bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_0_hsl(var(--border))]">
+                    <span className="block leading-tight">Ürün özelliği</span>
+                    <span className="block text-xs font-normal text-muted-foreground">
+                      products.extraInfos · extraInfo
+                    </span>
+                  </th>
                   <th className="sticky top-0 z-20 w-[104px] border-b border-border bg-muted px-3 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
                     <span className="block leading-tight">Özel</span>
                     <span className="block text-xs font-normal text-muted-foreground">Başlık</span>
@@ -1148,13 +1306,13 @@ export function Ideasoft2ProductsPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={12} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={13} className="px-3 py-8 text-center text-muted-foreground">
                       Yükleniyor…
                     </td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={13} className="px-3 py-8 text-center text-muted-foreground">
                       Kayıt yok
                     </td>
                   </tr>
@@ -1179,8 +1337,9 @@ export function Ideasoft2ProductsPage() {
                     const specialInfoStatus = specialInfoStatusByProductId[row.id]
                     const hasSpecialTitle = specialInfoStatus?.hasTitle ?? false
                     const hasSpecialContent = specialInfoStatus?.hasContent ?? false
-                    const isSpecialContentSaving = specialContentSavingIds.has(row.id)
+                    const feat = featuresByProductId[row.id]
                     const productName = displayProductName(row)
+                    const isSpecialContentSaving = specialContentSavingIds.has(row.id)
                     const sku = (row.sku || '').trim()
 
                     return (
@@ -1346,6 +1505,49 @@ export function Ideasoft2ProductsPage() {
                               <XCircle className="h-4 w-4 text-destructive" />
                             )}
                           </span>
+                        </td>
+                        <td className="px-3 py-2 align-top min-w-[130px] max-w-[240px]">
+                          <button
+                            type="button"
+                            className="w-full rounded-md p-1 text-left -m-1 transition-colors hover:bg-muted"
+                            title={
+                              feat?.has
+                                ? feat.summary
+                                : feat?.hasEmptyGroups
+                                  ? 'extraInfos kaydı var; value / iç içe özelliklerde metin yok'
+                                  : 'Ürün gövdesinde extraInfos / product_extra_fields yok'
+
+                            }
+                            aria-label="Ürün özelliği — Genel sekmede products.extraInfos özeti"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openDetailModal(row, 'genel')
+                            }}
+                          >
+                            {feat?.has ? (
+                              <div className="flex items-start gap-1.5">
+                                <CheckCircle2
+                                  className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5"
+                                  aria-hidden
+                                />
+                                <span className="line-clamp-3 text-xs text-foreground leading-snug break-words">
+                                  {feat.summary}
+                                </span>
+                              </div>
+                            ) : feat?.hasEmptyGroups ? (
+                              <div className="flex flex-wrap items-center gap-1.5 text-xs text-amber-800 dark:text-amber-400">
+                                <Badge variant="outline" className="font-normal text-[10px] px-1 py-0">
+                                  Kayıt
+                                </Badge>
+                                <span>Değer boş</span>
+                              </div>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <XCircle className="h-4 w-4 text-destructive shrink-0" aria-hidden />
+                                Yok
+                              </span>
+                            )}
+                          </button>
                         </td>
                         <td className="px-3 py-2 text-center align-top">
                           <button

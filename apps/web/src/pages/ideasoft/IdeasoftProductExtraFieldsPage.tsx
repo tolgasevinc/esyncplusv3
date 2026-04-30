@@ -47,6 +47,28 @@ export interface IdeasoftProductExtraInfoRow {
   product?: Record<string, unknown>
 }
 
+/** ProductExtraInfo tanım başlığı — Admin API GET …/extra_infos */
+export interface IdeasoftExtraInfoDefinition {
+  id: number
+  name: string
+  sortOrder: number
+}
+
+function parseExtraInfoDefinition(raw: unknown): IdeasoftExtraInfoDefinition | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const o = raw as Record<string, unknown>
+  const id = typeof o.id === 'number' ? o.id : parseInt(String(o.id ?? ''), 10)
+  if (!Number.isFinite(id) || id < 1) return null
+  const name = typeof o.name === 'string' ? o.name : String(o.name ?? '').trim()
+  const soRaw = o.sortOrder ?? o.sort_order
+  const sortOrder = typeof soRaw === 'number' ? soRaw : parseInt(String(soRaw ?? '0'), 10)
+  return {
+    id,
+    name,
+    sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
+  }
+}
+
 const listDefaults = {
   search: '',
   page: 1,
@@ -91,12 +113,25 @@ function extractProductsList(json: unknown): { items: IdeasoftProductListRow[]; 
   return { items: [], total: 0 }
 }
 
-function extractExtraFieldsList(json: unknown): { items: IdeasoftProductExtraFieldRow[]; total: number } {
+export function extractExtraFieldsList(json: unknown): { items: IdeasoftProductExtraFieldRow[]; total: number } {
   return extractHydraLikeList<IdeasoftProductExtraFieldRow>(json)
 }
 
-function extractExtraInfoList(json: unknown): { items: IdeasoftProductExtraInfoRow[]; total: number } {
+export function extractExtraInfoList(json: unknown): { items: IdeasoftProductExtraInfoRow[]; total: number } {
   return extractHydraLikeList<IdeasoftProductExtraInfoRow>(json)
+}
+
+export function extractExtraInfoDefinitionsList(json: unknown): {
+  items: IdeasoftExtraInfoDefinition[]
+  total: number
+} {
+  const { items: rawItems, total } = extractHydraLikeList<Record<string, unknown>>(json)
+  const items: IdeasoftExtraInfoDefinition[] = []
+  for (const raw of rawItems) {
+    const d = parseExtraInfoDefinition(raw)
+    if (d) items.push(d)
+  }
+  return { items, total }
 }
 
 function extractHydraLikeList<T>(json: unknown): { items: T[]; total: number } {

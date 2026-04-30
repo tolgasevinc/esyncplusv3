@@ -14,6 +14,7 @@ import { Label } from '@/components/ui/label'
 import { toastError, toastSuccess } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { buildIdeasoftProductCategoryBreadcrumbs } from './ideasoft2-product-category-breadcrumb'
+import { summarizeProductEmbeddedExtraColumn } from './ideasoft2-product-features-list'
 import {
   formatIdeasoftProductPriceLine,
   readIdeasoftStockTypeLabel,
@@ -24,7 +25,14 @@ import {
   formatMoneyTr,
 } from './ideasoft2-product-detail-pricing'
 
-type ActivePanel = 'genel' | 'fiyatlar' | 'urunOzellikleri' | 'ozelBilgi' | 'tumAlanlar'
+type ActivePanel =
+  | 'genel'
+  | 'fiyatlar'
+  | 'urunOzellikleri'
+  | 'varyantSecenekleri'
+  | 'ekstraAlanlar'
+  | 'ozelBilgi'
+  | 'tumAlanlar'
 export type Ideasoft2ProductDetailInitialPanel = ActivePanel
 export type Ideasoft2ProductDetailFocusField = 'specialTitle' | 'specialContent'
 type SpecialContentMode = 'normal' | 'html'
@@ -43,8 +51,11 @@ interface ProductExtraInfoRow {
 
 interface ProductExtraFieldRow {
   id: number
+  product?: Record<string, unknown>
   varKey?: unknown
+  var_key?: unknown
   varValue?: unknown
+  var_value?: unknown
 }
 
 interface ProductSpecialInfoRow {
@@ -84,6 +95,33 @@ function formatRawFieldValue(value: unknown): string {
   }
 }
 
+function formatNestedProductRef(product: unknown): string {
+  if (product == null || product === '') return '—'
+  if (typeof product !== 'object' || Array.isArray(product)) {
+    return typeof product === 'string' ? (product.trim() || '—') : formatRawFieldValue(product)
+  }
+  const o = product as Record<string, unknown>
+  const pid = o.id
+  if (pid != null && String(pid).trim()) return `#${String(pid).trim()}`
+  return formatRawFieldValue(product)
+}
+
+function readProductExtraVarKey(row: ProductExtraFieldRow): string {
+  const raw = row as unknown as Record<string, unknown>
+  const v = row.varKey ?? row.var_key ?? raw.varKey ?? raw.var_key
+  const s =
+    typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : ''
+  return s || '—'
+}
+
+function readProductExtraVarValue(row: ProductExtraFieldRow): string {
+  const raw = row as unknown as Record<string, unknown>
+  const v = row.varValue ?? row.var_value ?? raw.varValue ?? raw.var_value
+  if (typeof v === 'string') return v.trim() || '—'
+  if (v == null || v === '') return '—'
+  return typeof v === 'number' || typeof v === 'boolean' ? String(v) : formatRawFieldValue(v)
+}
+
 function flattenRawFields(value: unknown, prefix = ''): FieldRow[] {
   if (Array.isArray(value)) {
     if (value.length === 0) return [{ path: prefix, value: '[]' }]
@@ -115,6 +153,51 @@ function readRecordArrayField(raw: unknown, key: string): Record<string, unknown
           item != null && typeof item === 'object' && !Array.isArray(item)
       )
     : []
+}
+
+/** `optionGroups[].options` — varyant seçenekleri */
+function readNestedVariantOptions(group: Record<string, unknown>): Record<string, unknown>[] {
+  const a = readRecordArrayField(group, 'options')
+  return a.length > 0 ? a : readRecordArrayField(group, 'option')
+}
+
+function pickVariantField(o: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const k of keys) {
+    if (Object.prototype.hasOwnProperty.call(o, k)) {
+      return o[k]
+    }
+  }
+  return undefined
+}
+
+function variantOptionCellText(v: unknown): string {
+  if (v === undefined) return '—'
+  if (v === null) return 'null'
+  if (typeof v === 'string') return v.trim() || '—'
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  return formatRawFieldValue(v)
+}
+
+function formatVariantOptionGroupCell(og: unknown): { summary: string; json: string | null } {
+  if (og == null) return { summary: '—', json: null }
+  if (typeof og !== 'object' || Array.isArray(og)) {
+    return { summary: variantOptionCellText(og), json: null }
+  }
+  const o = og as Record<string, unknown>
+  const id = o.id
+  const title =
+    typeof o.title === 'string'
+      ? o.title.trim()
+      : typeof o.name === 'string'
+        ? o.name.trim()
+        : ''
+  const parts: string[] = []
+  if (id != null && String(id).trim()) parts.push(`#${String(id).trim()}`)
+  if (title) parts.push(title)
+  const summary = parts.length > 0 ? parts.join(' · ') : displayFeatureText(og)
+  const json =
+    typeof og === 'object' && !Array.isArray(og) ? formatRawFieldValue(og) : null
+  return { summary, json }
 }
 
 function displayFeatureText(raw: unknown): string {
@@ -240,6 +323,12 @@ export function Ideasoft2ProductDetailModal({
   const [extraInfoLoading, setExtraInfoLoading] = useState(false)
   const [extraInfoError, setExtraInfoError] = useState<string | null>(null)
   const fetchedExtraInfoId = useRef<number | null>(null)
+  /** Özel Bilgi paket yükleme (aynı anda product_extra_fields da geliyor) */
+  const bundledAttachLoadingRef = useRef(false)
+  /** `product_extra_fields` bu ürün için yüklendi */
+  const extraFieldsHydratedId = useRef<number | null>(null)
+  const [extraFieldsPanelLoading, setExtraFieldsPanelLoading] = useState(false)
+  const [extraFieldsPanelError, setExtraFieldsPanelError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -262,6 +351,10 @@ export function Ideasoft2ProductDetailModal({
     setExtraInfoError(null)
     setExtraInfoLoading(false)
     fetchedExtraInfoId.current = null
+    bundledAttachLoadingRef.current = false
+    extraFieldsHydratedId.current = null
+    setExtraFieldsPanelLoading(false)
+    setExtraFieldsPanelError(null)
     setDiscountInput('')
     setDiscountKind('percent')
   }, [open, productId, initialPanel, specialInfoOnly])
@@ -300,11 +393,13 @@ export function Ideasoft2ProductDetailModal({
   }, [])
 
   const loadExtraInfo = useCallback(async (id: number) => {
+    bundledAttachLoadingRef.current = true
     setExtraInfoLoading(true)
     setExtraInfoError(null)
     setExtraInfoItems([])
     setExtraFieldItems([])
     setSpecialInfoItems([])
+    extraFieldsHydratedId.current = null
     try {
       const params = new URLSearchParams({
         product: String(id),
@@ -356,11 +451,42 @@ export function Ideasoft2ProductDetailModal({
           : { new: { title: DEFAULT_SPECIAL_TITLE, content: '' } }
       )
       setExtraInfoItems(extractExtraInfoList(infoData))
-      setExtraFieldItems(extractExtraFieldList(fieldData))
+      const fieldRows = extractExtraFieldList(fieldData)
+      setExtraFieldItems(fieldRows)
+      extraFieldsHydratedId.current = id
     } catch (e) {
       setExtraInfoError(e instanceof Error ? e.message : 'Özel bilgi yüklenemedi')
     } finally {
       setExtraInfoLoading(false)
+      bundledAttachLoadingRef.current = false
+    }
+  }, [])
+
+  const loadExtraFieldsOnly = useCallback(async (id: number) => {
+    setExtraFieldsPanelLoading(true)
+    setExtraFieldsPanelError(null)
+    try {
+      const params = new URLSearchParams({
+        product: String(id),
+        limit: '100',
+        page: '1',
+        sort: 'id',
+      })
+      const res = await fetch(`${API_URL}/api/ideasoft/admin-api/product_extra_fields?${params}`)
+      const data = await parseJsonResponse<unknown>(res)
+      if (!res.ok) {
+        throw new Error(
+          formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) ||
+            'Ürün ekstra alanları alınamadı'
+        )
+      }
+      setExtraFieldItems(extractExtraFieldList(data))
+      extraFieldsHydratedId.current = id
+    } catch (e) {
+      setExtraFieldsPanelError(e instanceof Error ? e.message : 'Ürün ekstra alanları alınamadı')
+      setExtraFieldItems([])
+    } finally {
+      setExtraFieldsPanelLoading(false)
     }
   }, [])
 
@@ -385,6 +511,10 @@ export function Ideasoft2ProductDetailModal({
       setExtraInfoError(null)
       setExtraInfoLoading(false)
       fetchedExtraInfoId.current = null
+      bundledAttachLoadingRef.current = false
+      extraFieldsHydratedId.current = null
+      setExtraFieldsPanelLoading(false)
+      setExtraFieldsPanelError(null)
       return
     }
     if (productId == null) return
@@ -403,6 +533,20 @@ export function Ideasoft2ProductDetailModal({
     fetchedExtraInfoId.current = productId
     void loadExtraInfo(productId)
   }, [open, activePanel, productId, loadExtraInfo, specialInfoOnly])
+
+  useEffect(() => {
+    if (!open || specialInfoOnly || activePanel !== 'ekstraAlanlar' || productId == null) return
+    if (extraFieldsHydratedId.current === productId) return
+    if (bundledAttachLoadingRef.current && fetchedExtraInfoId.current === productId) return
+    void loadExtraFieldsOnly(productId)
+  }, [
+    open,
+    specialInfoOnly,
+    activePanel,
+    productId,
+    loadExtraFieldsOnly,
+    extraInfoLoading,
+  ])
 
   const saveSpecialInfo = useCallback(
     async (row: ProductSpecialInfoRow | null) => {
@@ -517,7 +661,23 @@ export function Ideasoft2ProductDetailModal({
       ? priceAfterUserDiscount(masterBase, discountInput, discountKind)
       : null
   const selectionGroups = useMemo(() => readRecordArrayField(genel, 'selectionGroups'), [genel])
-  const optionGroups = useMemo(() => readRecordArrayField(genel, 'optionGroups'), [genel])
+  const optionGroups = useMemo(() => {
+    if (!genel || typeof genel !== 'object' || Array.isArray(genel)) return []
+    const camel = readRecordArrayField(genel, 'optionGroups')
+    return camel.length > 0 ? camel : readRecordArrayField(genel, 'option_groups')
+  }, [genel])
+  const variantOptionBlocks = useMemo(
+    () =>
+      optionGroups.map((group, groupIndex) => ({
+        groupIndex,
+        options: readNestedVariantOptions(group),
+        groupTitle: displayFeatureText(
+          group.title ?? group.name ?? group.label ?? `Varyant grubu ${groupIndex + 1}`
+        ),
+      })),
+    [optionGroups]
+  )
+  const hasVariantOptionsListed = variantOptionBlocks.some((b) => b.options.length > 0)
   const rawFieldRows = useMemo(() => {
     const rows = genel ? flattenRawFields(genel) : []
     const productDetailRows = productDetailItems.flatMap((item, index) =>
@@ -552,6 +712,25 @@ export function Ideasoft2ProductDetailModal({
     }
     return [...byPath.values()]
   }, [detailDetails, detailExtraDetails, rawFieldRows])
+
+  const genelEmbeddedExtras = useMemo(() => {
+    if (!genel || typeof genel !== 'object' || Array.isArray(genel)) return null
+    return summarizeProductEmbeddedExtraColumn(genel as Record<string, unknown>)
+  }, [genel])
+
+  const genelExtraInfoRootsLen = useMemo(() => {
+    if (!genel || typeof genel !== 'object' || Array.isArray(genel)) return 0
+    const g = genel as Record<string, unknown>
+    const roots = g.extraInfos ?? g.extra_infos
+    return Array.isArray(roots) ? roots.length : 0
+  }, [genel])
+
+  const genelExtraFieldRowsLen = useMemo(() => {
+    if (!genel || typeof genel !== 'object' || Array.isArray(genel)) return 0
+    const g = genel as Record<string, unknown>
+    const pf = g.productExtraFields ?? g.product_extra_fields
+    return Array.isArray(pf) ? pf.length : 0
+  }, [genel])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -618,6 +797,32 @@ export function Ideasoft2ProductDetailModal({
             size="sm"
             className={cn(
               'rounded-b-none border-b-2 border-transparent px-3',
+              activePanel === 'varyantSecenekleri' && 'border-primary bg-muted/40 text-foreground'
+            )}
+            aria-pressed={activePanel === 'varyantSecenekleri'}
+            onClick={() => setActivePanel('varyantSecenekleri')}
+          >
+            Varyant seçenekleri
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'rounded-b-none border-b-2 border-transparent px-3',
+              activePanel === 'ekstraAlanlar' && 'border-primary bg-muted/40 text-foreground'
+            )}
+            aria-pressed={activePanel === 'ekstraAlanlar'}
+            onClick={() => setActivePanel('ekstraAlanlar')}
+          >
+            Ekstra Alanlar
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'rounded-b-none border-b-2 border-transparent px-3',
               activePanel === 'ozelBilgi' && 'border-primary bg-muted/40 text-foreground'
             )}
             aria-pressed={activePanel === 'ozelBilgi'}
@@ -674,6 +879,42 @@ export function Ideasoft2ProductDetailModal({
                   {kategoriBreadcrumb}
                 </p>
               </div>
+              {genelEmbeddedExtras != null &&
+              (genelExtraInfoRootsLen > 0 ||
+                genelExtraFieldRowsLen > 0 ||
+                genelEmbeddedExtras.has ||
+                genelEmbeddedExtras.hasEmptyGroups) ? (
+                <div className="grid gap-1.5">
+                  <Label className="text-xs text-muted-foreground leading-snug">
+                    Ürün özellikleri{' '}
+                    <code className="text-[10px]">products.extraInfos</code>
+                    {genelExtraInfoRootsLen > 0 ? (
+                      <span className="block text-[10px] font-normal text-muted-foreground tabular-nums">
+                        extraInfos: {genelExtraInfoRootsLen} kök
+                        {genelExtraFieldRowsLen > 0
+                          ? ` · product_extra_fields: ${genelExtraFieldRowsLen}`
+                          : ''}
+                      </span>
+                    ) : genelExtraFieldRowsLen > 0 ? (
+                      <span className="block text-[10px] font-normal text-muted-foreground tabular-nums">
+                        product_extra_fields: {genelExtraFieldRowsLen}
+                      </span>
+                    ) : null}
+                  </Label>
+                  {genelEmbeddedExtras.has && genelEmbeddedExtras.summary ? (
+                    <p className="max-h-40 overflow-auto text-sm leading-snug break-words text-foreground">
+                      {genelEmbeddedExtras.summary}
+                    </p>
+                  ) : genelEmbeddedExtras.hasEmptyGroups ? (
+                    <p className="text-sm text-amber-800 dark:text-amber-400">
+                      Kayıtlar listelenmiş; seçili değer / metin alanı çıkmıyor (children veya{' '}
+                      <code className="text-xs">subExtraInfos</code> yapısı farklı olabilir).
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Özet oluşturulamadı.</p>
+                  )}
+                </div>
+              ) : null}
               <div className="grid gap-1.5">
                 <Label className="text-xs text-muted-foreground">
                   Detay açıklama <code>product_details[0].details</code>
@@ -901,7 +1142,7 @@ export function Ideasoft2ProductDetailModal({
                     Varyant grupları (<code>optionGroups</code>)
                   </h4>
                   {optionGroups.map((group, groupIndex) => {
-                    const options = readRecordArrayField(group, 'options')
+                    const options = readNestedVariantOptions(group)
                     return (
                       <div key={`option-${groupIndex}`} className="rounded-md border border-border bg-muted/20 p-3">
                         <div className="mb-3">
@@ -957,6 +1198,255 @@ export function Ideasoft2ProductDetailModal({
             </div>
           )}
 
+          {activePanel === 'varyantSecenekleri' && genelLoading && (
+            <p className="text-muted-foreground">Varyant seçenekleri yükleniyor…</p>
+          )}
+
+          {activePanel === 'varyantSecenekleri' && !genelLoading && genelError && (
+            <p className="text-destructive">{genelError}</p>
+          )}
+
+          {activePanel === 'varyantSecenekleri' && !genelLoading && !genelError && genel && (
+            <div className="space-y-5">
+              <div>
+                <h3 className="text-sm font-medium text-foreground">Varyant seçenekleri</h3>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  <code className="text-[11px]">optionGroups</code> › <code className="text-[11px]">options</code>{' '}
+                  — her satır bir varyant (ör. renk &quot;Kırmızı&quot;). İsimlendirme API ile uyumlu;{' '}
+                  <code className="text-[11px]">snake_case</code> alanlar da okunur.
+                </p>
+              </div>
+              {!hasVariantOptionsListed ? (
+                <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  Bu ürün için <code className="text-xs">optionGroups</code> altında{' '}
+                  <code className="text-xs">options</code> kaydı yok.
+                </p>
+              ) : (
+                <div className="space-y-6">
+                  {variantOptionBlocks.map(({ groupIndex, groupTitle, options }) =>
+                    options.length === 0 ? null : (
+                      <div key={`vg-${groupIndex}`} className="space-y-2">
+                        <h4 className="text-xs font-medium text-muted-foreground">
+                          <span className="text-foreground">{groupTitle}</span>
+                          <span className="ml-1.5 font-normal tabular-nums">
+                            · optionGroups[{groupIndex}] · {options.length} seçenek
+                          </span>
+                        </h4>
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[1080px] border-separate border-spacing-0 text-xs">
+                            <thead>
+                              <tr className="text-muted-foreground">
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  id
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  title
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  slug
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  sortOrder
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  logo
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  attachment
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  imageUrl
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  size
+                                </th>
+                                <th className="min-w-[140px] border-b border-border px-2 py-2 text-left font-medium">
+                                  optionGroup
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  updatedAt
+                                </th>
+                                <th className="whitespace-nowrap border-b border-border px-2 py-2 text-left font-medium">
+                                  createdAt
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {options.map((opt, oi) => {
+                                const idVal = pickVariantField(opt, ['id'])
+                                const rowKey =
+                                  typeof idVal === 'number' || typeof idVal === 'string'
+                                    ? String(idVal)
+                                    : `opt-${oi}`
+                                const rowId = `${groupIndex}-${rowKey}`
+                                const imageUrlRaw = pickVariantField(opt, ['imageUrl', 'image_url'])
+                                const imageStr =
+                                  typeof imageUrlRaw === 'string' ? imageUrlRaw.trim() : ''
+                                const ogVal = pickVariantField(opt, ['optionGroup', 'option_group'])
+                                const ogCell = formatVariantOptionGroupCell(ogVal)
+                                return (
+                                  <tr key={rowId} className="odd:bg-muted/20">
+                                    <td className="border-b border-border/60 px-2 py-2 font-mono tabular-nums text-foreground">
+                                      {variantOptionCellText(idVal)}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 max-w-[160px]">
+                                      <p className="break-words text-foreground">
+                                        {variantOptionCellText(pickVariantField(opt, ['title']))}
+                                      </p>
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 font-mono text-[11px] text-foreground">
+                                      {variantOptionCellText(pickVariantField(opt, ['slug']))}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 tabular-nums text-foreground">
+                                      {variantOptionCellText(
+                                        pickVariantField(opt, ['sortOrder', 'sort_order'])
+                                      )}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 max-w-[120px] break-all text-[11px] text-foreground">
+                                      {variantOptionCellText(pickVariantField(opt, ['logo']))}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 max-w-[120px] break-all text-[11px] text-foreground">
+                                      {variantOptionCellText(pickVariantField(opt, ['attachment']))}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 max-w-[180px] break-all">
+                                      {imageStr && /^https?:\/\//i.test(imageStr) ? (
+                                        <a
+                                          href={imageStr}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-primary underline-offset-2 hover:underline"
+                                        >
+                                          {imageStr.length > 48 ? `${imageStr.slice(0, 44)}…` : imageStr}
+                                        </a>
+                                      ) : (
+                                        <span className="text-foreground">{variantOptionCellText(imageUrlRaw)}</span>
+                                      )}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 tabular-nums text-foreground">
+                                      {variantOptionCellText(pickVariantField(opt, ['size']))}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 min-w-[140px]">
+                                      <p className="break-words font-medium text-foreground">{ogCell.summary}</p>
+                                      {ogCell.json ? (
+                                        <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded border border-border/60 bg-muted/30 p-1.5 font-mono text-[10px] text-muted-foreground">
+                                          {ogCell.json}
+                                        </pre>
+                                      ) : null}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 font-mono text-[10px] text-foreground whitespace-nowrap">
+                                      {variantOptionCellText(
+                                        pickVariantField(opt, ['updatedAt', 'updated_at'])
+                                      )}
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 font-mono text-[10px] text-foreground whitespace-nowrap">
+                                      {variantOptionCellText(
+                                        pickVariantField(opt, ['createdAt', 'created_at'])
+                                      )}
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activePanel === 'ekstraAlanlar' && productId == null ? (
+            <p className="text-muted-foreground">Ürün seçilmemiş.</p>
+          ) : null}
+
+          {activePanel === 'ekstraAlanlar' && productId != null &&
+          extraFieldsHydratedId.current !== productId &&
+          (extraFieldsPanelLoading ||
+            (extraInfoLoading && fetchedExtraInfoId.current === productId)) ? (
+            <p className="text-muted-foreground">Ekstra alanlar yükleniyor…</p>
+          ) : null}
+
+          {activePanel === 'ekstraAlanlar' && productId != null && extraFieldsPanelError ? (
+            <p className="text-destructive">{extraFieldsPanelError}</p>
+          ) : null}
+
+          {activePanel === 'ekstraAlanlar' &&
+          productId != null &&
+          extraFieldsHydratedId.current === productId &&
+          !extraFieldsPanelError ? (
+            <div className="space-y-3">
+              <div>
+                <h3 className="text-sm font-medium text-foreground">Ürün ekstra alanları</h3>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Admin API kaynağı <code className="text-[11px]">product_extra_fields</code>; ürün gövdesinde{' '}
+                  <code className="text-[11px]">productExtraFields</code>.
+                </p>
+              </div>
+              {extraFieldItems.length === 0 ? (
+                <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  Bu ürün için ekstra alan kaydı yok.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[720px] border-separate border-spacing-0 text-sm">
+                    <thead>
+                      <tr className="text-muted-foreground">
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">id</th>
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          Ürün <code className="text-[10px] font-normal">product</code>
+                        </th>
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          varKey
+                        </th>
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          varValue
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {extraFieldItems.map((item) => {
+                        const pk = formatNestedProductRef(item.product)
+                        const pkJson =
+                          item.product &&
+                          typeof item.product === 'object' &&
+                          Object.keys(item.product as Record<string, unknown>).some((k) => k !== 'id')
+                            ? formatRawFieldValue(item.product)
+                            : null
+                        return (
+                          <tr key={item.id} className="odd:bg-muted/20">
+                            <td className="border-b border-border/60 px-2 py-2 font-mono tabular-nums text-foreground">
+                              {item.id}
+                            </td>
+                            <td className="border-b border-border/60 px-2 py-2">
+                              <p className="font-mono text-xs text-foreground">{pk}</p>
+                              {pkJson ? (
+                                <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-border/60 bg-muted/30 p-2 font-mono text-[11px] text-muted-foreground">
+                                  {pkJson}
+                                </pre>
+                              ) : null}
+                            </td>
+                            <td className="border-b border-border/60 px-2 py-2">
+                              <p className="whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+                                {readProductExtraVarKey(item)}
+                              </p>
+                            </td>
+                            <td className="border-b border-border/60 px-2 py-2">
+                              <p className="whitespace-pre-wrap break-words text-foreground">
+                                {readProductExtraVarValue(item)}
+                              </p>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ) : null}
+
           {activePanel === 'ozelBilgi' && extraInfoLoading && (
             <p className="text-muted-foreground">Özel bilgi yükleniyor…</p>
           )}
@@ -971,13 +1461,14 @@ export function Ideasoft2ProductDetailModal({
               <div>
                 <h3 className="text-sm font-medium text-foreground">Özel Bilgi</h3>
                 <p className="text-xs text-muted-foreground">
-                  Paneldeki Özel Bilgi Alanı <code>product_special_infos</code> kaynağından
-                  gelir. Diğer ekstra kaynaklar ayrıca aşağıda gösterilir.
+                  Paneldeki Özel Bilgi Alanı <code>product_special_infos</code> kaynağından gelir.{' '}
+                  <code>extra_info_to_products</code> aşağıdadır; <code>productExtraFields</code> için{' '}
+                  <span className="font-medium text-foreground">Ekstra Alanlar</span> sekmesini kullanın.
                 </p>
               </div>
               ) : null}
               {specialInfoItems.length === 0 &&
-              (!specialInfoOnly ? extraInfoItems.length === 0 && extraFieldItems.length === 0 : true) ? (
+              (!specialInfoOnly ? extraInfoItems.length === 0 : true) ? (
                 <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
                   Bu ürün için özel bilgi kaydı yok.
                 </p>
@@ -1226,47 +1717,6 @@ export function Ideasoft2ProductDetailModal({
                             <td className="border-b border-border/60 px-2 py-2 align-top">
                               <Label className="mb-1 block text-[10px] text-muted-foreground">
                                 value
-                              </Label>
-                              <p className="whitespace-pre-wrap break-words text-foreground">{content}</p>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-              {!specialInfoOnly && extraFieldItems.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
-                    Ürün ekstra alanları (<code>product_extra_fields</code>)
-                  </h4>
-                  <table className="w-full min-w-[640px] border-separate border-spacing-0 text-sm">
-                    <thead>
-                      <tr className="text-muted-foreground">
-                        <th className="border-b border-border px-2 py-2 text-left font-medium">
-                          Başlık
-                        </th>
-                        <th className="border-b border-border px-2 py-2 text-left font-medium">
-                          İçerik
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {extraFieldItems.map((item) => {
-                        const title = formatRawFieldValue(item.varKey)
-                        const content = formatRawFieldValue(item.varValue)
-                        return (
-                          <tr key={item.id} className="odd:bg-muted/20">
-                            <td className="border-b border-border/60 px-2 py-2 align-top">
-                              <Label className="mb-1 block text-[10px] text-muted-foreground">
-                                varKey
-                              </Label>
-                              <p className="whitespace-pre-wrap break-words text-foreground">{title}</p>
-                            </td>
-                            <td className="border-b border-border/60 px-2 py-2 align-top">
-                              <Label className="mb-1 block text-[10px] text-muted-foreground">
-                                varValue
                               </Label>
                               <p className="whitespace-pre-wrap break-words text-foreground">{content}</p>
                             </td>
