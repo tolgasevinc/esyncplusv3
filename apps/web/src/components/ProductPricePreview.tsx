@@ -4,7 +4,7 @@ import { API_URL } from '@/lib/api'
 import { formatPrice } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toastSuccess } from '@/lib/toast'
-import { applyCalculation, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
+import { resolveCalculatedPrice, type CalculationRule, type PriceValue } from '@/lib/calculations'
 
 interface PriceRow {
   label: string
@@ -63,6 +63,7 @@ export function ProductPricePreview({
         price?: number
         currency_id?: number | null
         brand_id?: number | null
+        category_id?: number | null
         prices?: { price_type_id: number; price?: number; currency_id?: number | null }[]
       }
       const curById = Object.fromEntries(currencies.map((c) => [c.id, c]))
@@ -79,40 +80,40 @@ export function ProductPricePreview({
         currencyCode: baseCur?.code ?? '',
       })
 
-      const pricesMap = new Map(
-        (product.prices ?? []).map((p) => [
-          p.price_type_id,
-          {
-            price: p.price ?? 0,
-            currencyId: p.currency_id ?? null,
-          },
-        ])
-      )
+      const pricesMap: Record<number, PriceValue> = {}
+      for (const p of product.prices ?? []) {
+        pricesMap[p.price_type_id] = {
+          price: p.price ?? 0,
+          currency_id: p.currency_id ?? null,
+          status: 1,
+        }
+      }
       for (const pt of priceTypes) {
-        const data = pricesMap.get(pt.id)
+        const data = pricesMap[pt.id]
         if (data) {
-          const cur = data.currencyId ? curById[data.currencyId] : null
+          const cur = data.currency_id ? curById[data.currency_id] : null
           result.push({
             label: pt.name,
             price: data.price,
-            currencyId: data.currencyId,
+            currencyId: data.currency_id,
             currencySymbol: cur?.symbol ?? '',
             currencyCode: cur?.code ?? '',
           })
         } else {
-          const rule = findRuleForBrand(
-            calculationRules.filter((r) => r.source === 'price'),
-            String(pt.id),
-            product.brand_id ?? null
-          )
-          if (rule?.operations?.length) {
-            const computed = applyCalculation(basePrice, rule.operations)
-            const ruleCurId = rule.result_currency_id != null && rule.result_currency_id > 0 ? rule.result_currency_id : baseCurId
-            const cur = ruleCurId ? curById[ruleCurId] : baseCur
+          const resolved = resolveCalculatedPrice(String(pt.id), {
+            basePrice,
+            baseCurrencyId: baseCurId,
+            prices: pricesMap,
+            rules: calculationRules,
+            brandId: product.brand_id ?? null,
+            categoryId: product.category_id ?? null,
+          })
+          if (resolved) {
+            const cur = resolved.currency_id ? curById[resolved.currency_id] : baseCur
             result.push({
               label: pt.name,
-              price: computed,
-              currencyId: ruleCurId,
+              price: resolved.price,
+              currencyId: resolved.currency_id,
               currencySymbol: cur?.symbol ?? '',
               currencyCode: cur?.code ?? '',
               isCalculated: true,

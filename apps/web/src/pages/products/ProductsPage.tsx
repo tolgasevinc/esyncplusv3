@@ -78,7 +78,12 @@ import { toastSuccess, toastError, toastWarning } from '@/lib/toast'
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { lookupFromSupplierSource, fetchMatchedSupplierCodesFromBrand } from '@/lib/supplierSource'
 import { cn, formatPrice, formatPriceWithSymbol, parseDecimal } from '@/lib/utils'
-import { applyCalculation, formatOperationsAsFormula, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
+import {
+  applyCalculationRulesToPrices,
+  formatOperationsAsFormula,
+  normalizeCalculationRules,
+  type CalculationRule,
+} from '@/lib/calculations'
 import { ProductImportModal } from './ProductImportModal'
 
 /** Dinamik arka plan rengi - style attribute yerine ref ile CSS değişkeni atar (linter uyumlu) */
@@ -154,6 +159,10 @@ interface Product {
   parasut_product_id?: string | null
   /** Kayıtlı IdeaSoft ürün ID */
   ideasoft_product_id?: number | null
+  /** Kayıtlı Trendyol ürün/content ID */
+  trendyol_product_id?: string | null
+  /** Kayıtlı Trendyol kategori ID */
+  trendyol_category_id?: number | null
 }
 
 /** Kayıt sonrası GET /api/products/:id yanıtını liste satırına çevirir; eksik marka/tip adlarını seçeneklerden tamamlar. */
@@ -1537,44 +1546,22 @@ export function ProductsPage() {
         const newCurrencyId = currency_id ?? form.currency_id
         const curId = newCurrencyId ?? form.currency_id
         const brandId = typeof form.brand_id === 'number' ? form.brand_id : null
-        const priceRule = findRuleForBrand(calculationRules, 'price', brandId)
-        const effectivePrice =
-          priceRule?.source === 'price' && priceRule?.operations?.length
-            ? applyCalculation(price, priceRule.operations)
-            : price
-        const prices: Record<number, { price: number; currency_id: number | null; status: number }> = { ...form.prices }
-        if (calculationRules.length > 0) {
-          const sortedTypes = [...priceTypes].sort((a, b) => a.id - b.id)
-          for (const pt of sortedTypes) {
-            const targetId = pt.id
-            if (targetId < 1) continue
-            const rule = findRuleForBrand(calculationRules, String(targetId), brandId)
-            if (!rule || !rule.operations?.length) continue
-            const sourceVal = rule.source === 'price' ? effectivePrice : (prices[Number(rule.source)]?.price ?? effectivePrice)
-            const computed = applyCalculation(sourceVal, rule.operations)
-            const ruleCurrencyId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : null
-            const priceCurrencyId = ruleCurrencyId ?? (curId ? Number(curId) : null)
-            prices[targetId] = {
-              ...(prices[targetId] ?? { price: 0, currency_id: null, status: 1 }),
-              price: computed,
-              currency_id: priceCurrencyId,
-              status: form.prices[targetId]?.status ?? 1,
-            }
-          }
-        }
-        const ecomRule = findRuleForBrand(calculationRules, '1', brandId)
-        const ecomCurrencyId = ecomRule?.result_currency_id != null && ecomRule.result_currency_id > 0
-          ? Number(ecomRule.result_currency_id)
-          : (newCurrencyId ? Number(newCurrencyId) : null)
-        const discType = form.ecommerce_discount_type === 1 ? 1 : 0
-        const discVal = Number(form.ecommerce_discount_value) || 0
-        const ecomFromDisc = computeEcommerceListPriceFromGeneral(effectivePrice, discType, discVal)
-        prices[1] = {
-          ...(prices[1] ?? { price: 0, currency_id: null, status: 1 }),
-          price: ecomFromDisc,
-          currency_id: ecomCurrencyId,
-          status: form.prices[1]?.status ?? 1,
-        }
+        const categoryId = typeof form.category_id === 'number' ? form.category_id : null
+        const effectivePrice = price
+        const prices = applyCalculationRulesToPrices({
+          basePrice: effectivePrice,
+          baseCurrencyId: curId ? Number(curId) : null,
+          prices: form.prices,
+          rules: calculationRules,
+          targets: priceTypes.map((pt) => pt.id).filter((id) => id > 0),
+          brandId,
+          categoryId,
+        })
+        const ecomFromDisc = computeEcommerceListPriceFromGeneral(
+          effectivePrice,
+          form.ecommerce_discount_type === 1 ? 1 : 0,
+          Number(form.ecommerce_discount_value) || 0
+        )
         setForm((f) => ({
           ...f,
           price: effectivePrice,
@@ -1628,6 +1615,7 @@ export function ProductsPage() {
   }, [
     form.supplier_code,
     form.brand_id,
+    form.category_id,
     form.currency_id,
     form.prices,
     form.ecommerce_discount_type,
@@ -1715,7 +1703,7 @@ export function ProductsPage() {
     [ecommerceGeneralBasePrice, form.ecommerce_discount_type, form.ecommerce_discount_value]
   )
 
-  /** E-ticaret liste fiyatı (genel + iskonto) ile `prices[1]` / `ecommerce_price` alanlarını modalda hizala */
+  /** E-ticaret sekmesi önizlemesini genel fiyat + iskonto ile güncel tutar; fiyat tipi satırlarını ezmez. */
   useEffect(() => {
     if (!modalOpen) return
     setForm((f) => {
@@ -1725,30 +1713,13 @@ export function ProductsPage() {
         f.ecommerce_discount_type === 1 ? 1 : 0,
         Number(f.ecommerce_discount_value) || 0
       )
-      const cur =
-        f.ecommerce_currency_id !== '' && f.ecommerce_currency_id != null ? Number(f.ecommerce_currency_id) : null
-      const p1 = f.prices[1]
       const close = (a: number, b: number) => Math.abs(a - b) < 0.005
-      if (
-        p1 &&
-        close(p1.price, listed) &&
-        close(f.ecommerce_price ?? 0, listed) &&
-        (p1.currency_id ?? null) === (cur ?? p1.currency_id ?? null)
-      ) {
+      if (close(f.ecommerce_price ?? 0, listed)) {
         return f
       }
       return {
         ...f,
         ecommerce_price: listed,
-        prices: {
-          ...f.prices,
-          1: {
-            ...(p1 ?? { price: 0, currency_id: null, status: 1 }),
-            price: listed,
-            currency_id: cur ?? p1?.currency_id ?? null,
-            status: p1?.status ?? 1,
-          },
-        },
       }
     })
   }, [
@@ -1758,7 +1729,6 @@ export function ProductsPage() {
     form.price,
     form.ecommerce_discount_type,
     form.ecommerce_discount_value,
-    form.ecommerce_currency_id,
   ])
 
   const defaultCurrencyId = useMemo(() => {
@@ -1844,15 +1814,7 @@ export function ProductsPage() {
       if (settings && typeof settings === 'object' && settings.calculations) {
         try {
           const calcs: CalculationRule[] = JSON.parse(settings.calculations)
-          const rules = Array.isArray(calcs)
-            ? calcs
-                .filter((c) => c && c.source === 'price' && c.target)
-                .map((c) => ({
-                  ...c,
-                  target: String(c.target === 'ecommerce_price' ? '1' : c.target),
-                  operations: Array.isArray(c.operations) ? c.operations : [],
-                }))
-            : []
+          const rules = normalizeCalculationRules(calcs)
           setCalculationRules(rules)
         } catch {
           setCalculationRules([])
@@ -1949,44 +1911,22 @@ export function ProductsPage() {
     setForm((f) => {
       const curId = f.currency_id || f.ecommerce_currency_id
       const brandId = typeof f.brand_id === 'number' ? f.brand_id : null
-      const priceRule = findRuleForBrand(calculationRules, 'price', brandId)
-      const effectivePrice =
-        !skipSameTargetRule && priceRule?.source === 'price' && priceRule?.operations?.length
-          ? applyCalculation(value, priceRule.operations)
-          : value
-      const prices = { ...f.prices }
-      if (calculationRules.length > 0) {
-        const sortedTypes = [...priceTypes].sort((a, b) => a.id - b.id)
-        for (const pt of sortedTypes) {
-          const targetId = pt.id
-          if (targetId < 1) continue
-          const rule = findRuleForBrand(calculationRules, String(targetId), brandId)
-          if (!rule || !rule.operations?.length) continue
-          const sourceVal = rule.source === 'price' ? effectivePrice : (prices[Number(rule.source)]?.price ?? effectivePrice)
-          const computed = applyCalculation(sourceVal, rule.operations)
-          const ruleCurrencyId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : null
-          const priceCurrencyId = ruleCurrencyId ?? (curId ? Number(curId) : null)
-          const existing = prices[targetId]
-          prices[targetId] = {
-            ...(existing ?? { price: 0, currency_id: null, status: 1 }),
-            price: computed,
-            currency_id: priceCurrencyId,
-          }
-        }
-      }
+      const categoryId = typeof f.category_id === 'number' ? f.category_id : null
+      const effectivePrice = value
+      const prices = skipSameTargetRule
+        ? { ...f.prices }
+        : applyCalculationRulesToPrices({
+            basePrice: effectivePrice,
+            baseCurrencyId: curId ? Number(curId) : null,
+            prices: f.prices,
+            rules: calculationRules,
+            targets: priceTypes.map((pt) => pt.id).filter((id) => id > 0),
+            brandId,
+            categoryId,
+          })
       const discType = f.ecommerce_discount_type === 1 ? 1 : 0
       const discVal = Number(f.ecommerce_discount_value) || 0
       const ecomFromDisc = computeEcommerceListPriceFromGeneral(effectivePrice, discType, discVal)
-      const ecomCur =
-        f.ecommerce_currency_id !== '' && f.ecommerce_currency_id != null
-          ? Number(f.ecommerce_currency_id)
-          : (prices[1]?.currency_id ?? (curId ? Number(curId) : null))
-      prices[1] = {
-        ...(prices[1] ?? { price: 0, currency_id: null, status: 1 }),
-        price: ecomFromDisc,
-        currency_id: ecomCur,
-        status: prices[1]?.status ?? 1,
-      }
       return {
         ...f,
         price: effectivePrice,
@@ -2084,13 +2024,8 @@ export function ProductsPage() {
         typeof product?.ecommerce_discount_value === 'number' && Number.isFinite(product.ecommerce_discount_value)
           ? product.ecommerce_discount_value
           : parseFloat(String(product?.ecommerce_discount_value ?? '0')) || 0
-      const listedOpen = computeEcommerceListPriceFromGeneral(basePrice, discTypeOpen, discValOpen)
-      pricesMap[1] = {
-        ...(pricesMap[1] ?? { price: 0, currency_id: null, status: 1 }),
-        price: listedOpen,
-        currency_id: pricesMap[1]?.currency_id ?? itemEcomCur ?? null,
-        status: pricesMap[1]?.status ?? 1,
-      }
+      const effectiveBasePrice = product?.price ?? basePrice
+      const listedOpen = computeEcommerceListPriceFromGeneral(effectiveBasePrice, discTypeOpen, discValOpen)
       suppressSupplierPriceLookupToastsRef.current = true
       setForm({
         name: product?.name ?? item.name,
@@ -2106,7 +2041,7 @@ export function ProductsPage() {
         quantity: product?.quantity ?? item.quantity ?? 0,
         ecommerce_discount_type: discTypeOpen,
         ecommerce_discount_value: discValOpen,
-        ecommerce_price: listedOpen,
+        ecommerce_price: itemEcomPrice ?? listedOpen,
         ecommerce_currency_id: (itemEcomCur ?? item.currency_id ?? defCur) || null,
         prices: pricesMap,
         images: parseImageToArray(product?.image ?? item.image),
@@ -2337,12 +2272,6 @@ export function ProductsPage() {
           : undefined
       const mergedPrices: Record<number, { price: number; currency_id: number | null; status: number }> = {
         ...(form.prices || {}),
-      }
-      mergedPrices[1] = {
-        ...(mergedPrices[1] ?? { price: 0, currency_id: null, status: 1 }),
-        price: computedEcommercePrice,
-        currency_id: ecomCurSubmit ?? null,
-        status: mergedPrices[1]?.status ?? 1,
       }
       const pricesPayload = Object.entries(mergedPrices).map(([priceTypeId, p]) => ({
         price_type_id: Number(priceTypeId),

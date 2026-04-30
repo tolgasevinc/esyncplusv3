@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -8,8 +8,10 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
 import { Label } from '@/components/ui/label'
+import { toastError, toastSuccess } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { buildIdeasoftProductCategoryBreadcrumbs } from './ideasoft2-product-category-breadcrumb'
 import {
@@ -22,7 +24,44 @@ import {
   formatMoneyTr,
 } from './ideasoft2-product-detail-pricing'
 
-type ActivePanel = 'genel' | 'fiyatlar'
+type ActivePanel = 'genel' | 'fiyatlar' | 'urunOzellikleri' | 'ozelBilgi' | 'tumAlanlar'
+export type Ideasoft2ProductDetailInitialPanel = ActivePanel
+export type Ideasoft2ProductDetailFocusField = 'specialTitle' | 'specialContent'
+type SpecialContentMode = 'normal' | 'html'
+const DEFAULT_SPECIAL_TITLE = 'Teknik Özellikler'
+
+type FieldRow = {
+  path: string
+  value: string
+}
+
+interface ProductExtraInfoRow {
+  id: number
+  value?: unknown
+  extraInfo?: { id?: number; name?: unknown; sortOrder?: number }
+}
+
+interface ProductExtraFieldRow {
+  id: number
+  varKey?: unknown
+  varValue?: unknown
+}
+
+interface ProductSpecialInfoRow {
+  id: number
+  title?: unknown
+  content?: unknown
+  status?: unknown
+  product?: Record<string, unknown>
+}
+
+interface ProductDetailRow {
+  id: number
+  sku?: string
+  details?: unknown
+  extraDetails?: unknown
+  product?: Record<string, unknown>
+}
 
 function formatStockOneLine(p: Record<string, unknown>): string {
   const sa = p.stockAmount
@@ -34,6 +73,125 @@ function formatStockOneLine(p: Record<string, unknown>): string {
   return `${n.toLocaleString('tr-TR', { maximumFractionDigits: 4 })} ${u}`
 }
 
+function formatRawFieldValue(value: unknown): string {
+  if (value == null) return 'null'
+  if (typeof value === 'string') return value.trim() || '""'
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function flattenRawFields(value: unknown, prefix = ''): FieldRow[] {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [{ path: prefix, value: '[]' }]
+    return value.flatMap((item, index) => flattenRawFields(item, `${prefix}[${index}]`))
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length === 0) return [{ path: prefix, value: '{}' }]
+    return entries.flatMap(([key, child]) => {
+      const nextPrefix = prefix ? `${prefix}.${key}` : key
+      return flattenRawFields(child, nextPrefix)
+    })
+  }
+  return [{ path: prefix || 'value', value: formatRawFieldValue(value) }]
+}
+
+function readStringFieldFromObject(raw: unknown, key: string): string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return ''
+  const value = (raw as Record<string, unknown>)[key]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function readRecordArrayField(raw: unknown, key: string): Record<string, unknown>[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  const value = (raw as Record<string, unknown>)[key]
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is Record<string, unknown> =>
+          item != null && typeof item === 'object' && !Array.isArray(item)
+      )
+    : []
+}
+
+function displayFeatureText(raw: unknown): string {
+  if (raw == null) return '—'
+  if (typeof raw === 'string') return raw.trim() || '—'
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw)
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>
+    for (const key of ['title', 'name', 'value', 'label', 'id'] as const) {
+      const v = o[key]
+      if (v != null && String(v).trim()) return String(v)
+    }
+  }
+  return formatRawFieldValue(raw)
+}
+
+function specialTitleDraftValue(value: unknown): string {
+  const title = typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+  return title || DEFAULT_SPECIAL_TITLE
+}
+
+function extractExtraInfoList(json: unknown): ProductExtraInfoRow[] {
+  if (Array.isArray(json)) return json as ProductExtraInfoRow[]
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydra = o['hydra:member']
+    if (Array.isArray(hydra)) return hydra as ProductExtraInfoRow[]
+    const member = o.member
+    if (Array.isArray(member)) return member as ProductExtraInfoRow[]
+    if (Array.isArray(o.data)) return o.data as ProductExtraInfoRow[]
+    if (Array.isArray(o.items)) return o.items as ProductExtraInfoRow[]
+  }
+  return []
+}
+
+function extractExtraFieldList(json: unknown): ProductExtraFieldRow[] {
+  if (Array.isArray(json)) return json as ProductExtraFieldRow[]
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydra = o['hydra:member']
+    if (Array.isArray(hydra)) return hydra as ProductExtraFieldRow[]
+    const member = o.member
+    if (Array.isArray(member)) return member as ProductExtraFieldRow[]
+    if (Array.isArray(o.data)) return o.data as ProductExtraFieldRow[]
+    if (Array.isArray(o.items)) return o.items as ProductExtraFieldRow[]
+  }
+  return []
+}
+
+function extractSpecialInfoList(json: unknown): ProductSpecialInfoRow[] {
+  if (Array.isArray(json)) return json as ProductSpecialInfoRow[]
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydra = o['hydra:member']
+    if (Array.isArray(hydra)) return hydra as ProductSpecialInfoRow[]
+    const member = o.member
+    if (Array.isArray(member)) return member as ProductSpecialInfoRow[]
+    if (Array.isArray(o.data)) return o.data as ProductSpecialInfoRow[]
+    if (Array.isArray(o.items)) return o.items as ProductSpecialInfoRow[]
+  }
+  return []
+}
+
+function extractProductDetailList(json: unknown): ProductDetailRow[] {
+  if (Array.isArray(json)) return json as ProductDetailRow[]
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydra = o['hydra:member']
+    if (Array.isArray(hydra)) return hydra as ProductDetailRow[]
+    const member = o.member
+    if (Array.isArray(member)) return member as ProductDetailRow[]
+    if (Array.isArray(o.data)) return o.data as ProductDetailRow[]
+    if (Array.isArray(o.items)) return o.items as ProductDetailRow[]
+  }
+  return []
+}
+
 interface Ideasoft2ProductDetailModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -41,6 +199,10 @@ interface Ideasoft2ProductDetailModalProps {
   listPreviewName?: string
   /** Master ürün id (liste sayfası SKU eşleşmesi). Yoksa aynı SKU ile `by-sku` denenir. */
   masterProductId?: number | null
+  initialPanel?: Ideasoft2ProductDetailInitialPanel
+  focusField?: Ideasoft2ProductDetailFocusField | null
+  specialInfoOnly?: boolean
+  onSpecialInfoSaved?: (productId: number) => void
 }
 
 export function Ideasoft2ProductDetailModal({
@@ -49,9 +211,14 @@ export function Ideasoft2ProductDetailModal({
   productId,
   listPreviewName,
   masterProductId: masterProductIdProp = null,
+  initialPanel = 'genel',
+  focusField = null,
+  specialInfoOnly = false,
+  onSpecialInfoSaved,
 }: Ideasoft2ProductDetailModalProps) {
   const [activePanel, setActivePanel] = useState<ActivePanel>('genel')
   const [genel, setGenel] = useState<Record<string, unknown> | null>(null)
+  const [productDetailItems, setProductDetailItems] = useState<ProductDetailRow[]>([])
   const [kategoriBreadcrumb, setKategoriBreadcrumb] = useState('—')
   const [genelLoading, setGenelLoading] = useState(false)
   const [genelError, setGenelError] = useState<string | null>(null)
@@ -64,10 +231,21 @@ export function Ideasoft2ProductDetailModal({
   const [discountKind, setDiscountKind] = useState<'percent' | 'fixed'>('percent')
   const lastMasterLoadKey = useRef<string | null>(null)
 
+  const [extraInfoItems, setExtraInfoItems] = useState<ProductExtraInfoRow[]>([])
+  const [extraFieldItems, setExtraFieldItems] = useState<ProductExtraFieldRow[]>([])
+  const [specialInfoItems, setSpecialInfoItems] = useState<ProductSpecialInfoRow[]>([])
+  const [specialInfoDrafts, setSpecialInfoDrafts] = useState<Record<string, { title: string; content: string }>>({})
+  const [specialInfoSavingKey, setSpecialInfoSavingKey] = useState<string | null>(null)
+  const [specialContentMode, setSpecialContentMode] = useState<SpecialContentMode>('normal')
+  const [extraInfoLoading, setExtraInfoLoading] = useState(false)
+  const [extraInfoError, setExtraInfoError] = useState<string | null>(null)
+  const fetchedExtraInfoId = useRef<number | null>(null)
+
   useEffect(() => {
     if (!open) return
-    setActivePanel('genel')
+    setActivePanel(specialInfoOnly ? 'ozelBilgi' : initialPanel)
     setGenel(null)
+    setProductDetailItems([])
     setKategoriBreadcrumb('—')
     setGenelError(null)
     fetchedGenelId.current = null
@@ -75,22 +253,43 @@ export function Ideasoft2ProductDetailModal({
     setMasterError(null)
     setMasterLoading(false)
     lastMasterLoadKey.current = null
+    setExtraInfoItems([])
+    setExtraFieldItems([])
+    setSpecialInfoItems([])
+    setSpecialInfoDrafts({})
+    setSpecialInfoSavingKey(null)
+    setSpecialContentMode('normal')
+    setExtraInfoError(null)
+    setExtraInfoLoading(false)
+    fetchedExtraInfoId.current = null
     setDiscountInput('')
     setDiscountKind('percent')
-  }, [open, productId])
+  }, [open, productId, initialPanel, specialInfoOnly])
 
   const loadGenel = useCallback(async (id: number) => {
     setGenelLoading(true)
     setGenelError(null)
     setGenel(null)
+    setProductDetailItems([])
     setKategoriBreadcrumb('—')
     try {
-      const res = await fetch(`${API_URL}/api/ideasoft/admin-api/products/${id}`)
+      const detailParams = new URLSearchParams({
+        product: String(id),
+        limit: '100',
+        page: '1',
+        sort: 'id',
+      })
+      const [res, productDetailsRes] = await Promise.all([
+        fetch(`${API_URL}/api/ideasoft/admin-api/products/${id}`),
+        fetch(`${API_URL}/api/ideasoft/admin-api/product_details?${detailParams}`),
+      ])
       const data = await parseJsonResponse<Record<string, unknown> & { error?: string; hint?: string }>(res)
+      const productDetailsData = await parseJsonResponse<unknown>(productDetailsRes)
       if (!res.ok) {
         throw new Error(formatIdeasoftProxyErrorForUi(data) || 'Ürün yüklenemedi')
       }
       setGenel(data)
+      setProductDetailItems(productDetailsRes.ok ? extractProductDetailList(productDetailsData) : [])
       const k = await buildIdeasoftProductCategoryBreadcrumbs(data)
       setKategoriBreadcrumb(k)
     } catch (e) {
@@ -100,10 +299,76 @@ export function Ideasoft2ProductDetailModal({
     }
   }, [])
 
+  const loadExtraInfo = useCallback(async (id: number) => {
+    setExtraInfoLoading(true)
+    setExtraInfoError(null)
+    setExtraInfoItems([])
+    setExtraFieldItems([])
+    setSpecialInfoItems([])
+    try {
+      const params = new URLSearchParams({
+        product: String(id),
+        limit: '100',
+        page: '1',
+        sort: 'id',
+      })
+      const [specialRes, infoRes, fieldRes] = await Promise.all([
+        fetch(`${API_URL}/api/ideasoft/admin-api/product_special_infos?${params}`),
+        fetch(`${API_URL}/api/ideasoft/admin-api/extra_info_to_products?${params}`),
+        fetch(`${API_URL}/api/ideasoft/admin-api/product_extra_fields?${params}`),
+      ])
+      const [specialData, infoData, fieldData] = await Promise.all([
+        parseJsonResponse<unknown>(specialRes),
+        parseJsonResponse<unknown>(infoRes),
+        parseJsonResponse<unknown>(fieldRes),
+      ])
+      if (!specialRes.ok) {
+        throw new Error(
+          formatIdeasoftProxyErrorForUi(specialData as { error?: string; hint?: string }) ||
+            'Özel bilgi alanı yüklenemedi'
+        )
+      }
+      if (!infoRes.ok) {
+        throw new Error(
+          formatIdeasoftProxyErrorForUi(infoData as { error?: string; hint?: string }) ||
+            'Özel bilgi yüklenemedi'
+        )
+      }
+      if (!fieldRes.ok) {
+        throw new Error(
+          formatIdeasoftProxyErrorForUi(fieldData as { error?: string; hint?: string }) ||
+            'Ürün ekstra alanları yüklenemedi'
+        )
+      }
+      const specialRows = extractSpecialInfoList(specialData)
+      setSpecialInfoItems(specialRows)
+      setSpecialInfoDrafts(
+        specialRows.length > 0
+          ? Object.fromEntries(
+              specialRows.map((row) => [
+                String(row.id),
+                {
+                  title: specialTitleDraftValue(row.title),
+                  content: typeof row.content === 'string' ? row.content : String(row.content ?? ''),
+                },
+              ])
+            )
+          : { new: { title: DEFAULT_SPECIAL_TITLE, content: '' } }
+      )
+      setExtraInfoItems(extractExtraInfoList(infoData))
+      setExtraFieldItems(extractExtraFieldList(fieldData))
+    } catch (e) {
+      setExtraInfoError(e instanceof Error ? e.message : 'Özel bilgi yüklenemedi')
+    } finally {
+      setExtraInfoLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     if (!open) {
-      setActivePanel('genel')
+      setActivePanel(specialInfoOnly ? 'ozelBilgi' : 'genel')
       setGenel(null)
+      setProductDetailItems([])
       setKategoriBreadcrumb('—')
       setGenelError(null)
       setGenelLoading(false)
@@ -111,13 +376,77 @@ export function Ideasoft2ProductDetailModal({
       setMaster(null)
       setMasterError(null)
       lastMasterLoadKey.current = null
+      setExtraInfoItems([])
+      setExtraFieldItems([])
+      setSpecialInfoItems([])
+      setSpecialInfoDrafts({})
+      setSpecialInfoSavingKey(null)
+      setSpecialContentMode('normal')
+      setExtraInfoError(null)
+      setExtraInfoLoading(false)
+      fetchedExtraInfoId.current = null
       return
     }
     if (productId == null) return
     if (fetchedGenelId.current === productId) return
     fetchedGenelId.current = productId
     void loadGenel(productId)
-  }, [open, productId, loadGenel])
+  }, [open, productId, loadGenel, specialInfoOnly])
+
+  useEffect(() => {
+    if (
+      !open ||
+      (activePanel !== 'ozelBilgi' && activePanel !== 'tumAlanlar' && !specialInfoOnly) ||
+      productId == null
+    ) return
+    if (fetchedExtraInfoId.current === productId) return
+    fetchedExtraInfoId.current = productId
+    void loadExtraInfo(productId)
+  }, [open, activePanel, productId, loadExtraInfo, specialInfoOnly])
+
+  const saveSpecialInfo = useCallback(
+    async (row: ProductSpecialInfoRow | null) => {
+      if (productId == null) return
+      const key = row ? String(row.id) : 'new'
+      const draft = specialInfoDrafts[key] ?? { title: '', content: '' }
+      setSpecialInfoSavingKey(key)
+      try {
+        const title = draft.title.trim() || DEFAULT_SPECIAL_TITLE
+        const payload = {
+          ...(row ?? {}),
+          title,
+          content: draft.content,
+          status: row?.status ?? 1,
+          product: row?.product ?? { id: productId },
+        }
+        const res = await fetch(
+          row
+            ? `${API_URL}/api/ideasoft/admin-api/product_special_infos/${row.id}`
+            : `${API_URL}/api/ideasoft/admin-api/product_special_infos`,
+          {
+            method: row ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }
+        )
+        const data = await parseJsonResponse<unknown>(res)
+        if (!res.ok) {
+          throw new Error(
+            formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) ||
+              'Özel bilgi kaydedilemedi'
+          )
+        }
+        toastSuccess('Özel bilgi kaydedildi')
+        onSpecialInfoSaved?.(productId)
+        onOpenChange(false)
+      } catch (e) {
+        toastError('Özel bilgi kaydedilemedi', e)
+      } finally {
+        setSpecialInfoSavingKey(null)
+      }
+    },
+    [onOpenChange, onSpecialInfoSaved, productId, specialInfoDrafts]
+  )
 
   const loadMasterForFiyat = useCallback(
     async (idHint: number | null, sku: string) => {
@@ -187,21 +516,62 @@ export function Ideasoft2ProductDetailModal({
     masterBase != null
       ? priceAfterUserDiscount(masterBase, discountInput, discountKind)
       : null
+  const selectionGroups = useMemo(() => readRecordArrayField(genel, 'selectionGroups'), [genel])
+  const optionGroups = useMemo(() => readRecordArrayField(genel, 'optionGroups'), [genel])
+  const rawFieldRows = useMemo(() => {
+    const rows = genel ? flattenRawFields(genel) : []
+    const productDetailRows = productDetailItems.flatMap((item, index) =>
+      flattenRawFields(item, `product_details[${index}]`)
+    )
+    const specialRows = specialInfoItems.flatMap((item, index) =>
+      flattenRawFields(item, `product_special_infos[${index}]`)
+    )
+    return [...rows, ...productDetailRows, ...specialRows]
+  }, [genel, productDetailItems, specialInfoItems])
+  const firstProductDetail = productDetailItems[0]
+  const productDetailsDetails =
+    typeof firstProductDetail?.details === 'string' ? firstProductDetail.details.trim() : ''
+  const productDetailsExtraDetails =
+    typeof firstProductDetail?.extraDetails === 'string' ? firstProductDetail.extraDetails.trim() : ''
+  const detailDetails = productDetailsDetails || (genel ? readStringFieldFromObject(genel.detail, 'details') : '')
+  const detailExtraDetails =
+    productDetailsExtraDetails || (genel ? readStringFieldFromObject(genel.detail, 'extraDetails') : '')
+  const visibleRawFieldRows = useMemo(() => {
+    const byPath = new Map(rawFieldRows.map((row) => [row.path, row]))
+    if (!byPath.has('product_details[0].details')) {
+      byPath.set('product_details[0].details', {
+        path: 'product_details[0].details',
+        value: detailDetails || '—',
+      })
+    }
+    if (!byPath.has('product_details[0].extraDetails')) {
+      byPath.set('product_details[0].extraDetails', {
+        path: 'product_details[0].extraDetails',
+        value: detailExtraDetails || '—',
+      })
+    }
+    return [...byPath.values()]
+  }, [detailDetails, detailExtraDetails, rawFieldRows])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl max-h-[min(90vh,720px)] flex flex-col">
+      <DialogContent className="max-w-4xl max-h-[min(90vh,760px)] flex flex-col">
         <DialogHeader className="shrink-0 text-left">
           <DialogTitle className="line-clamp-2">
-            {genel
-              ? displayName
-              : (listPreviewName || '').trim() || 'IdeaSoft ürünü'}
+            {specialInfoOnly
+              ? focusField === 'specialTitle'
+                ? 'Özel Bilgi Başlığı'
+                : 'Özel Bilgi İçeriği'
+              : genel
+                ? displayName
+                : (listPreviewName || '').trim() || 'IdeaSoft ürünü'}
           </DialogTitle>
           {productId != null ? (
             <DialogDescription className="font-mono text-xs">IdeaSoft ürün #{productId}</DialogDescription>
           ) : null}
         </DialogHeader>
 
+        {!specialInfoOnly ? (
         <div className="flex shrink-0 gap-1 border-b border-border p-0.5" aria-label="Ürün detay bölümleri">
           <Button
             type="button"
@@ -229,7 +599,47 @@ export function Ideasoft2ProductDetailModal({
           >
             Fiyatlar
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'rounded-b-none border-b-2 border-transparent px-3',
+              activePanel === 'urunOzellikleri' && 'border-primary bg-muted/40 text-foreground'
+            )}
+            aria-pressed={activePanel === 'urunOzellikleri'}
+            onClick={() => setActivePanel('urunOzellikleri')}
+          >
+            Ürün Özellikleri
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'rounded-b-none border-b-2 border-transparent px-3',
+              activePanel === 'ozelBilgi' && 'border-primary bg-muted/40 text-foreground'
+            )}
+            aria-pressed={activePanel === 'ozelBilgi'}
+            onClick={() => setActivePanel('ozelBilgi')}
+          >
+            Özel Bilgi
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'rounded-b-none border-b-2 border-transparent px-3',
+              activePanel === 'tumAlanlar' && 'border-primary bg-muted/40 text-foreground'
+            )}
+            aria-pressed={activePanel === 'tumAlanlar'}
+            onClick={() => setActivePanel('tumAlanlar')}
+          >
+            Tüm Alanlar
+          </Button>
         </div>
+        ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto text-sm">
           {activePanel === 'genel' && genelLoading && (
@@ -263,6 +673,30 @@ export function Ideasoft2ProductDetailModal({
                 <p className="text-foreground leading-snug break-words whitespace-pre-line">
                   {kategoriBreadcrumb}
                 </p>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">
+                  Detay açıklama <code>product_details[0].details</code>
+                </Label>
+                {detailDetails ? (
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/30 p-3 font-mono text-xs leading-relaxed text-foreground">
+                    {detailDetails}
+                  </pre>
+                ) : (
+                  <p className="text-muted-foreground">—</p>
+                )}
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">
+                  Ekstra detaylar <code>product_details[0].extraDetails</code>
+                </Label>
+                {detailExtraDetails ? (
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/30 p-3 font-mono text-xs leading-relaxed text-foreground">
+                    {detailExtraDetails}
+                  </pre>
+                ) : (
+                  <p className="text-muted-foreground">—</p>
+                )}
               </div>
             </div>
           )}
@@ -372,6 +806,516 @@ export function Ideasoft2ProductDetailModal({
                   </div>
                 ) : null}
               </div>
+            </div>
+          )}
+
+          {activePanel === 'urunOzellikleri' && genelLoading && (
+            <p className="text-muted-foreground">Ürün özellikleri yükleniyor…</p>
+          )}
+
+          {activePanel === 'urunOzellikleri' && !genelLoading && genelError && (
+            <p className="text-destructive">{genelError}</p>
+          )}
+
+          {activePanel === 'urunOzellikleri' && !genelLoading && !genelError && genel && (
+            <div className="space-y-5">
+              <div>
+                <h3 className="text-sm font-medium text-foreground">Ürün Özellikleri</h3>
+                <p className="text-xs text-muted-foreground">
+                  Bu sekme ürün detay yanıtındaki <code>selectionGroups</code> ve{' '}
+                  <code>optionGroups</code> alanlarını gösterir.
+                </p>
+              </div>
+
+              {selectionGroups.length === 0 && optionGroups.length === 0 ? (
+                <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  Bu ürün için ürün özelliği veya varyant grubu yok.
+                </p>
+              ) : null}
+
+              {selectionGroups.length > 0 ? (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-medium text-muted-foreground">
+                    Ek özellik grupları (<code>selectionGroups</code>)
+                  </h4>
+                  {selectionGroups.map((group, groupIndex) => {
+                    const selections = readRecordArrayField(group, 'selections')
+                    return (
+                      <div key={`selection-${groupIndex}`} className="rounded-md border border-border bg-muted/20 p-3">
+                        <div className="mb-3">
+                          <Label className="text-[10px] text-muted-foreground">
+                            selectionGroups[{groupIndex}]
+                          </Label>
+                          <p className="font-medium text-foreground">
+                            {displayFeatureText(group.title ?? group.name ?? `Grup ${groupIndex + 1}`)}
+                          </p>
+                        </div>
+                        {selections.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full min-w-[560px] border-separate border-spacing-0 text-sm">
+                              <thead>
+                                <tr className="text-muted-foreground">
+                                  <th className="border-b border-border px-2 py-2 text-left font-medium">
+                                    Alan
+                                  </th>
+                                  <th className="border-b border-border px-2 py-2 text-left font-medium">
+                                    Değer
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {selections.map((selection, selectionIndex) => (
+                                  <tr key={selectionIndex} className="odd:bg-background/60">
+                                    <td className="border-b border-border/60 px-2 py-2 align-top font-mono text-xs text-muted-foreground">
+                                      selections[{selectionIndex}]
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 align-top">
+                                      <p className="text-foreground">
+                                        {displayFeatureText(
+                                          selection.title ?? selection.name ?? selection.value ?? selection.id
+                                        )}
+                                      </p>
+                                      <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+                                        {formatRawFieldValue(selection)}
+                                      </pre>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                            {formatRawFieldValue(group)}
+                          </pre>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : null}
+
+              {optionGroups.length > 0 ? (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-medium text-muted-foreground">
+                    Varyant grupları (<code>optionGroups</code>)
+                  </h4>
+                  {optionGroups.map((group, groupIndex) => {
+                    const options = readRecordArrayField(group, 'options')
+                    return (
+                      <div key={`option-${groupIndex}`} className="rounded-md border border-border bg-muted/20 p-3">
+                        <div className="mb-3">
+                          <Label className="text-[10px] text-muted-foreground">
+                            optionGroups[{groupIndex}]
+                          </Label>
+                          <p className="font-medium text-foreground">
+                            {displayFeatureText(group.title ?? group.name ?? `Varyant ${groupIndex + 1}`)}
+                          </p>
+                        </div>
+                        {options.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full min-w-[560px] border-separate border-spacing-0 text-sm">
+                              <thead>
+                                <tr className="text-muted-foreground">
+                                  <th className="border-b border-border px-2 py-2 text-left font-medium">
+                                    Alan
+                                  </th>
+                                  <th className="border-b border-border px-2 py-2 text-left font-medium">
+                                    Değer
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {options.map((option, optionIndex) => (
+                                  <tr key={optionIndex} className="odd:bg-background/60">
+                                    <td className="border-b border-border/60 px-2 py-2 align-top font-mono text-xs text-muted-foreground">
+                                      options[{optionIndex}]
+                                    </td>
+                                    <td className="border-b border-border/60 px-2 py-2 align-top">
+                                      <p className="text-foreground">
+                                        {displayFeatureText(option.title ?? option.name ?? option.value ?? option.id)}
+                                      </p>
+                                      <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+                                        {formatRawFieldValue(option)}
+                                      </pre>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                            {formatRawFieldValue(group)}
+                          </pre>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {activePanel === 'ozelBilgi' && extraInfoLoading && (
+            <p className="text-muted-foreground">Özel bilgi yükleniyor…</p>
+          )}
+
+          {activePanel === 'ozelBilgi' && !extraInfoLoading && extraInfoError && (
+            <p className="text-destructive">{extraInfoError}</p>
+          )}
+
+          {activePanel === 'ozelBilgi' && !extraInfoLoading && !extraInfoError && (
+            <div className="space-y-3">
+              {!specialInfoOnly ? (
+              <div>
+                <h3 className="text-sm font-medium text-foreground">Özel Bilgi</h3>
+                <p className="text-xs text-muted-foreground">
+                  Paneldeki Özel Bilgi Alanı <code>product_special_infos</code> kaynağından
+                  gelir. Diğer ekstra kaynaklar ayrıca aşağıda gösterilir.
+                </p>
+              </div>
+              ) : null}
+              {specialInfoItems.length === 0 &&
+              (!specialInfoOnly ? extraInfoItems.length === 0 && extraFieldItems.length === 0 : true) ? (
+                <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  Bu ürün için özel bilgi kaydı yok.
+                </p>
+              ) : null}
+              {specialInfoItems.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
+                    Özel Bilgi Alanı (<code>product_special_infos</code>)
+                  </h4>
+                  <div className="space-y-4">
+                    {specialInfoItems.map((item, index) => {
+                      const key = String(item.id)
+                      const draft = specialInfoDrafts[key] ?? {
+                        title: specialTitleDraftValue(item.title),
+                        content: typeof item.content === 'string' ? item.content : String(item.content ?? ''),
+                      }
+                      return (
+                        <div key={item.id} className="rounded-md border border-border bg-muted/20 p-3">
+                          <div className="mb-3 flex items-center justify-between gap-2">
+                            <p className="text-xs font-medium text-muted-foreground">
+                              Kayıt #{item.id} · <code>product_special_infos[{index}]</code>
+                            </p>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="save"
+                              onClick={() => void saveSpecialInfo(item)}
+                              disabled={specialInfoSavingKey === key}
+                            >
+                              {specialInfoSavingKey === key ? 'Kaydediliyor…' : 'Kaydet'}
+                            </Button>
+                          </div>
+                          <div className="grid gap-3">
+                            {!specialInfoOnly || focusField === 'specialTitle' ? (
+                            <div className="grid gap-1.5">
+                              <Label htmlFor={`special-title-${item.id}`} className="text-xs text-muted-foreground">
+                                Başlık <code>title</code>
+                              </Label>
+                              <Input
+                                id={`special-title-${item.id}`}
+                                value={draft.title}
+                                autoFocus={focusField === 'specialTitle' && index === 0}
+                                onChange={(e) =>
+                                  setSpecialInfoDrafts((prev) => ({
+                                    ...prev,
+                                    [key]: { ...draft, title: e.target.value },
+                                  }))
+                                }
+                              />
+                            </div>
+                            ) : null}
+                            {!specialInfoOnly || focusField === 'specialContent' ? (
+                            <div className="grid gap-1.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <Label htmlFor={`special-content-${item.id}`} className="text-xs text-muted-foreground">
+                                  İçerik <code>content</code>
+                                </Label>
+                                <div className="inline-flex rounded-md border border-border bg-background p-0.5">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant={specialContentMode === 'normal' ? 'secondary' : 'ghost'}
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => setSpecialContentMode('normal')}
+                                  >
+                                    Normal
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant={specialContentMode === 'html' ? 'secondary' : 'ghost'}
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => setSpecialContentMode('html')}
+                                  >
+                                    HTML
+                                  </Button>
+                                </div>
+                              </div>
+                              {specialContentMode === 'html' ? (
+                                <Textarea
+                                  id={`special-content-${item.id}`}
+                                  value={draft.content}
+                                  autoFocus={focusField === 'specialContent' && index === 0}
+                                  className="min-h-40 font-mono text-xs"
+                                  onChange={(e) =>
+                                    setSpecialInfoDrafts((prev) => ({
+                                      ...prev,
+                                      [key]: { ...draft, content: e.target.value },
+                                    }))
+                                  }
+                                />
+                              ) : (
+                                <div
+                                  id={`special-content-${item.id}`}
+                                  role="textbox"
+                                  tabIndex={0}
+                                  contentEditable
+                                  suppressContentEditableWarning
+                                  className="min-h-40 overflow-auto rounded-md border border-input bg-background px-3 py-2 text-sm leading-relaxed ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  dangerouslySetInnerHTML={{ __html: draft.content }}
+                                  onBlur={(e) =>
+                                    setSpecialInfoDrafts((prev) => ({
+                                      ...prev,
+                                      [key]: { ...draft, content: e.currentTarget.innerHTML },
+                                    }))
+                                  }
+                                />
+                              )}
+                            </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : null}
+              {specialInfoItems.length === 0 ? (
+                <div className="rounded-md border border-border bg-muted/20 p-3">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Yeni kayıt · <code>product_special_infos</code>
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="save"
+                      onClick={() => void saveSpecialInfo(null)}
+                      disabled={specialInfoSavingKey === 'new'}
+                    >
+                      {specialInfoSavingKey === 'new' ? 'Kaydediliyor…' : 'Kaydet'}
+                    </Button>
+                  </div>
+                  <div className="grid gap-3">
+                    {!specialInfoOnly || focusField === 'specialTitle' ? (
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="special-title-new" className="text-xs text-muted-foreground">
+                        Başlık <code>title</code>
+                      </Label>
+                      <Input
+                        id="special-title-new"
+                        value={specialInfoDrafts.new?.title ?? DEFAULT_SPECIAL_TITLE}
+                        autoFocus={focusField === 'specialTitle'}
+                        onChange={(e) =>
+                          setSpecialInfoDrafts((prev) => ({
+                            ...prev,
+                            new: { title: e.target.value, content: prev.new?.content ?? '' },
+                          }))
+                        }
+                      />
+                    </div>
+                    ) : null}
+                    {!specialInfoOnly || focusField === 'specialContent' ? (
+                    <div className="grid gap-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Label htmlFor="special-content-new" className="text-xs text-muted-foreground">
+                          İçerik <code>content</code>
+                        </Label>
+                        <div className="inline-flex rounded-md border border-border bg-background p-0.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={specialContentMode === 'normal' ? 'secondary' : 'ghost'}
+                            className="h-7 px-2 text-xs"
+                            onClick={() => setSpecialContentMode('normal')}
+                          >
+                            Normal
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={specialContentMode === 'html' ? 'secondary' : 'ghost'}
+                            className="h-7 px-2 text-xs"
+                            onClick={() => setSpecialContentMode('html')}
+                          >
+                            HTML
+                          </Button>
+                        </div>
+                      </div>
+                      {specialContentMode === 'html' ? (
+                        <Textarea
+                          id="special-content-new"
+                          value={specialInfoDrafts.new?.content ?? ''}
+                          autoFocus={focusField === 'specialContent'}
+                          className="min-h-40 font-mono text-xs"
+                          onChange={(e) =>
+                            setSpecialInfoDrafts((prev) => ({
+                              ...prev,
+                              new: { title: prev.new?.title ?? DEFAULT_SPECIAL_TITLE, content: e.target.value },
+                            }))
+                          }
+                        />
+                      ) : (
+                        <div
+                          id="special-content-new"
+                          role="textbox"
+                          tabIndex={0}
+                          contentEditable
+                          suppressContentEditableWarning
+                          className="min-h-40 overflow-auto rounded-md border border-input bg-background px-3 py-2 text-sm leading-relaxed ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          dangerouslySetInnerHTML={{ __html: specialInfoDrafts.new?.content ?? '' }}
+                          onBlur={(e) =>
+                            setSpecialInfoDrafts((prev) => ({
+                              ...prev,
+                              new: {
+                                title: prev.new?.title ?? DEFAULT_SPECIAL_TITLE,
+                                content: e.currentTarget.innerHTML,
+                              },
+                            }))
+                          }
+                        />
+                      )}
+                    </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+              {!specialInfoOnly && extraInfoItems.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
+                    ExtraInfo ürün bağları (<code>extra_info_to_products</code>)
+                  </h4>
+                  <table className="w-full min-w-[640px] border-separate border-spacing-0 text-sm">
+                    <thead>
+                      <tr className="text-muted-foreground">
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          Başlık
+                        </th>
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          İçerik
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {extraInfoItems.map((item) => {
+                        const title = formatRawFieldValue(item.extraInfo?.name)
+                        const content = formatRawFieldValue(item.value)
+                        return (
+                          <tr key={item.id} className="odd:bg-muted/20">
+                            <td className="border-b border-border/60 px-2 py-2 align-top">
+                              <Label className="mb-1 block text-[10px] text-muted-foreground">
+                                extraInfo.name
+                              </Label>
+                              <p className="whitespace-pre-wrap break-words text-foreground">{title}</p>
+                            </td>
+                            <td className="border-b border-border/60 px-2 py-2 align-top">
+                              <Label className="mb-1 block text-[10px] text-muted-foreground">
+                                value
+                              </Label>
+                              <p className="whitespace-pre-wrap break-words text-foreground">{content}</p>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              {!specialInfoOnly && extraFieldItems.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <h4 className="mb-2 text-xs font-medium text-muted-foreground">
+                    Ürün ekstra alanları (<code>product_extra_fields</code>)
+                  </h4>
+                  <table className="w-full min-w-[640px] border-separate border-spacing-0 text-sm">
+                    <thead>
+                      <tr className="text-muted-foreground">
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          Başlık
+                        </th>
+                        <th className="border-b border-border px-2 py-2 text-left font-medium">
+                          İçerik
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {extraFieldItems.map((item) => {
+                        const title = formatRawFieldValue(item.varKey)
+                        const content = formatRawFieldValue(item.varValue)
+                        return (
+                          <tr key={item.id} className="odd:bg-muted/20">
+                            <td className="border-b border-border/60 px-2 py-2 align-top">
+                              <Label className="mb-1 block text-[10px] text-muted-foreground">
+                                varKey
+                              </Label>
+                              <p className="whitespace-pre-wrap break-words text-foreground">{title}</p>
+                            </td>
+                            <td className="border-b border-border/60 px-2 py-2 align-top">
+                              <Label className="mb-1 block text-[10px] text-muted-foreground">
+                                varValue
+                              </Label>
+                              <p className="whitespace-pre-wrap break-words text-foreground">{content}</p>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {activePanel === 'tumAlanlar' && genelLoading && (
+            <p className="text-muted-foreground">Yükleniyor…</p>
+          )}
+
+          {activePanel === 'tumAlanlar' && !genelLoading && genelError && (
+            <p className="text-destructive">{genelError}</p>
+          )}
+
+          {activePanel === 'tumAlanlar' && !genelLoading && !genelError && genel && (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] border-separate border-spacing-0 text-xs">
+                <thead>
+                  <tr className="text-muted-foreground">
+                    <th className="sticky top-0 z-10 w-[260px] border-b border-border bg-background px-2 py-2 text-left font-medium">
+                      Orijinal alan adı
+                    </th>
+                    <th className="sticky top-0 z-10 border-b border-border bg-background px-2 py-2 text-left font-medium">
+                      Değer
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRawFieldRows.map((field) => (
+                    <tr key={field.path} className="border-b border-border/70 odd:bg-muted/20">
+                      <td className="border-b border-border/60 px-2 py-2 align-top font-mono text-muted-foreground">
+                        {field.path}
+                      </td>
+                      <td className="border-b border-border/60 px-2 py-2 align-top">
+                        <pre className="max-h-40 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
+                          {field.value}
+                        </pre>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

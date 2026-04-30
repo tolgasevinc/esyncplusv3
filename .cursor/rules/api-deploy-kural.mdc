@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+api tarafını etkileyen işlemler sonrasında api deploy et; npm run deploy:api çalıştır

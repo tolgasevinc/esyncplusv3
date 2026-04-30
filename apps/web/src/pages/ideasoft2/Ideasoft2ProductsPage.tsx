@@ -1,24 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { usePersistedListState } from '@/hooks/usePersistedListState'
-import { ImageIcon, Search, X, Banknote } from 'lucide-react'
+import { Banknote, CheckCircle2, Copy, ImageIcon, Search, X, XCircle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import { API_URL, formatIdeasoftProxyErrorForUi, parseJsonResponse } from '@/lib/api'
-import { toastSuccess } from '@/lib/toast'
+import { extractIdeasoftProductSearchKeywords } from '@/lib/ideasoft-product-seo'
+import { toastError, toastSuccess } from '@/lib/toast'
 import type { IdeasoftProductImageRow } from '@/pages/ideasoft/IdeasoftProductImagesPage'
 import { CategoryCascadeThreeSelects } from './ideasoft2-category-cascade'
-import { Ideasoft2ProductDetailModal } from './Ideasoft2ProductDetailModal'
+import {
+  Ideasoft2ProductDetailModal,
+  type Ideasoft2ProductDetailFocusField,
+  type Ideasoft2ProductDetailInitialPanel,
+} from './Ideasoft2ProductDetailModal'
 
 const FX_STORAGE_KEY = 'ideasoft2-fx-v1'
 
@@ -55,6 +70,21 @@ interface Ideasoft2ProductListRow {
   currency?: { id?: number; label?: string; abbr?: string }
 }
 
+interface Ideasoft2ProductSpecialInfoRow {
+  id: number
+  title?: unknown
+  content?: unknown
+  status?: unknown
+  product?: unknown
+}
+
+interface SpecialInfoStatus {
+  hasTitle: boolean
+  hasContent: boolean
+  titlePreview: string
+  contentPreview: string
+}
+
 const listDefaults = {
   search: '',
   categoryPath: [] as number[],
@@ -62,6 +92,8 @@ const listDefaults = {
   pageSize: 25 as PageSizeValue,
   fitLimit: 10,
 }
+
+const DEFAULT_SPECIAL_TITLE = 'Teknik Özellikler'
 
 /** `/api/ideasoft2/products` BFF alanı — katalog toplamı */
 function readEsyncListTotal(o: Record<string, unknown>): number | null {
@@ -128,6 +160,20 @@ function extractProductsList(json: unknown): { items: Ideasoft2ProductListRow[];
   return { items: [], total: 0 }
 }
 
+function extractSpecialInfoList(json: unknown): Ideasoft2ProductSpecialInfoRow[] {
+  if (Array.isArray(json)) return json as Ideasoft2ProductSpecialInfoRow[]
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>
+    const hydra = o['hydra:member']
+    if (Array.isArray(hydra)) return hydra as Ideasoft2ProductSpecialInfoRow[]
+    const member = o.member
+    if (Array.isArray(member)) return member as Ideasoft2ProductSpecialInfoRow[]
+    if (Array.isArray(o.data)) return o.data as Ideasoft2ProductSpecialInfoRow[]
+    if (Array.isArray(o.items)) return o.items as Ideasoft2ProductSpecialInfoRow[]
+  }
+  return []
+}
+
 /** product_images LIST yanıtı — IdeasoftProductImagesPage ile aynı */
 function extractProductImagesList(json: unknown): { items: IdeasoftProductImageRow[]; total: number } {
   if (Array.isArray(json)) {
@@ -186,6 +232,138 @@ async function fetchImagesForProduct(productId: number): Promise<IdeasoftProduct
   if (!res.ok) return []
   const { items } = extractProductImagesList(data)
   return sortImagesForProduct(items)
+}
+
+async function fetchSpecialInfoStatusForProduct(productId: number): Promise<SpecialInfoStatus> {
+  const params = new URLSearchParams({
+    product: String(productId),
+    limit: '100',
+    page: '1',
+    sort: 'id',
+  })
+  const specialRes = await fetch(`${API_URL}/api/ideasoft/admin-api/product_special_infos?${params}`)
+  const specialData = await parseJsonResponse<unknown>(specialRes)
+  const specialItems = specialRes.ok ? extractSpecialInfoList(specialData) : []
+  const titlePreview = specialItems.map((item) => plainTextFromMaybeHtml(item.title)).find(Boolean) ?? ''
+  const contentPreview = specialItems.map((item) => plainTextFromMaybeHtml(item.content)).find(Boolean) ?? ''
+  return {
+    hasTitle: titlePreview.length > 0,
+    hasContent: contentPreview.length > 0,
+    titlePreview,
+    contentPreview,
+  }
+}
+
+async function fetchSpecialInfoRowsForProduct(productId: number): Promise<Ideasoft2ProductSpecialInfoRow[]> {
+  const params = new URLSearchParams({
+    product: String(productId),
+    limit: '100',
+    page: '1',
+    sort: 'id',
+  })
+  const res = await fetch(`${API_URL}/api/ideasoft/admin-api/product_special_infos?${params}`)
+  const data = await parseJsonResponse<unknown>(res)
+  if (!res.ok) {
+    throw new Error(
+      formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) ||
+        'Özel bilgi alanı yüklenemedi'
+    )
+  }
+  return extractSpecialInfoList(data)
+}
+
+async function saveSpecialTitleForProduct(productId: number, rawTitle: string): Promise<void> {
+  const title = rawTitle.trim() || DEFAULT_SPECIAL_TITLE
+  const rows = await fetchSpecialInfoRowsForProduct(productId)
+  const row = rows[0] ?? null
+  const payload = {
+    ...(row ?? {}),
+    title,
+    content: row?.content ?? '',
+    status: row?.status ?? 1,
+    product: row?.product ?? { id: productId },
+  }
+  const res = await fetch(
+    row
+      ? `${API_URL}/api/ideasoft/admin-api/product_special_infos/${row.id}`
+      : `${API_URL}/api/ideasoft/admin-api/product_special_infos`,
+    {
+      method: row ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  )
+  const data = await parseJsonResponse<unknown>(res)
+  if (!res.ok) {
+    throw new Error(
+      formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) ||
+        'Özel başlık kaydedilemedi'
+    )
+  }
+}
+
+async function readClipboardHtmlOrText(): Promise<string> {
+  const clipboard = navigator.clipboard as
+    | (Clipboard & {
+        read?: () => Promise<
+          Array<{ types: readonly string[]; getType: (type: string) => Promise<Blob> }>
+        >
+      })
+    | undefined
+  if (!clipboard) throw new Error('Pano erişimi desteklenmiyor')
+
+  if (typeof clipboard.read === 'function') {
+    try {
+      const items = await clipboard.read()
+      for (const item of items) {
+        if (item.types.includes('text/html')) {
+          const blob = await item.getType('text/html')
+          return blob.text()
+        }
+      }
+      for (const item of items) {
+        if (item.types.includes('text/plain')) {
+          const blob = await item.getType('text/plain')
+          return blob.text()
+        }
+      }
+    } catch {
+      // Bazı tarayıcılar read() yerine yalnızca readText() izni verir.
+    }
+  }
+
+  if (typeof clipboard.readText === 'function') return clipboard.readText()
+  throw new Error('Pano okunamadı')
+}
+
+async function saveSpecialContentForProduct(productId: number, html: string): Promise<void> {
+  const rows = await fetchSpecialInfoRowsForProduct(productId)
+  const row = rows[0] ?? null
+  const title = plainTextFromMaybeHtml(row?.title) ? String(row?.title ?? '') : DEFAULT_SPECIAL_TITLE
+  const payload = {
+    ...(row ?? {}),
+    title,
+    content: html,
+    status: row?.status ?? 1,
+    product: row?.product ?? { id: productId },
+  }
+  const res = await fetch(
+    row
+      ? `${API_URL}/api/ideasoft/admin-api/product_special_infos/${row.id}`
+      : `${API_URL}/api/ideasoft/admin-api/product_special_infos`,
+    {
+      method: row ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  )
+  const data = await parseJsonResponse<unknown>(res)
+  if (!res.ok) {
+    throw new Error(
+      formatIdeasoftProxyErrorForUi(data as { error?: string; hint?: string }) ||
+        'Özel içerik kaydedilemedi'
+    )
+  }
 }
 
 function parseFxInput(s: string): number | null {
@@ -288,6 +466,39 @@ function displayProductName(row: Ideasoft2ProductListRow): string {
   return n || '—'
 }
 
+function targetKeywordForRow(row: Ideasoft2ProductListRow): string {
+  return extractIdeasoftProductSearchKeywords(row as unknown as Record<string, unknown>)
+}
+
+function plainTextFromMaybeHtml(raw: unknown): string {
+  if (raw == null) return ''
+  const text = Array.isArray(raw)
+    ? raw.map(plainTextFromMaybeHtml).filter(Boolean).join(' ')
+    : typeof raw === 'object'
+      ? Object.values(raw as Record<string, unknown>).map(plainTextFromMaybeHtml).filter(Boolean).join(' ')
+      : String(raw)
+  return text
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function detailDescriptionForRow(row: Ideasoft2ProductListRow): string {
+  const raw = row as unknown as Record<string, unknown>
+  const detail = raw.detail
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const detailObj = detail as Record<string, unknown>
+    const detailText = plainTextFromMaybeHtml(detailObj.details ?? detailObj.description)
+    if (detailText) return detailText
+  }
+  for (const key of ['details', 'description', 'detailDescription', 'fullDescription'] as const) {
+    const text = plainTextFromMaybeHtml(raw[key])
+    if (text) return text
+  }
+  return ''
+}
+
 /** Master ürünler ile IdeaSoft SKU eşlemesi (trim + küçük harf). */
 function normalizeSkuKey(raw: string | undefined | null): string {
   return (raw ?? '').trim().toLowerCase()
@@ -342,12 +553,12 @@ function resolveSkuMatch(
 async function fetchMasterProductsSkuIndex(): Promise<Map<string, MasterProductSkuRow[]>> {
   const byKey = new Map<string, MasterProductSkuRow[]>()
   let page = 1
-  const limit = 9999
+  const limit = 500
   let total = 0
   let hasMore = true
   while (hasMore) {
     const res = await fetch(
-      `${API_URL}/api/products?page=${page}&limit=${limit}&sort_by=sku&sort_order=asc`
+      `${API_URL}/api/products/sku-index?page=${page}&limit=${limit}`
     )
     const json = await parseJsonResponse<{ data?: unknown[]; total?: number }>(res)
     if (!res.ok) {
@@ -394,10 +605,19 @@ export function Ideasoft2ProductsPage() {
   const [loading, setLoading] = useState(true)
   const [listError, setListError] = useState<string | null>(null)
   const [imageByProductId, setImageByProductId] = useState<Record<number, IdeasoftProductImageRow[]>>({})
+  const [specialInfoStatusByProductId, setSpecialInfoStatusByProductId] = useState<Record<number, SpecialInfoStatus>>({})
   const [masterSkuByKey, setMasterSkuByKey] = useState<Map<string, MasterProductSkuRow[]>>(() => new Map())
   const [masterSkuStatus, setMasterSkuStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [masterSkuError, setMasterSkuError] = useState<string | null>(null)
   const [detailRow, setDetailRow] = useState<Ideasoft2ProductListRow | null>(null)
+  const [detailInitialPanel, setDetailInitialPanel] = useState<Ideasoft2ProductDetailInitialPanel>('genel')
+  const [detailFocusField, setDetailFocusField] = useState<Ideasoft2ProductDetailFocusField | null>(null)
+  const [detailSpecialInfoOnly, setDetailSpecialInfoOnly] = useState(false)
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<number>>(() => new Set())
+  const [bulkSpecialTitleOpen, setBulkSpecialTitleOpen] = useState(false)
+  const [bulkSpecialTitleDraft, setBulkSpecialTitleDraft] = useState(DEFAULT_SPECIAL_TITLE)
+  const [bulkSpecialTitleSaving, setBulkSpecialTitleSaving] = useState(false)
+  const [specialContentSavingIds, setSpecialContentSavingIds] = useState<Set<number>>(() => new Set())
 
   /** Manuel EUR/USD kurları — tarayıcıda kalıcı (ilk yüklemede boş string ile üzerine yazma hatası giderildi) */
   const [manualFx, setManualFx] = useState(() => getInitialFxFromStorage())
@@ -419,6 +639,13 @@ export function Ideasoft2ProductsPage() {
   const limit =
     pageSize === 'fit' ? Math.min(100, Math.max(1, fitLimit)) : Math.min(100, Math.max(1, pageSize))
 
+  const selectedRows = useMemo(
+    () => items.filter((row) => selectedProductIds.has(row.id)),
+    [items, selectedProductIds]
+  )
+  const allVisibleSelected =
+    items.length > 0 && items.every((row) => selectedProductIds.has(row.id))
+
   const buildListParams = useCallback(() => {
     const params = new URLSearchParams({
       page: String(page),
@@ -432,10 +659,130 @@ export function Ideasoft2ProductsPage() {
     return params
   }, [page, limit, search, categoryPath])
 
+  const openDetailModal = useCallback(
+    (
+      row: Ideasoft2ProductListRow,
+      panel: Ideasoft2ProductDetailInitialPanel = 'genel',
+      focusField: Ideasoft2ProductDetailFocusField | null = null,
+      specialInfoOnly = false
+    ) => {
+      setDetailInitialPanel(panel)
+      setDetailFocusField(focusField)
+      setDetailSpecialInfoOnly(specialInfoOnly)
+      setDetailRow(row)
+    },
+    []
+  )
+
+  const copyToClipboard = useCallback(async (value: string, label: string) => {
+    const text = value.trim()
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      toastSuccess(`${label} kopyalandı`, text)
+    } catch (e) {
+      toastError(`${label} kopyalanamadı`, e)
+    }
+  }, [])
+
+  const refreshSpecialInfoStatusForRow = useCallback(async (productId: number) => {
+    try {
+      const status = await fetchSpecialInfoStatusForProduct(productId)
+      setSpecialInfoStatusByProductId((prev) => ({ ...prev, [productId]: status }))
+    } catch {
+      setSpecialInfoStatusByProductId((prev) => ({
+        ...prev,
+        [productId]: { hasTitle: false, hasContent: false, titlePreview: '', contentPreview: '' },
+      }))
+    }
+  }, [])
+
+  const toggleProductSelection = useCallback((productId: number, checked: boolean) => {
+    setSelectedProductIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(productId)
+      else next.delete(productId)
+      return next
+    })
+  }, [])
+
+  const toggleVisibleSelection = useCallback(
+    (checked: boolean) => {
+      setSelectedProductIds((prev) => {
+        const next = new Set(prev)
+        for (const row of items) {
+          if (checked) next.add(row.id)
+          else next.delete(row.id)
+        }
+        return next
+      })
+    },
+    [items]
+  )
+
+  const openBulkSpecialTitleModal = useCallback(() => {
+    setBulkSpecialTitleDraft(DEFAULT_SPECIAL_TITLE)
+    setBulkSpecialTitleOpen(true)
+  }, [])
+
+  const saveBulkSpecialTitle = useCallback(async () => {
+    const productIds = selectedRows.map((row) => row.id)
+    if (productIds.length === 0) return
+    setBulkSpecialTitleSaving(true)
+    try {
+      await Promise.all(productIds.map((productId) => saveSpecialTitleForProduct(productId, bulkSpecialTitleDraft)))
+      const statusEntries = await Promise.all(
+        productIds.map(async (productId) => {
+          const status = await fetchSpecialInfoStatusForProduct(productId)
+          return [productId, status] as const
+        })
+      )
+      setSpecialInfoStatusByProductId((prev) => {
+        const next = { ...prev }
+        for (const [productId, status] of statusEntries) next[productId] = status
+        return next
+      })
+      toastSuccess('Özel başlık güncellendi', `${productIds.length} ürün işlendi.`)
+      setBulkSpecialTitleOpen(false)
+      setSelectedProductIds((prev) => {
+        const next = new Set(prev)
+        for (const productId of productIds) next.delete(productId)
+        return next
+      })
+    } catch (e) {
+      toastError('Özel başlık toplu güncellenemedi', e)
+    } finally {
+      setBulkSpecialTitleSaving(false)
+    }
+  }, [bulkSpecialTitleDraft, selectedRows])
+
+  const pasteClipboardToSpecialContent = useCallback(
+    async (row: Ideasoft2ProductListRow) => {
+      setSpecialContentSavingIds((prev) => new Set(prev).add(row.id))
+      try {
+        const html = await readClipboardHtmlOrText()
+        if (!html.trim()) throw new Error('Panoda kaydedilecek içerik yok')
+        await saveSpecialContentForProduct(row.id, html)
+        await refreshSpecialInfoStatusForRow(row.id)
+        toastSuccess('Özel içerik kaydedildi', `${displayProductName(row)} için panodaki içerik aktarıldı.`)
+      } catch (e) {
+        toastError('Özel içerik kaydedilemedi', e)
+      } finally {
+        setSpecialContentSavingIds((prev) => {
+          const next = new Set(prev)
+          next.delete(row.id)
+          return next
+        })
+      }
+    },
+    [refreshSpecialInfoStatusForRow]
+  )
+
   const fetchList = useCallback(async () => {
     setLoading(true)
     setListError(null)
     setImageByProductId({})
+    setSpecialInfoStatusByProductId({})
     try {
       const params = buildListParams()
       /** Sunucu `/products/count` ile hydra:totalItems birleştirir; count’a page/limit gitmez (toplam kayıt doğru kalır). */
@@ -448,6 +795,7 @@ export function Ideasoft2ProductsPage() {
         setItems([])
         setTotal(0)
         setImageByProductId({})
+        setSpecialInfoStatusByProductId({})
         return
       }
       const { items: rows, total: t } = extractProductsList(data)
@@ -483,20 +831,32 @@ export function Ideasoft2ProductsPage() {
           toastSuccess('IdeaSoft ürün listesi', `Bu sayfada ${rows.length} kayıt; toplam bilgisi yok.`)
         }
       }
-      const imageEntries = await Promise.all(
-        rows.map(async (r) => {
-          const list = await fetchImagesForProduct(r.id)
-          return [r.id, list] as const
-        })
-      )
+      const [imageEntries, specialInfoEntries] = await Promise.all([
+        Promise.all(
+          rows.map(async (r) => {
+            const list = await fetchImagesForProduct(r.id)
+            return [r.id, list] as const
+          })
+        ),
+        Promise.all(
+          rows.map(async (r) => {
+            const status = await fetchSpecialInfoStatusForProduct(r.id)
+            return [r.id, status] as const
+          })
+        ),
+      ])
       const nextImages: Record<number, IdeasoftProductImageRow[]> = {}
       for (const [id, list] of imageEntries) nextImages[id] = list
       setImageByProductId(nextImages)
+      const nextSpecialInfoStatus: Record<number, SpecialInfoStatus> = {}
+      for (const [id, status] of specialInfoEntries) nextSpecialInfoStatus[id] = status
+      setSpecialInfoStatusByProductId(nextSpecialInfoStatus)
     } catch {
       setListError('Liste alınamadı')
       setItems([])
       setTotal(0)
       setImageByProductId({})
+      setSpecialInfoStatusByProductId({})
     } finally {
       setLoading(false)
     }
@@ -544,6 +904,18 @@ export function Ideasoft2ProductsPage() {
             idPrefix="ideasoft2-prod-cat"
             onPathChange={(next) => setListState({ categoryPath: next, page: 1 })}
           />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="outline" size="sm" disabled={selectedRows.length === 0}>
+                Toplu İşlem ({selectedRows.length})
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuItem onSelect={openBulkSpecialTitleModal}>
+                Özel Başlık güncelle
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <div className="relative w-full min-w-[200px] max-w-sm sm:w-64">
             <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -633,16 +1005,72 @@ export function Ideasoft2ProductsPage() {
       <Ideasoft2ProductDetailModal
         open={detailRow != null}
         onOpenChange={(o) => {
-          if (!o) setDetailRow(null)
+          if (!o) {
+            setDetailRow(null)
+            setDetailInitialPanel('genel')
+            setDetailFocusField(null)
+            setDetailSpecialInfoOnly(false)
+          }
         }}
         productId={detailRow?.id ?? null}
         listPreviewName={detailRow ? displayProductName(detailRow) : undefined}
+        initialPanel={detailInitialPanel}
+        focusField={detailFocusField}
+        specialInfoOnly={detailSpecialInfoOnly}
+        onSpecialInfoSaved={(productId) => void refreshSpecialInfoStatusForRow(productId)}
         masterProductId={
           detailRow
             ? masterIdForProductDetailModal(detailRow, masterSkuByKey, masterSkuStatus)
             : null
         }
       />
+      <Dialog open={bulkSpecialTitleOpen} onOpenChange={setBulkSpecialTitleOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Özel Başlık Toplu Güncelle</DialogTitle>
+            <DialogDescription>
+              Seçili {selectedRows.length} ürünün <code>product_special_infos.title</code> alanı
+              güncellenecek. Kayıt yoksa yeni özel bilgi kaydı oluşturulur.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="bulk-special-title">Özel Başlık</Label>
+            <Input
+              id="bulk-special-title"
+              value={bulkSpecialTitleDraft}
+              autoFocus
+              onChange={(e) => setBulkSpecialTitleDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !bulkSpecialTitleSaving && selectedRows.length > 0) {
+                  e.preventDefault()
+                  void saveBulkSpecialTitle()
+                }
+              }}
+            />
+            <p className="text-xs text-muted-foreground">
+              Boş bırakılırsa <strong>{DEFAULT_SPECIAL_TITLE}</strong> olarak kaydedilir.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setBulkSpecialTitleOpen(false)}
+              disabled={bulkSpecialTitleSaving}
+            >
+              Vazgeç
+            </Button>
+            <Button
+              type="button"
+              variant="save"
+              onClick={() => void saveBulkSpecialTitle()}
+              disabled={bulkSpecialTitleSaving || selectedRows.length === 0}
+            >
+              {bulkSpecialTitleSaving ? 'Kaydediliyor…' : 'Kaydet'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Card className="flex flex-1 min-h-0 flex-col overflow-hidden border-border">
         <CardContent className="flex flex-1 min-h-0 flex-col overflow-hidden p-0">
           {listError ? (
@@ -654,9 +1082,21 @@ export function Ideasoft2ProductsPage() {
             </div>
           ) : null}
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-auto">
-            <table className="w-full min-w-[720px] border-separate border-spacing-0 text-sm">
+            <table className="w-full min-w-[1100px] border-separate border-spacing-0 text-sm">
               <thead>
                 <tr className="text-muted-foreground">
+                  <th
+                    className="sticky top-0 z-20 w-[44px] border-b border-border bg-muted px-2 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))]"
+                    scope="col"
+                  >
+                    <Checkbox
+                      aria-label="Bu sayfadaki ürünleri seç"
+                      checked={allVisibleSelected}
+                      disabled={items.length === 0}
+                      onClick={(e) => e.stopPropagation()}
+                      onCheckedChange={toggleVisibleSelection}
+                    />
+                  </th>
                   <th
                     className="sticky top-0 z-20 w-[72px] border-b border-border bg-muted px-2 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))]"
                     scope="col"
@@ -670,6 +1110,22 @@ export function Ideasoft2ProductsPage() {
                   <th className="sticky top-0 z-20 border-b border-border bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_0_hsl(var(--border))] min-w-[140px]">
                     <span className="block leading-tight">Master (SKU)</span>
                     <span className="block text-xs font-normal text-muted-foreground">Ana ürün eşleşmesi</span>
+                  </th>
+                  <th className="sticky top-0 z-20 w-[88px] border-b border-border bg-muted px-3 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
+                    <span className="block leading-tight">Hedef</span>
+                    <span className="block text-xs font-normal text-muted-foreground">Kelime</span>
+                  </th>
+                  <th className="sticky top-0 z-20 w-[96px] border-b border-border bg-muted px-3 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
+                    <span className="block leading-tight">Detay</span>
+                    <span className="block text-xs font-normal text-muted-foreground">Açıklama</span>
+                  </th>
+                  <th className="sticky top-0 z-20 w-[104px] border-b border-border bg-muted px-3 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
+                    <span className="block leading-tight">Özel</span>
+                    <span className="block text-xs font-normal text-muted-foreground">Başlık</span>
+                  </th>
+                  <th className="sticky top-0 z-20 w-[104px] border-b border-border bg-muted px-3 py-2 text-center font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
+                    <span className="block leading-tight">Özel</span>
+                    <span className="block text-xs font-normal text-muted-foreground">İçerik</span>
                   </th>
                   <th className="sticky top-0 z-20 border-b border-border bg-muted px-3 py-2 text-right font-medium shadow-[0_1px_0_0_hsl(var(--border))] whitespace-nowrap">
                     Stok
@@ -692,13 +1148,13 @@ export function Ideasoft2ProductsPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={12} className="px-3 py-8 text-center text-muted-foreground">
                       Yükleniyor…
                     </td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                    <td colSpan={12} className="px-3 py-8 text-center text-muted-foreground">
                       Kayıt yok
                     </td>
                   </tr>
@@ -716,22 +1172,40 @@ export function Ideasoft2ProductsPage() {
                     const rowImages = imageByProductId[row.id] ?? []
                     const thumb = rowImages[0]
                     const imageCount = rowImages.length
+                    const targetKeyword = targetKeywordForRow(row)
+                    const hasTargetKeyword = targetKeyword.length > 0
+                    const detailDescription = detailDescriptionForRow(row)
+                    const hasDetailDescription = detailDescription.length > 0
+                    const specialInfoStatus = specialInfoStatusByProductId[row.id]
+                    const hasSpecialTitle = specialInfoStatus?.hasTitle ?? false
+                    const hasSpecialContent = specialInfoStatus?.hasContent ?? false
+                    const isSpecialContentSaving = specialContentSavingIds.has(row.id)
+                    const productName = displayProductName(row)
+                    const sku = (row.sku || '').trim()
 
                     return (
                       <tr
                         key={row.id}
                         className="border-b border-border/80 transition-colors last:border-0 hover:bg-muted/50 cursor-pointer"
-                        onClick={() => setDetailRow(row)}
+                        onClick={() => openDetailModal(row)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault()
-                            setDetailRow(row)
+                            openDetailModal(row)
                           }
                         }}
                         tabIndex={0}
                         role="button"
                         aria-label={`${displayProductName(row)} detayı`}
                       >
+                        <td className="w-[44px] px-2 py-2 text-center align-top">
+                          <Checkbox
+                            aria-label={`${productName} ürününü seç`}
+                            checked={selectedProductIds.has(row.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            onCheckedChange={(checked) => toggleProductSelection(row.id, checked)}
+                          />
+                        </td>
                         <td className="w-[72px] px-2 py-2 align-top">
                           <div className="relative inline-flex">
                             {thumb?.thumbUrl || thumb?.originalUrl ? (
@@ -758,11 +1232,37 @@ export function Ideasoft2ProductsPage() {
                           </div>
                         </td>
                         <td className="px-3 py-2 align-top">
-                          <div className="font-medium text-foreground leading-snug">
-                            {displayProductName(row)}
+                          <div className="flex items-start gap-1.5 font-medium text-foreground leading-snug">
+                            <span className="min-w-0 break-words">{productName}</span>
+                            <button
+                              type="button"
+                              className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                              title="Ürün adını kopyala"
+                              aria-label="Ürün adını kopyala"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void copyToClipboard(productName, 'Ürün adı')
+                              }}
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </button>
                           </div>
-                          <div className="mt-0.5 font-mono text-xs text-muted-foreground">
-                            {(row.sku || '').trim() || '—'}
+                          <div className="mt-0.5 flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                            <span className="min-w-0 break-all">{sku || '—'}</span>
+                            {sku ? (
+                              <button
+                                type="button"
+                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-muted hover:text-foreground"
+                                title="Ürün kodunu kopyala"
+                                aria-label="Ürün kodunu kopyala"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void copyToClipboard(sku, 'Ürün kodu')
+                                }}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </button>
+                            ) : null}
                           </div>
                         </td>
                         <td className="px-3 py-2 align-top text-xs">
@@ -810,6 +1310,97 @@ export function Ideasoft2ProductsPage() {
                               ) : null}
                             </Link>
                           )}
+                        </td>
+                        <td className="px-3 py-2 text-center align-top">
+                          <span
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+                            title={
+                              hasTargetKeyword
+                                ? `Hedef kelime: ${targetKeyword}`
+                                : 'Hedef kelime boş'
+                            }
+                            aria-label={hasTargetKeyword ? 'Hedef kelime dolu' : 'Hedef kelime boş'}
+                          >
+                            {hasTargetKeyword ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-destructive" />
+                            )}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-center align-top">
+                          <span
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+                            title={
+                              hasDetailDescription
+                                ? `Detay açıklama dolu: ${detailDescription.slice(0, 120)}`
+                                : 'Detay açıklama boş'
+                            }
+                            aria-label={
+                              hasDetailDescription ? 'Detay açıklama dolu' : 'Detay açıklama boş'
+                            }
+                          >
+                            {hasDetailDescription ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-destructive" />
+                            )}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-center align-top">
+                          <button
+                            type="button"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors hover:bg-muted"
+                            title={
+                              hasSpecialTitle
+                                ? `Özel bilgi başlık dolu: ${specialInfoStatus?.titlePreview.slice(0, 120)}`
+                                : 'Özel bilgi başlık boş'
+                            }
+                            aria-label={
+                              hasSpecialTitle ? 'Özel bilgi başlık dolu' : 'Özel bilgi başlık boş'
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openDetailModal(row, 'ozelBilgi', 'specialTitle', true)
+                            }}
+                          >
+                            {hasSpecialTitle ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-destructive" />
+                            )}
+                          </button>
+                        </td>
+                        <td className="px-3 py-2 text-center align-top">
+                          <button
+                            type="button"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors hover:bg-muted"
+                            title={
+                              isSpecialContentSaving
+                                ? 'Panodaki özel içerik kaydediliyor'
+                                : hasSpecialContent
+                                ? `Özel bilgi içerik dolu: ${specialInfoStatus?.contentPreview.slice(0, 120)}`
+                                : 'Panodaki HTML içeriği özel içerik alanına kaydet'
+                            }
+                            aria-label={
+                              isSpecialContentSaving
+                                ? 'Panodaki özel içerik kaydediliyor'
+                                : hasSpecialContent
+                                  ? 'Özel bilgi içerik dolu'
+                                  : 'Özel bilgi içerik boş'
+                            }
+                            disabled={isSpecialContentSaving}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void pasteClipboardToSpecialContent(row)
+                            }}
+                          >
+                            {hasSpecialContent ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-destructive" />
+                            )}
+                          </button>
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums align-top">
                           {row.stockAmount != null && Number.isFinite(Number(row.stockAmount))

@@ -59,6 +59,193 @@ function sqlNormalizeCol(col: string): string {
   return `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col}, ''), 'İ', 'i'), 'ı', 'i'), 'Ü', 'u'), 'ü', 'u'), 'Ö', 'o'), 'ö', 'o'), 'Ğ', 'g'), 'ğ', 'g'), 'Ş', 's'), 'ş', 's'), 'Ç', 'c'), 'ç', 'c'))`;
 }
 
+type CalculationOperation = {
+  type?: 'add' | 'subtract' | 'multiply' | 'divide' | 'add_percent' | 'subtract_percent';
+  value?: number;
+};
+
+type CalculationRule = {
+  id?: string;
+  name?: string;
+  source: string;
+  target: string;
+  operations: CalculationOperation[];
+  result_currency_id?: number | null;
+  brand_id?: number | null;
+  category_id?: number | null;
+};
+
+type ProductPriceValue = {
+  price: number;
+  currency_id: number | null;
+  status?: number;
+  is_calculated?: boolean;
+};
+
+function normalizeCalculationRules(raw: unknown): CalculationRule[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((rule) => rule && typeof rule === 'object')
+    .map((rule) => {
+      const r = rule as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ''),
+        name: String(r.name ?? ''),
+        source: String(r.source === 'ecommerce_price' ? '1' : r.source ?? 'price'),
+        target: String(r.target === 'ecommerce_price' ? '1' : r.target ?? ''),
+        operations: Array.isArray(r.operations) ? (r.operations as CalculationOperation[]) : [],
+        result_currency_id: r.result_currency_id != null && Number(r.result_currency_id) > 0 ? Number(r.result_currency_id) : null,
+        brand_id: r.brand_id != null && Number(r.brand_id) > 0 ? Number(r.brand_id) : null,
+        category_id: r.category_id != null && Number(r.category_id) > 0 ? Number(r.category_id) : null,
+      };
+    })
+    .filter((rule) => !!rule.target);
+}
+
+async function loadCalculationRules(db: D1Database): Promise<CalculationRule[]> {
+  const row = await db.prepare(
+    `SELECT value FROM app_settings WHERE category = 'hesaplamalar' AND "key" = 'calculations' AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
+  ).first<{ value: string | null }>();
+  try {
+    return normalizeCalculationRules(row?.value ? JSON.parse(row.value) : []);
+  } catch {
+    return [];
+  }
+}
+
+function findCalculationRuleForProduct(
+  rules: CalculationRule[],
+  target: string,
+  brandId: number | null | undefined,
+  categoryId: number | null | undefined
+): CalculationRule | undefined {
+  let best: { rule: CalculationRule; score: number } | undefined;
+  for (const rule of rules) {
+    if (String(rule.target) !== target) continue;
+    const brandMatches = rule.brand_id == null || rule.brand_id === brandId;
+    const categoryMatches = rule.category_id == null || rule.category_id === categoryId;
+    if (!brandMatches || !categoryMatches) continue;
+    const score = (rule.brand_id != null ? 2 : 0) + (rule.category_id != null ? 1 : 0);
+    if (!best || score > best.score) best = { rule, score };
+  }
+  return best?.rule;
+}
+
+function applyCalculationOperation(current: number, op: CalculationOperation): number {
+  const value = Number(op?.value) || 0;
+  switch (op?.type ?? 'add_percent') {
+    case 'add': return current + value;
+    case 'subtract': return current - value;
+    case 'multiply': return current * value;
+    case 'divide': return value !== 0 ? current / value : current;
+    case 'add_percent': return current * (1 + value / 100);
+    case 'subtract_percent': return current * (1 - value / 100);
+    default: return current;
+  }
+}
+
+function applyCalculationValue(sourceValue: number, operations: CalculationOperation[]): number {
+  let result = Number(sourceValue) || 0;
+  for (const op of operations) result = applyCalculationOperation(result, op);
+  return Math.round(result * 100) / 100;
+}
+
+function normalizeProductPriceValue(value: ProductPriceValue | undefined): ProductPriceValue | undefined {
+  const price = Number(value?.price);
+  if (!Number.isFinite(price)) return undefined;
+  return {
+    price,
+    currency_id: value?.currency_id != null ? Number(value.currency_id) : null,
+    status: value?.status ?? 1,
+    is_calculated: value?.is_calculated,
+  };
+}
+
+function resolveProductPriceType(options: {
+  target: string;
+  basePrice: number;
+  baseCurrencyId: number | null;
+  prices: Record<number, ProductPriceValue | undefined>;
+  rules: CalculationRule[];
+  brandId?: number | null;
+  categoryId?: number | null;
+  preferExisting?: boolean;
+  preferExistingSources?: boolean;
+}): ProductPriceValue | null {
+  const targetId = String(options.target);
+  const targetNum = Number(targetId);
+  const existing = Number.isFinite(targetNum) ? normalizeProductPriceValue(options.prices[targetNum]) : undefined;
+  if (options.preferExisting !== false && existing) return existing;
+
+  const visiting = new Set<string>();
+  const resolveTarget = (id: string): ProductPriceValue | null => {
+    if (visiting.has(id)) return null;
+    visiting.add(id);
+    const rule = findCalculationRuleForProduct(options.rules, id, options.brandId, options.categoryId);
+    if (!rule?.operations?.length) {
+      visiting.delete(id);
+      return null;
+    }
+    const source = resolveSource(rule.source);
+    visiting.delete(id);
+    if (!source) return null;
+    const currencyId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : source.currency_id;
+    return {
+      price: applyCalculationValue(source.price, rule.operations),
+      currency_id: currencyId ?? null,
+      status: 1,
+      is_calculated: true,
+    };
+  };
+  const resolveSource = (source: string): ProductPriceValue | null => {
+    const sourceId = String(source);
+    if (sourceId === 'price') {
+      const base = Number(options.basePrice);
+      return Number.isFinite(base) ? { price: base, currency_id: options.baseCurrencyId, status: 1 } : null;
+    }
+    const sourceNum = Number(sourceId);
+    if (!Number.isFinite(sourceNum)) return null;
+    if (options.preferExistingSources === false) {
+      const calculatedSource = resolveTarget(sourceId);
+      if (calculatedSource) return calculatedSource;
+    }
+    const sourceExisting = normalizeProductPriceValue(options.prices[sourceNum]);
+    if (sourceExisting) return sourceExisting;
+    return resolveTarget(sourceId);
+  };
+  return resolveTarget(targetId);
+}
+
+async function loadProductPricesByProductIds(db: D1Database, productIds: number[]): Promise<Record<number, Record<number, ProductPriceValue>>> {
+  const out: Record<number, Record<number, ProductPriceValue>> = {};
+  const ids = [...new Set(productIds.filter((id) => Number.isFinite(id) && id > 0))];
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const placeholders = chunk.map(() => '?').join(',');
+    const { results } = await db.prepare(
+      `SELECT product_id, price_type_id, price, currency_id, status FROM product_prices WHERE is_deleted = 0 AND product_id IN (${placeholders})`
+    ).bind(...chunk).all<{ product_id: number; price_type_id: number; price: number; currency_id: number | null; status: number }>();
+    for (const row of results ?? []) {
+      if (!out[row.product_id]) out[row.product_id] = {};
+      out[row.product_id][row.price_type_id] = {
+        price: row.price,
+        currency_id: row.currency_id ?? null,
+        status: row.status ?? 1,
+      };
+    }
+  }
+  return out;
+}
+
+async function loadCurrencySymbolsById(db: D1Database): Promise<Record<number, { symbol: string | null; code: string | null; name: string | null }>> {
+  const { results } = await db.prepare(
+    `SELECT id, name, code, symbol FROM product_currencies WHERE is_deleted = 0`
+  ).all<{ id: number; name: string | null; code: string | null; symbol: string | null }>();
+  const out: Record<number, { symbol: string | null; code: string | null; name: string | null }> = {};
+  for (const row of results ?? []) out[row.id] = { symbol: row.symbol ?? null, code: row.code ?? null, name: row.name ?? null };
+  return out;
+}
+
 /** R2'den görsel alıp base64 data URL'e çevirir. Paraşüt gibi dış servisler URL'ye erişemeyebilir; data URL ile gönderim daha güvenilir. */
 async function storagePathToDataUrl(storage: R2Bucket | undefined, path: string): Promise<string | null> {
   if (!path?.trim()) return null;
@@ -1214,6 +1401,8 @@ app.get('/api/products', async (c) => {
       where += ' AND COALESCE(p.ideasoft_product_id, 0) > 0';
     } else if (filter_integration === 'parasut') {
       where += " AND TRIM(COALESCE(p.parasut_product_id, '')) != ''";
+    } else if (filter_integration === 'trendyol') {
+      where += " AND TRIM(COALESCE(p.trendyol_product_id, '')) != ''";
     }
     const validSortColumns: Record<string, string> = {
       name: 'p.name',
@@ -1228,17 +1417,10 @@ app.get('/api/products', async (c) => {
     const countRes = await c.env.DB.prepare(
       `SELECT COUNT(*) as total FROM products p ${where}`
     ).bind(...params).first<{ total: number }>();
-    const priceCol = usePriceType ? 'COALESCE(pp_offer.price, p.price)' : 'p.price';
-    const currencySymbolCol = usePriceType ? 'COALESCE(cur_offer.symbol, cur.symbol)' : 'cur.symbol';
-    const currencyIdCol = usePriceType ? 'COALESCE(pp_offer.currency_id, p.currency_id)' : 'p.currency_id';
-    const ppOfferJoin = usePriceType
-      ? `LEFT JOIN product_prices pp_offer ON pp_offer.product_id = p.id AND pp_offer.price_type_id = ${priceTypeId} AND pp_offer.is_deleted = 0 AND (pp_offer.status = 1 OR pp_offer.status IS NULL)
-       LEFT JOIN product_currencies cur_offer ON pp_offer.currency_id = cur_offer.id AND cur_offer.is_deleted = 0`
-      : '';
     const { results } = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, ${currencyIdCol} as currency_id,
-       ${priceCol} as price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
-       p.parasut_product_id, p.ideasoft_product_id,
+      `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.type_id, p.product_item_group_id, p.unit_id, p.currency_id as currency_id,
+       p.price as price, p.quantity, pp.price as ecommerce_price, pp.currency_id as ecommerce_currency_id, p.image, p.tax_rate, p.supplier_code, p.gtip_code, p.sort_order, p.status, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled,
+       p.parasut_product_id, p.ideasoft_product_id, p.trendyol_product_id, p.trendyol_category_id,
        p.created_at, p.updated_at,
        b.name as brand_name, b.code as brand_code, b.image as brand_image,
        grp.code as group_code, grp.name as group_name, grp.color as group_color,
@@ -1246,7 +1428,7 @@ app.get('/api/products', async (c) => {
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.code END as subcategory_code,
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.name END as subcategory_name,
        CASE WHEN sub.category_id IS NOT NULL AND sub.category_id > 0 THEN sub.color END as subcategory_color,
-       t.name as type_name, t.color as type_color, u.name as unit_name, ${currencySymbolCol} as currency_symbol,
+       t.name as type_name, t.color as type_color, u.name as unit_name, cur.symbol as currency_symbol,
        pig.name as product_item_group_name, pig.code as product_item_group_code, pig.color as product_item_group_color, pig.sort_order as product_item_group_sort_order
        FROM products p
        LEFT JOIN product_item_groups pig ON p.product_item_group_id = pig.id AND pig.is_deleted = 0
@@ -1257,11 +1439,59 @@ app.get('/api/products', async (c) => {
        LEFT JOIN product_types t ON p.type_id = t.id AND t.is_deleted = 0
        LEFT JOIN product_unit u ON p.unit_id = u.id AND u.is_deleted = 0
        LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
-       ${ppOfferJoin}
        LEFT JOIN product_prices pp ON pp.product_id = p.id AND pp.price_type_id = 1 AND pp.is_deleted = 0
        ${where} ORDER BY ${orderCol} ${sort_order}, p.id LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
-    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+    let data = results ?? [];
+    if (data.length > 0) {
+      const rules = await loadCalculationRules(c.env.DB);
+      const priceMaps = await loadProductPricesByProductIds(c.env.DB, data.map((row) => Number((row as { id: number }).id)));
+      const currenciesById = await loadCurrencySymbolsById(c.env.DB);
+      data = data.map((row) => {
+        const r = row as Record<string, unknown>;
+        const productId = Number(r.id);
+        const prices = priceMaps[productId] ?? {};
+        const basePrice = Number(r.price) || 0;
+        const baseCurrencyId = r.currency_id != null ? Number(r.currency_id) : null;
+        const brandId = r.brand_id != null ? Number(r.brand_id) : null;
+        const categoryId = r.category_id != null ? Number(r.category_id) : null;
+        const resolvedEcommerce = resolveProductPriceType({
+          target: '1',
+          basePrice,
+          baseCurrencyId,
+          prices,
+          rules,
+          brandId,
+          categoryId,
+        });
+        const baseRow = {
+          ...r,
+          ecommerce_price: resolvedEcommerce?.price ?? null,
+          ecommerce_currency_id: resolvedEcommerce?.currency_id ?? null,
+        };
+        if (!usePriceType) return baseRow;
+        const resolved = resolveProductPriceType({
+          target: String(priceTypeId),
+          basePrice,
+          baseCurrencyId,
+          prices,
+          rules,
+          brandId,
+          categoryId,
+        });
+        if (!resolved) {
+          return { ...baseRow, price: 0, currency_id: null, currency_symbol: null };
+        }
+        const cur = resolved.currency_id != null ? currenciesById[resolved.currency_id] : null;
+        return {
+          ...baseRow,
+          price: resolved.price,
+          currency_id: resolved.currency_id,
+          currency_symbol: cur?.symbol ?? null,
+        };
+      });
+    }
+    return c.json({ data, total: countRes?.total ?? 0, page, limit });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -1367,6 +1597,36 @@ app.get('/api/products/matched-skus', async (c) => {
   }
 });
 
+/** Master SKU kontrolü için hafif SKU indeksi */
+app.get('/api/products/sku-index', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const limit = Math.min(1000, Math.max(1, parseInt(c.req.query('limit') || '500', 10)));
+    const offset = (page - 1) * limit;
+    const countRes = await c.env.DB.prepare(
+      `SELECT COUNT(*) as total
+       FROM products
+       WHERE is_deleted = 0 AND TRIM(COALESCE(sku, '')) != ''`
+    ).first<{ total: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, name, sku, ideasoft_product_id
+       FROM products
+       WHERE is_deleted = 0 AND TRIM(COALESCE(sku, '')) != ''
+       ORDER BY sku, id
+       LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all();
+    return c.json({
+      data: results ?? [],
+      total: countRes?.total ?? 0,
+      page,
+      limit,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Master SKU indeksi alınamadı' }, 500);
+  }
+});
+
 app.get('/api/products/by-sku', async (c) => {
   try {
     if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
@@ -1374,32 +1634,38 @@ app.get('/api/products/by-sku', async (c) => {
     if (!sku) return c.json(null);
     const skuNorm = normalizeForSearch(sku);
     const productRow = await c.env.DB.prepare(
-      `SELECT id, name, sku, barcode, price, quantity, currency_id FROM products
+      `SELECT id, name, sku, barcode, brand_id, category_id, price, quantity, currency_id FROM products
        WHERE is_deleted = 0 AND ${sqlNormalizeCol("TRIM(COALESCE(sku, ''))")} = ?
        ORDER BY id DESC LIMIT 1`
     )
       .bind(skuNorm)
-      .first<{ id: number; name: string; sku: string; barcode: string | null; price: number; quantity: number; currency_id: number | null }>();
+      .first<{ id: number; name: string; sku: string; barcode: string | null; brand_id: number | null; category_id: number | null; price: number; quantity: number; currency_id: number | null }>();
     if (!productRow) return c.json(null);
     const priceTypeSetting = await c.env.DB.prepare(
       `SELECT value FROM app_settings WHERE category = 'products' AND key = 'fiyat_getir_price_type' AND is_deleted = 0 AND (status = 1 OR status IS NULL) LIMIT 1`
     ).first<{ value: string | null }>();
     const priceType = (priceTypeSetting?.value ?? '1').trim();
     let price = productRow.price;
+    let currencyId = productRow.currency_id;
     if (priceType !== 'products' && priceType !== '') {
       const ptId = parseInt(priceType, 10);
       if (!Number.isNaN(ptId) && ptId > 0) {
-        const ppRow = await c.env.DB.prepare(
-          `SELECT price FROM product_prices
-           WHERE product_id = ? AND price_type_id = ? AND is_deleted = 0 AND (status = 1 OR status IS NULL)
-           LIMIT 1`
-        )
-          .bind(productRow.id, ptId)
-          .first<{ price: number }>();
-        if (ppRow != null && ppRow.price != null) price = ppRow.price;
+        const rules = await loadCalculationRules(c.env.DB);
+        const priceMaps = await loadProductPricesByProductIds(c.env.DB, [productRow.id]);
+        const resolved = resolveProductPriceType({
+          target: String(ptId),
+          basePrice: productRow.price,
+          baseCurrencyId: productRow.currency_id,
+          prices: priceMaps[productRow.id] ?? {},
+          rules,
+          brandId: productRow.brand_id ?? null,
+          categoryId: productRow.category_id ?? null,
+        });
+        price = resolved?.price ?? 0;
+        currencyId = resolved?.currency_id ?? null;
       }
     }
-    return c.json({ ...productRow, price });
+    return c.json({ ...productRow, price, currency_id: currencyId });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -1439,22 +1705,26 @@ app.get('/api/products/ecommerce-price-by-sku', async (c) => {
     if (!code) return c.json(null);
     const codeLower = code.toLowerCase();
     const productRow = await c.env.DB.prepare(
-      `SELECT p.id, p.tax_rate, p.currency_id FROM products p
+      `SELECT p.id, p.price, p.brand_id, p.category_id, p.tax_rate, p.currency_id FROM products p
        WHERE p.is_deleted = 0 AND LOWER(TRIM(COALESCE(p.sku, ''))) = ?
        ORDER BY p.id DESC LIMIT 1`
     )
       .bind(codeLower)
-      .first<{ id: number; tax_rate: number | null; currency_id: number | null }>();
+      .first<{ id: number; price: number; brand_id: number | null; category_id: number | null; tax_rate: number | null; currency_id: number | null }>();
     if (!productRow) return c.json(null);
-    const ppRow = await c.env.DB.prepare(
-      `SELECT pp.price, pp.currency_id FROM product_prices pp
-       WHERE pp.product_id = ? AND pp.price_type_id = 1 AND pp.is_deleted = 0 AND (pp.status = 1 OR pp.status IS NULL)
-       LIMIT 1`
-    )
-      .bind(productRow.id)
-      .first<{ price: number; currency_id: number | null }>();
-    const price = ppRow?.price ?? 0;
-    const currencyId = ppRow?.currency_id ?? productRow.currency_id;
+    const rules = await loadCalculationRules(c.env.DB);
+    const priceMaps = await loadProductPricesByProductIds(c.env.DB, [productRow.id]);
+    const resolved = resolveProductPriceType({
+      target: '1',
+      basePrice: productRow.price,
+      baseCurrencyId: productRow.currency_id,
+      prices: priceMaps[productRow.id] ?? {},
+      rules,
+      brandId: productRow.brand_id ?? null,
+      categoryId: productRow.category_id ?? null,
+    });
+    const price = resolved?.price ?? 0;
+    const currencyId = resolved?.currency_id ?? productRow.currency_id;
     let currencySymbol = '₺';
     if (currencyId) {
       const curRow = await c.env.DB.prepare(
@@ -1505,13 +1775,61 @@ app.get('/api/products/:id', async (c) => {
     const { results: pricesRows } = await c.env.DB.prepare(
       `SELECT price_type_id, price, currency_id, status FROM product_prices WHERE product_id = ? AND is_deleted = 0`
     ).bind(id).all<{ price_type_id: number; price: number; currency_id: number | null; status: number }>();
-    const prices = (pricesRows ?? []).map((r) => ({
-      price_type_id: r.price_type_id,
-      price: r.price,
-      currency_id: r.currency_id,
-      status: r.status ?? 1,
-    }));
-    return c.json({ ...row, prices });
+    const priceMap: Record<number, ProductPriceValue> = {};
+    const prices = (pricesRows ?? []).map((r) => {
+      const value = {
+        price_type_id: r.price_type_id,
+        price: r.price,
+        currency_id: r.currency_id,
+        status: r.status ?? 1,
+      };
+      priceMap[r.price_type_id] = {
+        price: r.price,
+        currency_id: r.currency_id,
+        status: r.status ?? 1,
+      };
+      return value;
+    });
+    const { results: priceTypeRows } = await c.env.DB.prepare(
+      `SELECT id FROM product_price_types WHERE is_deleted = 0`
+    ).all<{ id: number }>();
+    const rules = await loadCalculationRules(c.env.DB);
+    for (const pt of priceTypeRows ?? []) {
+      if (priceMap[pt.id]) continue;
+      const resolved = resolveProductPriceType({
+        target: String(pt.id),
+        basePrice: Number(row.price) || 0,
+        baseCurrencyId: row.currency_id != null ? Number(row.currency_id) : null,
+        prices: priceMap,
+        rules,
+        brandId: row.brand_id != null ? Number(row.brand_id) : null,
+        categoryId: row.category_id != null ? Number(row.category_id) : null,
+      });
+      if (resolved) {
+        prices.push({
+          price_type_id: pt.id,
+          price: resolved.price,
+          currency_id: resolved.currency_id,
+          status: resolved.status ?? 1,
+          is_calculated: true,
+        } as typeof prices[number] & { is_calculated: boolean });
+      }
+    }
+    const resolvedEcommerce = resolveProductPriceType({
+      target: '1',
+      basePrice: Number(row.price) || 0,
+      baseCurrencyId: row.currency_id != null ? Number(row.currency_id) : null,
+      prices: priceMap,
+      rules,
+      brandId: row.brand_id != null ? Number(row.brand_id) : null,
+      categoryId: row.category_id != null ? Number(row.category_id) : null,
+    });
+    return c.json({
+      ...row,
+      ecommerce_price: resolvedEcommerce?.price ?? null,
+      ecommerce_currency_id: resolvedEcommerce?.currency_id ?? null,
+      prices,
+    });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -2102,10 +2420,22 @@ async function runSingleIdeasoftTransfer(
   const sku = (row.sku ?? '').trim();
   if (!sku) return { ok: false, error: 'IdeaSoft aktarımı için ana ürün SKU dolu olmalıdır' };
 
-  /** Admin API: `price1` = master ürün genel fiyatı (`products.price`); para birimi = `products.currency_id` eşlemesi. */
-  const transferPrice = Number.isFinite(Number(row.price)) ? Math.max(0, Number(row.price)) : 0;
+  const transferRules = await loadCalculationRules(db);
+  const transferPriceMaps = await loadProductPricesByProductIds(db, [row.id]);
+  const transferResolvedPrice = resolveProductPriceType({
+    target: '1',
+    basePrice: row.price,
+    baseCurrencyId: row.currency_id ?? null,
+    prices: transferPriceMaps[row.id] ?? {},
+    rules: transferRules,
+    brandId: row.brand_id ?? null,
+    categoryId: row.category_id ?? null,
+  });
+  const transferPrice = Number.isFinite(Number(transferResolvedPrice?.price)) ? Math.max(0, Number(transferResolvedPrice?.price)) : 0;
   const masterCurrencyIdForIdeasoft =
-    row.currency_id != null && row.currency_id > 0 ? row.currency_id : null;
+    transferResolvedPrice?.currency_id != null && transferResolvedPrice.currency_id > 0
+      ? transferResolvedPrice.currency_id
+      : (row.currency_id != null && row.currency_id > 0 ? row.currency_id : null);
 
   try {
     let isBrandId: number | undefined;
@@ -2749,6 +3079,7 @@ app.post('/api/products', async (c) => {
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
       ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string;
+      trendyol_product_id?: string | number | null; trendyol_category_id?: string | number | null;
     }>();
     const name = (body.name || '').trim();
     if (!name) return c.json({ error: 'Ürün adı gerekli' }, 400);
@@ -2863,6 +3194,7 @@ app.put('/api/products/:id', async (c) => {
       image?: string; tax_rate?: number; supplier_code?: string; gtip_code?: string;
       sort_order?: number; status?: number;
       ecommerce_name?: string; main_description?: string; seo_slug?: string; seo_title?: string; seo_description?: string; seo_keywords?: string;
+      trendyol_product_id?: string | number | null; trendyol_category_id?: string | number | null;
     }>();
     const existing = await c.env.DB.prepare(`SELECT id FROM products WHERE id = ? AND is_deleted = 0`).bind(id).first();
     if (!existing) return c.json({ error: 'Ürün bulunamadı' }, 404);
@@ -2885,6 +3217,16 @@ app.put('/api/products/:id', async (c) => {
     if (body.gtip_code !== undefined) { updates.push('gtip_code = ?'); values.push(body.gtip_code?.trim() || null); }
     if (body.sort_order !== undefined) { updates.push('sort_order = ?'); values.push(body.sort_order); }
     if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status ? 1 : 0); }
+    if (body.trendyol_product_id !== undefined) {
+      updates.push('trendyol_product_id = ?');
+      const ty = body.trendyol_product_id == null ? '' : String(body.trendyol_product_id).trim();
+      values.push(ty || null);
+    }
+    if (body.trendyol_category_id !== undefined) {
+      updates.push('trendyol_category_id = ?');
+      const tyCat = body.trendyol_category_id == null ? 0 : Number(body.trendyol_category_id);
+      values.push(Number.isFinite(tyCat) && tyCat > 0 ? tyCat : null);
+    }
     if (body.ecommerce_enabled !== undefined) { updates.push('ecommerce_enabled = ?'); values.push(body.ecommerce_enabled ? 1 : 0); }
     if (body.ecommerce_discount_type !== undefined) {
       updates.push('ecommerce_discount_type = ?');
@@ -3077,7 +3419,7 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
       images?: string[]; uploaded_image_paths?: string[];
       update_price?: boolean; update_description?: boolean; update_images?: boolean;
     }>().catch(() => null);
-    const ocProductSql = `SELECT p.id, p.name, p.sku, p.image, p.quantity, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
+    const ocProductSql = `SELECT p.id, p.name, p.sku, p.brand_id, p.category_id, p.currency_id, p.price, p.image, p.quantity, COALESCE(p.ecommerce_enabled, 1) as ecommerce_enabled, pd.ecommerce_name, pd.main_description, pd.seo_slug, pd.seo_title, pd.seo_description, pd.seo_keywords
        FROM products p
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`;
@@ -3085,6 +3427,10 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
       id: number;
       name: string;
       sku: string | null;
+      brand_id: number | null;
+      category_id: number | null;
+      currency_id: number | null;
+      price: number;
       image: string | null;
       quantity: number;
       ecommerce_enabled: number;
@@ -3098,10 +3444,18 @@ app.post('/api/products/:id/publish/opencart', async (c) => {
     if (!productRow) return c.json({ error: 'Ürün bulunamadı' }, 404);
     if (productRow.ecommerce_enabled === 0) return c.json({ error: 'Bu ürün e-ticarete kapalı. Önce ürün listesinde E-Ticaret anahtarını açın.' }, 400);
 
-    const priceRow = await c.env.DB.prepare(
-      `SELECT price FROM product_prices WHERE product_id = ? AND price_type_id = 1 AND is_deleted = 0 LIMIT 1`
-    ).bind(id).first<{ price: number }>();
-    const productPrice = priceRow?.price ?? 0;
+    const rules = await loadCalculationRules(c.env.DB);
+    const priceMaps = await loadProductPricesByProductIds(c.env.DB, [productRow.id]);
+    const resolvedPrice = resolveProductPriceType({
+      target: '1',
+      basePrice: productRow.price,
+      baseCurrencyId: productRow.currency_id ?? null,
+      prices: priceMaps[productRow.id] ?? {},
+      rules,
+      brandId: productRow.brand_id ?? null,
+      categoryId: productRow.category_id ?? null,
+    });
+    const productPrice = resolvedPrice?.price ?? 0;
 
     const ecommerceName = body?.ecommerce_name !== undefined ? String(body.ecommerce_name ?? '').trim() : (productRow.ecommerce_name ?? '').trim();
     const mainDescription = body?.main_description !== undefined ? String(body.main_description ?? '').trim() : (productRow.main_description ?? '').trim();
@@ -6744,6 +7098,7 @@ app.get('/api/product-categories', async (c) => {
     const limit = Math.min(9999, Math.max(1, parseInt(c.req.query('limit') || '10')));
     const offset = (page - 1) * limit;
     const includeInactive = c.req.query('include_inactive') === '1' || c.req.query('all_status') === '1';
+    const includeHierarchy = c.req.query('include_hierarchy') === '1';
     let where = 'WHERE is_deleted = 0';
     if (!includeInactive) {
       where += ' AND (status = 1 OR status IS NULL)';
@@ -6783,7 +7138,75 @@ app.get('/api/product-categories', async (c) => {
     const { results } = await c.env.DB.prepare(
       `SELECT * FROM product_categories ${where} ORDER BY sort_order, name LIMIT ? OFFSET ?`
     ).bind(...params, limit, offset).all();
-    return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+    if (!includeHierarchy) return c.json({ data: results, total: countRes?.total ?? 0, page, limit });
+
+    type CategoryHierarchyRow = {
+      id: number;
+      name: string;
+      category_id: number | null;
+      group_id: number | null;
+    };
+    const categoryById = new Map<number, CategoryHierarchyRow>();
+    const addCategoryRows = (rows: CategoryHierarchyRow[]) => {
+      for (const row of rows) {
+        if (row.id != null) categoryById.set(Number(row.id), row);
+      }
+    };
+    addCategoryRows(
+      (results as unknown[]).map((row) => {
+        const r = row as Record<string, unknown>;
+        return {
+          id: Number(r.id),
+          name: String(r.name ?? ''),
+          category_id: r.category_id == null ? null : Number(r.category_id),
+          group_id: r.group_id == null ? null : Number(r.group_id),
+        };
+      }).filter((row) => Number.isFinite(row.id) && row.name),
+    );
+    const fetchMissingParents = async (ids: number[]) => {
+      const missing = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0 && !categoryById.has(id)))];
+      for (let i = 0; i < missing.length; i += 40) {
+        const chunk = missing.slice(i, i + 40);
+        if (chunk.length === 0) continue;
+        const { results: parentRows } = await c.env.DB.prepare(
+          `SELECT id, name, category_id, group_id FROM product_categories WHERE is_deleted = 0 AND id IN (${chunk.map(() => '?').join(',')})`
+        ).bind(...chunk).all();
+        addCategoryRows(parentRows as CategoryHierarchyRow[]);
+      }
+    };
+    let pendingParentIds = [...categoryById.values()]
+      .flatMap((row) => [row.category_id, row.group_id])
+      .filter((id): id is number => Number.isFinite(Number(id)) && Number(id) > 0)
+      .map(Number);
+    for (let depth = 0; depth < 8 && pendingParentIds.length > 0; depth += 1) {
+      await fetchMissingParents(pendingParentIds);
+      pendingParentIds = [...categoryById.values()]
+        .flatMap((row) => [row.category_id, row.group_id])
+        .filter((id): id is number => Number.isFinite(Number(id)) && Number(id) > 0 && !categoryById.has(Number(id)))
+        .map(Number);
+    }
+    const buildHierarchy = (row: CategoryHierarchyRow): string[] => {
+      const names: string[] = [];
+      const seen = new Set<number>();
+      let current: CategoryHierarchyRow | undefined = row;
+      while (current && !seen.has(current.id)) {
+        seen.add(current.id);
+        names.unshift(current.name);
+        const parentId = current.category_id || current.group_id || null;
+        current = parentId ? categoryById.get(Number(parentId)) : undefined;
+      }
+      return names;
+    };
+    const data = (results as Record<string, unknown>[]).map((row) => {
+      const id = Number(row.id);
+      const hierarchy = categoryById.has(id) ? buildHierarchy(categoryById.get(id)!) : [];
+      return {
+        ...row,
+        hierarchy_names: hierarchy,
+        parent_hierarchy_names: hierarchy.slice(0, -1),
+      };
+    });
+    return c.json({ data, total: countRes?.total ?? 0, page, limit });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Hata' }, 500);
   }
@@ -9087,23 +9510,37 @@ app.post('/api/opencart-mysql/products/bulk-update-prices', async (c) => {
 
       let updated = 0;
       let failed = 0;
+      const rules = await loadCalculationRules(c.env.DB);
       for (const oc of ocProducts) {
         const modelVal = String(oc.model ?? '').trim();
         if (!modelVal) continue;
         const modelLower = modelVal.toLowerCase();
-        const ppRow = await c.env.DB.prepare(
-          `SELECT pp.price FROM product_prices pp
-           JOIN products p ON p.id = pp.product_id AND p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1
-           WHERE LOWER(TRIM(COALESCE(p.sku, ''))) = ? AND pp.price_type_id = 1 AND pp.is_deleted = 0 AND (pp.status = 1 OR pp.status IS NULL)
+        const productRow = await c.env.DB.prepare(
+          `SELECT p.id, p.price, p.currency_id, p.brand_id, p.category_id FROM products p
+           WHERE p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1 AND LOWER(TRIM(COALESCE(p.sku, ''))) = ?
            LIMIT 1`
         )
           .bind(modelLower)
-          .first<{ price: number }>();
-        if (ppRow == null || ppRow.price == null) {
+          .first<{ id: number; price: number; currency_id: number | null; brand_id: number | null; category_id: number | null }>();
+        if (!productRow) {
           failed++;
           continue;
         }
-        const newPrice = Math.round(ppRow.price * multiplier * 100) / 100;
+        const priceMaps = await loadProductPricesByProductIds(c.env.DB, [productRow.id]);
+        const resolved = resolveProductPriceType({
+          target: '1',
+          basePrice: productRow.price,
+          baseCurrencyId: productRow.currency_id ?? null,
+          prices: priceMaps[productRow.id] ?? {},
+          rules,
+          brandId: productRow.brand_id ?? null,
+          categoryId: productRow.category_id ?? null,
+        });
+        if (!resolved) {
+          failed++;
+          continue;
+        }
+        const newPrice = Math.round(resolved.price * multiplier * 100) / 100;
         await conn.execute(`UPDATE oc_product SET price = ? WHERE product_id = ?`, [newPrice, oc.product_id]);
         updated++;
       }
@@ -9673,6 +10110,35 @@ app.post('/api/export/fetch', async (c) => {
          WHERE p.is_deleted = 0 AND COALESCE(p.ecommerce_enabled, 1) = 1 ORDER BY p.sort_order, p.id LIMIT ?`;
       const { results } = await d1AllWithSeoKeywordsSelectFallback<Record<string, unknown>>(c.env.DB, exportProductSql, [limit]);
       data = results ?? [];
+      if (data.length > 0) {
+        const rows = data as Record<string, unknown>[];
+        const ids = rows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+        const rules = await loadCalculationRules(c.env.DB);
+        const priceMaps = await loadProductPricesByProductIds(c.env.DB, ids);
+        data = rows.map((row) => {
+          const productId = Number(row.id);
+          const prices = priceMaps[productId] ?? {};
+          const basePrice = Number(row.price) || 0;
+          const baseCurrencyId = row.currency_id != null ? Number(row.currency_id) : null;
+          const brandId = row.brand_id != null ? Number(row.brand_id) : null;
+          const categoryId = row.category_id != null ? Number(row.category_id) : null;
+          const resolved: Record<string, unknown> = { ...row };
+          for (const target of [1, 2, 3, 4, 5]) {
+            const priceValue = resolveProductPriceType({
+              target: String(target),
+              basePrice,
+              baseCurrencyId,
+              prices,
+              rules,
+              brandId,
+              categoryId,
+            });
+            if (target === 1) resolved.ecommerce_price = priceValue?.price ?? null;
+            else resolved[`price_type_${target}`] = priceValue?.price ?? null;
+          }
+          return resolved;
+        });
+      }
     } else if (dataSource === 'customer') {
       const { results } = await c.env.DB.prepare(
         `SELECT id, title as name, code, group_id as group_id, type_id, tax_no as tax_number, tax_office, email, phone, phone_mobile, status
@@ -10890,6 +11356,759 @@ app.get('/api/trendyol/categories', async (c) => {
   }
 });
 
+/** Trendyol marka arama — getBrands/by-name */
+app.get('/api/trendyol/brands', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const settings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    const supplierId = settings.supplier_id?.trim();
+    const apiKey = settings.api_key?.trim();
+    const apiSecret = settings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json(
+        { error: 'Trendyol API ayarları eksik. Ayarlar › Marketplace › Trendyol bilgilerini kaydedin.' },
+        400,
+      );
+    }
+    const name = (c.req.query('name') || c.req.query('q') || '').trim();
+    if (name.length < 2) return c.json({ brands: [] });
+
+    const userAgent = (settings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = settings.environment?.trim().toLowerCase();
+    const apiUrl = settings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const storeFrontCode = (tySettings.storefront_code || tySettings.store_front_code || 'TR').trim().toUpperCase();
+    const trendyolHeaders: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'Content-Type': 'application/json',
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+      storeFrontCode,
+    };
+
+    const res = await fetch(`${base}/integration/product/brands/by-name?name=${encodeURIComponent(name)}`, {
+      method: 'GET',
+      headers: trendyolHeaders,
+    });
+    const text = await res.text();
+    let raw: unknown = null;
+    try {
+      raw = text ? JSON.parse(text) : null;
+    } catch {
+      raw = { raw: text };
+    }
+    if (!res.ok) {
+      return c.json({ error: `Trendyol ${res.status}`, detail: text.slice(0, 800), raw }, 400);
+    }
+    const rawObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    const listRaw =
+      Array.isArray(rawObj.brands)
+        ? rawObj.brands
+        : Array.isArray(rawObj.content)
+          ? rawObj.content
+          : Array.isArray(rawObj.data)
+            ? rawObj.data
+            : Array.isArray(raw)
+              ? raw
+              : [];
+    const brands = (listRaw as unknown[])
+      .map((item) => {
+        const row = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+        const id = Number(row.id ?? row.brandId);
+        const name = String(row.name ?? row.brandName ?? '').trim();
+        return Number.isFinite(id) && id > 0 && name ? { id, name } : null;
+      })
+      .filter((x): x is { id: number; name: string } => x != null);
+    return c.json({ brands, raw });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Trendyol markaları alınamadı' }, 500);
+  }
+});
+
+/** Trendyol ürün listesi — filterProducts V1 */
+app.get('/api/trendyol/products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const settings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    const supplierId = settings.supplier_id?.trim();
+    const apiKey = settings.api_key?.trim();
+    const apiSecret = settings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json(
+        {
+          error:
+            'Trendyol API ayarları eksik. Ayarlar › Marketplace › Trendyol: Satıcı ID, API Key ve API Secret kaydedin.',
+        },
+        400,
+      );
+    }
+
+    const page = Math.max(1, parseInt(c.req.query('page') || '1', 10));
+    const size = Math.min(200, Math.max(1, parseInt(c.req.query('limit') || c.req.query('size') || '25', 10)));
+    const search = (c.req.query('search') || '').trim();
+    const productName = (c.req.query('productName') || c.req.query('title') || '').trim();
+    const params = new URLSearchParams({
+      page: String(page - 1),
+      size: String(size),
+    });
+    if (search) params.set('barcode', search);
+    for (const key of [
+      'barcode',
+      'stockCode',
+      'productMainId',
+      'approved',
+      'onSale',
+      'archived',
+      'rejected',
+      'blacklisted',
+      'brandId',
+      'brandIds',
+      'categoryId',
+      'categoryIds',
+    ]) {
+      const value = c.req.query(key);
+      if (value != null && String(value).trim() !== '') params.set(key, String(value).trim());
+    }
+
+    const userAgent = (settings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = settings.environment?.trim().toLowerCase();
+    const apiUrl = settings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const trendyolHeaders: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'Content-Type': 'application/json',
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+    };
+
+    const res = await fetch(`${base}/integration/product/sellers/${supplierId}/products?${params.toString()}`, {
+      method: 'GET',
+      headers: trendyolHeaders,
+    });
+    const text = await res.text();
+    let raw: unknown = null;
+    try {
+      raw = text ? JSON.parse(text) : null;
+    } catch {
+      raw = { raw: text };
+    }
+    if (!res.ok) {
+      return c.json({ error: `Trendyol ${res.status}`, detail: text.slice(0, 800), raw }, 400);
+    }
+
+    const rawObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    const contentRaw =
+      Array.isArray(rawObj.content)
+        ? rawObj.content
+        : Array.isArray(rawObj.products)
+          ? rawObj.products
+          : Array.isArray(rawObj.data)
+            ? rawObj.data
+            : Array.isArray(raw)
+              ? raw
+              : [];
+    let data = (contentRaw as unknown[]).map((item, index) => {
+      const row = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+      const idRaw = row.productContentId ?? row.id ?? row.productCode ?? row.barcode ?? index;
+      const idNum = typeof idRaw === 'number' && Number.isFinite(idRaw) ? idRaw : parseInt(String(idRaw ?? index), 10);
+      const brand = row.brand;
+      const brandName =
+        typeof brand === 'string'
+          ? brand
+          : brand && typeof brand === 'object' && !Array.isArray(brand)
+            ? String((brand as Record<string, unknown>).name ?? '')
+            : '';
+      const brandObj = brand && typeof brand === 'object' && !Array.isArray(brand) ? (brand as Record<string, unknown>) : null;
+      const brandIdRaw = row.brandId ?? row.brandID ?? brandObj?.id;
+      const categoryIdRaw = row.categoryId ?? row.categoryID ?? row.pimCategoryId ?? row.pimCategoryID;
+      const brandId = Number(brandIdRaw);
+      const categoryId = Number(categoryIdRaw);
+      return {
+        id: Number.isFinite(idNum) ? idNum : index,
+        name: String(row.title ?? row.name ?? row.productName ?? '—'),
+        sku: String(row.stockCode ?? row.sku ?? ''),
+        barcode: row.barcode ?? null,
+        productMainId: row.productMainId ?? null,
+        stockCode: row.stockCode ?? null,
+        title: row.title ?? null,
+        brandId: Number.isFinite(brandId) && brandId > 0 ? brandId : null,
+        categoryId: Number.isFinite(categoryId) && categoryId > 0 ? categoryId : null,
+        brandName: (row.brandName ?? brandName) || null,
+        categoryName: row.categoryName ?? null,
+        price: row.salePrice ?? row.listPrice ?? 0,
+        salePrice: row.salePrice ?? null,
+        listPrice: row.listPrice ?? null,
+        quantity: row.quantity ?? row.stockQuantity ?? null,
+        approved: row.approved ?? null,
+        onSale: row.onSale ?? null,
+        archived: row.archived ?? null,
+        currency_symbol: '₺',
+        raw: row,
+      };
+    });
+    if (productName) {
+      const needle = normalizeForSearch(productName);
+      data = data.filter((row) =>
+        normalizeForSearch(String(row.title ?? row.name ?? '')).includes(needle)
+      );
+    }
+    const barcodeKeys = [...new Set(data.map((row) => String(row.barcode ?? '').trim()).filter(Boolean))];
+    const stockKeys = [...new Set(data.map((row) => String(row.stockCode ?? row.sku ?? '').trim()).filter(Boolean))];
+    const trendyolProductIds = [...new Set(data.map((row) => String(row.id ?? '').trim()).filter(Boolean))];
+    const masterMatches = new Map<string, { id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null; trendyol_category_id: number | null }>();
+    const addMasterRows = (rows: { id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null; trendyol_category_id: number | null }[]) => {
+      for (const r of rows) {
+        const ty = String(r.trendyol_product_id ?? '').trim();
+        const bc = String(r.barcode ?? '').trim();
+        const sku = String(r.sku ?? '').trim();
+        if (ty) masterMatches.set(`trendyol:${ty}`, r);
+        if (bc && !masterMatches.has(`barcode:${bc}`)) masterMatches.set(`barcode:${bc}`, r);
+        if (sku && !masterMatches.has(`sku:${sku}`)) masterMatches.set(`sku:${sku}`, r);
+      }
+    };
+    const queryMasterRowsByColumn = async (column: 'barcode' | 'sku' | 'trendyol_product_id', keys: string[]) => {
+      const chunkSize = 40;
+      for (let i = 0; i < keys.length; i += chunkSize) {
+        const chunk = keys.slice(i, i + chunkSize);
+        if (chunk.length === 0) continue;
+        const { results: masterRows } = await c.env.DB.prepare(
+          `SELECT id, name, sku, barcode, trendyol_product_id, trendyol_category_id FROM products WHERE is_deleted = 0 AND TRIM(COALESCE(${column}, '')) IN (${chunk.map(() => '?').join(',')})`
+        ).bind(...chunk).all();
+        addMasterRows(masterRows as { id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null; trendyol_category_id: number | null }[]);
+      }
+    };
+    if (barcodeKeys.length > 0) {
+      await queryMasterRowsByColumn('barcode', barcodeKeys);
+    }
+    if (stockKeys.length > 0) {
+      await queryMasterRowsByColumn('sku', stockKeys);
+    }
+    if (trendyolProductIds.length > 0) {
+      await queryMasterRowsByColumn('trendyol_product_id', trendyolProductIds);
+    }
+    const brandIds = [...new Set(data.map((row) => Number(row.brandId)).filter((n) => Number.isFinite(n) && n > 0))];
+    const categoryIds = [...new Set(data.map((row) => Number(row.categoryId)).filter((n) => Number.isFinite(n) && n > 0))];
+    const masterBrandsByTyId = new Map<number, { id: number; name: string; code: string | null; trendyol_brand_id: number | null }>();
+    const masterCategoriesByTyId = new Map<number, { id: number; name: string; code: string | null; color: string | null; trendyol_category_id: number | null }>();
+    const chunkValues = <T,>(values: T[], size = 40): T[][] => {
+      const out: T[][] = [];
+      for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size));
+      return out;
+    };
+    for (const chunk of chunkValues(brandIds)) {
+      const { results: rows } = await c.env.DB.prepare(
+        `SELECT id, name, code, trendyol_brand_id FROM product_brands WHERE is_deleted = 0 AND trendyol_brand_id IN (${chunk.map(() => '?').join(',')})`
+      ).bind(...chunk).all();
+      for (const row of rows as { id: number; name: string; code: string | null; trendyol_brand_id: number | null }[]) {
+        if (row.trendyol_brand_id != null) masterBrandsByTyId.set(Number(row.trendyol_brand_id), row);
+      }
+    }
+    for (const chunk of chunkValues(categoryIds)) {
+      const { results: rows } = await c.env.DB.prepare(
+        `SELECT id, name, code, color, trendyol_category_id FROM product_categories WHERE is_deleted = 0 AND trendyol_category_id IN (${chunk.map(() => '?').join(',')})`
+      ).bind(...chunk).all();
+      for (const row of rows as { id: number; name: string; code: string | null; color: string | null; trendyol_category_id: number | null }[]) {
+        if (row.trendyol_category_id != null) masterCategoriesByTyId.set(Number(row.trendyol_category_id), row);
+      }
+    }
+    const dataWithMaster = data.map((row) => {
+      const bc = String(row.barcode ?? '').trim();
+      const sku = String(row.stockCode ?? row.sku ?? '').trim();
+      const trendyolId = String(row.id ?? '').trim();
+      const master =
+        (trendyolId ? masterMatches.get(`trendyol:${trendyolId}`) : null) ??
+        (bc ? masterMatches.get(`barcode:${bc}`) : null) ??
+        (sku ? masterMatches.get(`sku:${sku}`) : null) ??
+        null;
+      const brandId = Number(row.brandId);
+      const categoryId = Number(row.categoryId);
+      const masterBrand =
+        (Number.isFinite(brandId) && brandId > 0 ? masterBrandsByTyId.get(brandId) : null) ??
+        null;
+      const masterCategory =
+        (Number.isFinite(categoryId) && categoryId > 0 ? masterCategoriesByTyId.get(categoryId) : null) ??
+        null;
+      return {
+        ...row,
+        masterBrand: masterBrand
+          ? {
+              id: masterBrand.id,
+              name: masterBrand.name,
+              code: masterBrand.code,
+              trendyol_brand_id: masterBrand.trendyol_brand_id,
+              isLinked: Boolean(Number.isFinite(brandId) && brandId > 0 && Number(masterBrand.trendyol_brand_id) === brandId),
+            }
+          : null,
+        masterCategory: masterCategory
+          ? {
+              id: masterCategory.id,
+              name: masterCategory.name,
+              code: masterCategory.code,
+              color: masterCategory.color,
+              trendyol_category_id: masterCategory.trendyol_category_id,
+              isLinked: Boolean(Number.isFinite(categoryId) && categoryId > 0 && Number(masterCategory.trendyol_category_id) === categoryId),
+            }
+          : null,
+        masterProduct: master
+          ? {
+              id: master.id,
+              name: master.name,
+              sku: master.sku,
+              barcode: master.barcode,
+              trendyol_product_id: master.trendyol_product_id,
+              trendyol_category_id: master.trendyol_category_id,
+              isLinked: Boolean(trendyolId && String(master.trendyol_product_id ?? '') === trendyolId),
+            }
+          : null,
+      };
+    });
+    const totalRaw = rawObj.totalElements ?? rawObj.total ?? rawObj.totalCount ?? rawObj.count;
+    const totalNum = productName
+      ? dataWithMaster.length
+      : typeof totalRaw === 'number' && Number.isFinite(totalRaw)
+        ? totalRaw
+        : dataWithMaster.length;
+    return c.json({
+      data: dataWithMaster,
+      total: totalNum,
+      page,
+      limit: size,
+      rawPage: rawObj.number ?? page - 1,
+      raw,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Trendyol ürünleri alınamadı' }, 500);
+  }
+});
+
+/** Trendyol ürününü master ürün kaydına bağla */
+app.post('/api/trendyol/products/link-master', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      master_product_id?: number;
+      trendyol_product_id?: string | number;
+      trendyol_brand_id?: string | number | null;
+      trendyol_category_id?: string | number | null;
+    }>().catch(() => null);
+    const masterId = Number(body?.master_product_id);
+    const trendyolId = body?.trendyol_product_id == null ? '' : String(body.trendyol_product_id).trim();
+    const trendyolBrandId = body?.trendyol_brand_id == null ? null : Number(body.trendyol_brand_id);
+    const trendyolCategoryId = body?.trendyol_category_id == null ? null : Number(body.trendyol_category_id);
+    if (!Number.isFinite(masterId) || masterId <= 0) return c.json({ error: 'master_product_id gerekli' }, 400);
+    if (!trendyolId) return c.json({ error: 'trendyol_product_id gerekli' }, 400);
+    const existing = await c.env.DB
+      .prepare(`SELECT id, brand_id, category_id FROM products WHERE id = ? AND is_deleted = 0 LIMIT 1`)
+      .bind(masterId)
+      .first<{ id: number; brand_id: number | null; category_id: number | null }>();
+    if (!existing) return c.json({ error: 'Master ürün bulunamadı' }, 404);
+    await c.env.DB
+      .prepare(`UPDATE products SET trendyol_product_id = NULL, updated_at = datetime('now') WHERE trendyol_product_id = ? AND id != ? AND is_deleted = 0`)
+      .bind(trendyolId, masterId)
+      .run();
+    await c.env.DB
+      .prepare(`UPDATE products SET trendyol_product_id = ?, trendyol_category_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+      .bind(
+        trendyolId,
+        Number.isFinite(trendyolCategoryId) && Number(trendyolCategoryId) > 0 ? Number(trendyolCategoryId) : null,
+        masterId,
+      )
+      .run();
+    const masterBrandId = Number(existing.brand_id);
+    if (Number.isFinite(masterBrandId) && masterBrandId > 0 && Number.isFinite(trendyolBrandId) && Number(trendyolBrandId) > 0) {
+      await c.env.DB
+        .prepare(`UPDATE product_brands SET trendyol_brand_id = NULL, updated_at = datetime('now') WHERE is_deleted = 0 AND trendyol_brand_id = ? AND id != ?`)
+        .bind(Number(trendyolBrandId), masterBrandId)
+        .run();
+      await c.env.DB
+        .prepare(`UPDATE product_brands SET trendyol_brand_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+        .bind(Number(trendyolBrandId), masterBrandId)
+        .run();
+    }
+    const masterCategoryId = Number(existing.category_id);
+    if (Number.isFinite(masterCategoryId) && masterCategoryId > 0 && Number.isFinite(trendyolCategoryId) && Number(trendyolCategoryId) > 0) {
+      await c.env.DB
+        .prepare(`UPDATE product_categories SET trendyol_category_id = NULL, updated_at = datetime('now') WHERE is_deleted = 0 AND trendyol_category_id = ? AND id != ?`)
+        .bind(Number(trendyolCategoryId), masterCategoryId)
+        .run();
+      await c.env.DB
+        .prepare(`UPDATE product_categories SET trendyol_category_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+        .bind(Number(trendyolCategoryId), masterCategoryId)
+        .run();
+    }
+    return c.json({
+      ok: true,
+      master_product_id: masterId,
+      trendyol_product_id: trendyolId,
+      trendyol_brand_id: Number.isFinite(trendyolBrandId) && Number(trendyolBrandId) > 0 ? Number(trendyolBrandId) : null,
+      trendyol_category_id: Number.isFinite(trendyolCategoryId) && Number(trendyolCategoryId) > 0 ? Number(trendyolCategoryId) : null,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Eşleştirme kaydedilemedi' }, 500);
+  }
+});
+
+/** Trendyol markasını master marka kaydına bağla */
+app.post('/api/trendyol/brands/link-master', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ master_brand_id?: number; trendyol_brand_id?: number | string }>().catch(() => null);
+    const masterId = Number(body?.master_brand_id);
+    const trendyolId = Number(body?.trendyol_brand_id);
+    if (!Number.isFinite(masterId) || masterId <= 0) return c.json({ error: 'master_brand_id gerekli' }, 400);
+    if (!Number.isFinite(trendyolId) || trendyolId <= 0) return c.json({ error: 'trendyol_brand_id gerekli' }, 400);
+    const existing = await c.env.DB
+      .prepare(`SELECT id FROM product_brands WHERE id = ? AND is_deleted = 0 LIMIT 1`)
+      .bind(masterId)
+      .first<{ id: number }>();
+    if (!existing) return c.json({ error: 'Master marka bulunamadı' }, 404);
+    await c.env.DB
+      .prepare(`UPDATE product_brands SET trendyol_brand_id = NULL, updated_at = datetime('now') WHERE is_deleted = 0 AND trendyol_brand_id = ? AND id != ?`)
+      .bind(trendyolId, masterId)
+      .run();
+    await c.env.DB
+      .prepare(`UPDATE product_brands SET trendyol_brand_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+      .bind(trendyolId, masterId)
+      .run();
+    return c.json({ ok: true, master_brand_id: masterId, trendyol_brand_id: trendyolId });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Marka eşleştirme kaydedilemedi' }, 500);
+  }
+});
+
+/** Trendyol kategorisini master kategori kaydına bağla */
+app.post('/api/trendyol/categories/link-master', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ master_category_id?: number; trendyol_category_id?: number | string }>().catch(() => null);
+    const masterId = Number(body?.master_category_id);
+    const trendyolId = Number(body?.trendyol_category_id);
+    if (!Number.isFinite(masterId) || masterId <= 0) return c.json({ error: 'master_category_id gerekli' }, 400);
+    if (!Number.isFinite(trendyolId) || trendyolId <= 0) return c.json({ error: 'trendyol_category_id gerekli' }, 400);
+    const existing = await c.env.DB
+      .prepare(`SELECT id FROM product_categories WHERE id = ? AND is_deleted = 0 LIMIT 1`)
+      .bind(masterId)
+      .first<{ id: number }>();
+    if (!existing) return c.json({ error: 'Master kategori bulunamadı' }, 404);
+    await c.env.DB
+      .prepare(`UPDATE product_categories SET trendyol_category_id = NULL, updated_at = datetime('now') WHERE is_deleted = 0 AND trendyol_category_id = ? AND id != ?`)
+      .bind(trendyolId, masterId)
+      .run();
+    await c.env.DB
+      .prepare(`UPDATE product_categories SET trendyol_category_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+      .bind(trendyolId, masterId)
+      .run();
+    return c.json({ ok: true, master_category_id: masterId, trendyol_category_id: trendyolId });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Kategori eşleştirme kaydedilemedi' }, 500);
+  }
+});
+
+/** Eşleşmiş master ürünün Trendyol fiyat/stok güncellemesi için fiyat seçenekleri */
+app.get('/api/trendyol/products/:masterProductId/price-options', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const masterId = Number(c.req.param('masterProductId'));
+    if (!Number.isFinite(masterId) || masterId <= 0) return c.json({ error: 'Geçerli master ürün ID gerekli' }, 400);
+    const product = await c.env.DB.prepare(
+      `SELECT p.id, p.name, p.brand_id, p.category_id, p.price, p.quantity, p.currency_id, cur.code as currency_code, cur.symbol as currency_symbol
+       FROM products p
+       LEFT JOIN product_currencies cur ON p.currency_id = cur.id AND cur.is_deleted = 0
+       WHERE p.id = ? AND p.is_deleted = 0 LIMIT 1`
+    ).bind(masterId).first<{
+      id: number;
+      name: string;
+      brand_id: number | null;
+      category_id: number | null;
+      price: number | null;
+      quantity: number | null;
+      currency_id: number | null;
+      currency_code: string | null;
+      currency_symbol: string | null;
+    }>();
+    if (!product) return c.json({ error: 'Master ürün bulunamadı' }, 404);
+
+    const ratesRow = await c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE category = 'parabirimleri' AND "key" = 'exchange_rates' AND is_deleted = 0 LIMIT 1`
+    ).first<{ value: string | null }>();
+    let rates: Record<string, number> = {};
+    try {
+      rates = ratesRow?.value ? JSON.parse(ratesRow.value) as Record<string, number> : {};
+    } catch {
+      rates = {};
+    }
+    const rateToTry = (code: string | null | undefined) => {
+      const c0 = String(code || 'TRY').trim().toUpperCase();
+      if (!c0 || c0 === 'TRY' || c0 === 'TL' || c0 === '₺') return 1;
+      const rate = Number(rates[c0]);
+      return Number.isFinite(rate) && rate > 0 ? rate : 1;
+    };
+    const toOption = (input: {
+      key: string;
+      label: string;
+      price: number | null;
+      currency_id: number | null;
+      currency_code: string | null;
+      currency_symbol: string | null;
+      status?: number | null;
+    }) => {
+      const price = Number(input.price ?? 0);
+      const rate = rateToTry(input.currency_code);
+      const tryPrice = Math.round(price * rate * 100) / 100;
+      return {
+        key: input.key,
+        label: input.label,
+        price,
+        currency_id: input.currency_id,
+        currency_code: input.currency_code || 'TRY',
+        currency_symbol: input.currency_symbol || '₺',
+        exchange_rate_to_try: rate,
+        try_price: tryPrice,
+        status: input.status ?? 1,
+      };
+    };
+    const options = [
+      toOption({
+        key: 'base',
+        label: 'Ana fiyat',
+        price: product.price,
+        currency_id: product.currency_id,
+        currency_code: product.currency_code,
+        currency_symbol: product.currency_symbol,
+      }),
+    ];
+    const rules = await loadCalculationRules(c.env.DB);
+    const priceMaps = await loadProductPricesByProductIds(c.env.DB, [masterId]);
+    const currenciesById = await loadCurrencySymbolsById(c.env.DB);
+    const { results: priceTypes } = await c.env.DB.prepare(
+      `SELECT id, name, code FROM product_price_types WHERE is_deleted = 0 ORDER BY sort_order, id`
+    ).all<{ id: number; name: string | null; code: string | null }>();
+    for (const pt of priceTypes ?? []) {
+      const resolved = resolveProductPriceType({
+        target: String(pt.id),
+        basePrice: Number(product.price ?? 0),
+        baseCurrencyId: product.currency_id ?? null,
+        prices: priceMaps[masterId] ?? {},
+        rules,
+        brandId: product.brand_id ?? null,
+        categoryId: product.category_id ?? null,
+        preferExisting: false,
+        preferExistingSources: false,
+      });
+      if (!resolved) continue;
+      const cur = resolved.currency_id != null ? currenciesById[resolved.currency_id] : null;
+      options.push(toOption({
+        key: `price_type:${pt.id}`,
+        label: pt.name || pt.code || `Fiyat tipi #${pt.id}`,
+        price: resolved.price,
+        currency_id: resolved.currency_id ?? product.currency_id,
+        currency_code: cur?.code ?? product.currency_code,
+        currency_symbol: cur?.symbol ?? product.currency_symbol,
+        status: resolved.status,
+      }));
+    }
+    return c.json({
+      product: {
+        id: product.id,
+        name: product.name,
+        quantity: product.quantity ?? 0,
+      },
+      options: options.filter((option) => Number.isFinite(option.price) && option.price > 0),
+      exchange_rates: rates,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Fiyat seçenekleri alınamadı' }, 500);
+  }
+});
+
+/** Trendyol ürün fiyat/stok güncellemesi — price-and-inventory */
+app.post('/api/trendyol/products/update-price-stock', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{
+      barcode?: string | null;
+      quantity?: number;
+      sale_price?: number;
+      list_price?: number;
+    }>().catch(() => null);
+    const barcode = String(body?.barcode ?? '').trim();
+    const quantity = Math.max(0, Math.floor(Number(body?.quantity)));
+    const salePrice = Math.round(Number(body?.sale_price) * 100) / 100;
+    const listPriceRaw = body?.list_price == null ? salePrice : Math.round(Number(body.list_price) * 100) / 100;
+    if (!barcode) return c.json({ error: 'barcode gerekli' }, 400);
+    if (!Number.isFinite(quantity) || quantity < 0) return c.json({ error: 'Geçerli miktar gerekli' }, 400);
+    if (!Number.isFinite(salePrice) || salePrice <= 0) return c.json({ error: 'Geçerli satış fiyatı gerekli' }, 400);
+    if (!Number.isFinite(listPriceRaw) || listPriceRaw < salePrice) return c.json({ error: 'Liste fiyatı satış fiyatından küçük olamaz' }, 400);
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const tySettings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) tySettings[r.key] = r.value ?? '';
+    }
+    const supplierId = tySettings.supplier_id?.trim();
+    const apiKey = tySettings.api_key?.trim();
+    const apiSecret = tySettings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json({ error: 'Trendyol API ayarları eksik (Satıcı ID, API Key, Secret).' }, 400);
+    }
+    const userAgent = (tySettings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = tySettings.environment?.trim().toLowerCase();
+    const apiUrl = tySettings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const trendyolHeaders: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'Content-Type': 'application/json',
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+    };
+    const payload = {
+      items: [{
+        barcode,
+        quantity,
+        salePrice,
+        listPrice: listPriceRaw,
+      }],
+    };
+    const res = await fetch(`${base}/integration/inventory/sellers/${supplierId}/products/price-and-inventory`, {
+      method: 'POST',
+      headers: trendyolHeaders,
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    let parsed: unknown = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = { raw: text };
+    }
+    if (!res.ok) {
+      return c.json({
+        error: `Trendyol ${res.status}`,
+        detail: text.slice(0, 800),
+        hint: res.status >= 500 ? 'Trendyol generic hata döndürdü. storeFrontCode header ve gönderilen payload kontrol edildi.' : undefined,
+        parsed,
+        payload,
+        storeFrontCode,
+      }, 400);
+    }
+    return c.json({ ok: true, payload, raw: parsed });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Trendyol fiyat/stok güncellenemedi' }, 500);
+  }
+});
+
+/** Trendyol ürün silme — product delete */
+app.delete('/api/trendyol/products/delete', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const body = await c.req.json<{ barcode?: string | null }>().catch(() => null);
+    const barcode = String(body?.barcode ?? '').trim();
+    if (!barcode) return c.json({ error: 'barcode gerekli' }, 400);
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const tySettings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) tySettings[r.key] = r.value ?? '';
+    }
+    const supplierId = tySettings.supplier_id?.trim();
+    const apiKey = tySettings.api_key?.trim();
+    const apiSecret = tySettings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json({ error: 'Trendyol API ayarları eksik (Satıcı ID, API Key, Secret).' }, 400);
+    }
+
+    const userAgent = (tySettings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = tySettings.environment?.trim().toLowerCase();
+    const apiUrl = tySettings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const storeFrontCode = (tySettings.storefront_code || tySettings.store_front_code || 'TR').trim().toUpperCase();
+    const payload = { items: [{ barcode }] };
+    const res = await fetch(`${base}/integration/product/sellers/${supplierId}/products`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Basic ' + auth,
+        'User-Agent': `${supplierId} - ${userAgent}`,
+        'Content-Type': 'application/json',
+        'x-clientip': clientIp,
+        'x-correlationid': crypto.randomUUID(),
+        'x-agentname': userAgent,
+        storeFrontCode,
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    let parsed: unknown = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = { raw: text };
+    }
+    if (!res.ok) {
+      return c.json({
+        error: `Trendyol ${res.status}`,
+        detail: text.slice(0, 800),
+        parsed,
+        payload,
+        storeFrontCode,
+      }, 400);
+    }
+    const parsedObj = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    return c.json({
+      ok: true,
+      batchRequestId: parsedObj.batchRequestId ?? parsedObj.batchRequestID ?? null,
+      raw: parsed,
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Trendyol ürün silinemedi' }, 500);
+  }
+});
+
 /** Master ürün → Trendyol createProducts (V1) — https://developers.trendyol.com/v2.0/docs/product-create-createproducts */
 app.post('/api/trendyol/products/create', async (c) => {
   try {
@@ -10936,9 +12155,8 @@ app.post('/api/trendyol/products/create', async (c) => {
 
     const pid = body.product_id;
     const row = await c.env.DB.prepare(
-      `SELECT p.id, p.name, p.sku, p.barcode, p.price, p.quantity, p.tax_rate, p.image,
-              pd.main_description, pd.ecommerce_name,
-              (SELECT price FROM product_prices WHERE product_id = p.id AND price_type_id = 1 AND is_deleted = 0 LIMIT 1) as ecommerce_price
+      `SELECT p.id, p.name, p.sku, p.barcode, p.brand_id, p.category_id, p.currency_id, p.price, p.quantity, p.tax_rate, p.image,
+              pd.main_description, pd.ecommerce_name
        FROM products p
        LEFT JOIN product_descriptions pd ON pd.product_id = p.id AND pd.is_deleted = 0
        WHERE p.id = ? AND p.is_deleted = 0`,
@@ -10949,13 +12167,15 @@ app.post('/api/trendyol/products/create', async (c) => {
         name: string;
         sku: string | null;
         barcode: string | null;
+        brand_id: number | null;
+        category_id: number | null;
+        currency_id: number | null;
         price: number | null;
         quantity: number | null;
         tax_rate: number | null;
         image: string | null;
         main_description: string | null;
         ecommerce_name: string | null;
-        ecommerce_price: number | null;
       }>();
     if (!row) return c.json({ error: 'Ürün bulunamadı' }, 404);
 
@@ -11005,12 +12225,23 @@ app.post('/api/trendyol/products/create', async (c) => {
     if (!descRaw) return c.json({ error: 'Ürün açıklaması (main_description) gerekli' }, 400);
     if (descRaw.length > 30000) return c.json({ error: 'Açıklama en fazla 30.000 karakter' }, 400);
 
+    const rules = await loadCalculationRules(c.env.DB);
+    const priceMaps = await loadProductPricesByProductIds(c.env.DB, [row.id]);
+    const resolvedSalePrice = resolveProductPriceType({
+      target: '1',
+      basePrice: Number(row.price ?? 0),
+      baseCurrencyId: row.currency_id ?? null,
+      prices: priceMaps[row.id] ?? {},
+      rules,
+      brandId: row.brand_id ?? null,
+      categoryId: row.category_id ?? null,
+    });
     const saleBase =
       body.sale_price != null && Number.isFinite(body.sale_price) && body.sale_price > 0
         ? Number(body.sale_price)
-        : row.ecommerce_price != null && Number(row.ecommerce_price) > 0
-          ? Number(row.ecommerce_price)
-          : Number(row.price ?? 0);
+        : resolvedSalePrice != null && Number(resolvedSalePrice.price) > 0
+          ? Number(resolvedSalePrice.price)
+          : 0;
     if (!Number.isFinite(saleBase) || saleBase <= 0) {
       return c.json({ error: 'Geçerli satış fiyatı yok (ürün fiyatı veya e-ticaret fiyatı)' }, 400);
     }

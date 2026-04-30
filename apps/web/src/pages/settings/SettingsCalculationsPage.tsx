@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Plus, Trash2, Save, Calculator } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -74,6 +74,42 @@ interface PriceFieldOption {
   label: string
 }
 
+interface CategoryOption {
+  id: number
+  name: string
+  code?: string
+  group_id?: number | null
+  category_id?: number | null
+  sort_order?: number
+}
+
+interface CategorySelectOption {
+  id: number
+  label: string
+  sortLabel: string
+}
+
+function buildCategoryPathLabel(category: CategoryOption, byId: Map<number, CategoryOption>): string {
+  const parts: string[] = []
+  const seen = new Set<number>()
+  let current: CategoryOption | undefined = category
+
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    parts.unshift(current.name)
+
+    const parentId: number | null =
+      current.category_id != null && current.category_id > 0
+        ? current.category_id
+        : current.group_id != null && current.group_id > 0
+          ? current.group_id
+          : null
+    current = parentId != null ? byId.get(parentId) : undefined
+  }
+
+  return parts.join(' > ')
+}
+
 export function SettingsCalculationsPage() {
   const [calculations, setCalculations] = useState<CalculationRule[]>([])
   const [priceFields, setPriceFields] = useState<PriceFieldOption[]>([])
@@ -88,22 +124,54 @@ export function SettingsCalculationsPage() {
 
   const [currencies, setCurrencies] = useState<{ id: number; name: string }[]>([])
   const [brands, setBrands] = useState<{ id: number; name: string }[]>([])
+  const [categories, setCategories] = useState<CategoryOption[]>([])
+
+  const categoryOptions = useMemo<CategorySelectOption[]>(() => {
+    const byId = new Map(categories.map((c) => [c.id, c]))
+    return categories
+      .map((category) => {
+        const label = buildCategoryPathLabel(category, byId)
+        return {
+          id: category.id,
+          label,
+          sortLabel: label.toLocaleLowerCase('tr'),
+        }
+      })
+      .sort((a, b) => a.sortLabel.localeCompare(b.sortLabel, 'tr'))
+  }, [categories])
+
+  const categoryLabelById = useMemo(
+    () => new Map(categoryOptions.map((category) => [category.id, category.label])),
+    [categoryOptions]
+  )
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [settingsRes, ptRes, curRes, brandsRes] = await Promise.all([
+      const [settingsRes, ptRes, curRes, brandsRes, categoriesRes] = await Promise.all([
         fetch(`${API_URL}/api/app-settings?category=${encodeURIComponent(HESAPLAMALAR_CATEGORY)}`),
         fetch(`${API_URL}/api/product-price-types?limit=9999`),
         fetch(`${API_URL}/api/product-currencies?limit=9999`),
         fetch(`${API_URL}/api/product-brands?limit=9999`),
+        fetch(`${API_URL}/api/product-categories?limit=9999`),
       ])
       const ptJson = await ptRes.json()
       const curJson = await curRes.json()
       const brandsJson = await brandsRes.json()
+      const categoriesJson = await categoriesRes.json()
       const ptList = ptJson?.data ?? []
       setCurrencies((curJson?.data ?? []).map((c: { id: number; name: string }) => ({ id: c.id, name: c.name })))
       setBrands((brandsJson?.data ?? []).map((b: { id: number; name: string }) => ({ id: b.id, name: b.name })))
+      setCategories(
+        (categoriesJson?.data ?? []).map((c: { id: number; name: string; code?: string; group_id?: number | null; category_id?: number | null; sort_order?: number }) => ({
+          id: c.id,
+          name: c.name,
+          code: c.code,
+          group_id: c.group_id,
+          category_id: c.category_id,
+          sort_order: c.sort_order ?? 0,
+        }))
+      )
       const fields: PriceFieldOption[] = [
         GENERAL_PRICE_FIELD,
         ...ptList.map((pt: { id: number; name: string }) => ({ id: String(pt.id), label: pt.name })),
@@ -145,6 +213,7 @@ export function SettingsCalculationsPage() {
       operations: [{ ...emptyOperation }],
       result_currency_id: null,
       brand_id: null,
+      category_id: null,
     })
     setEditingId(null)
     setError(null)
@@ -298,6 +367,11 @@ export function SettingsCalculationsPage() {
                           • {brands.find((b) => b.id === calc.brand_id)?.name ?? 'Marka'}
                         </span>
                       )}
+                      {calc.category_id != null && calc.category_id > 0 && (
+                        <span className="ml-1 text-muted-foreground">
+                          • {categoryLabelById.get(calc.category_id) ?? 'Kategori'}
+                        </span>
+                      )}
                     </CardDescription>
                   </div>
                 </CardHeader>
@@ -338,6 +412,21 @@ export function SettingsCalculationsPage() {
                 ))}
               </select>
               <p className="text-xs text-muted-foreground">Tümü seçilirse kural tüm markalar için geçerli olur.</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="calc-category">Kategori</Label>
+              <select
+                id="calc-category"
+                value={form?.category_id != null && form.category_id > 0 ? form.category_id : ''}
+                onChange={(e) => setForm((f) => f && { ...f, category_id: e.target.value ? Number(e.target.value) : null })}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="">Tümü</option>
+                {categoryOptions.map((c) => (
+                  <option key={c.id} value={c.id}>{c.label}</option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">Tümü seçilirse kural tüm kategoriler için geçerli olur.</p>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

@@ -23,7 +23,7 @@ import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog'
 import { API_URL } from '@/lib/api'
 import { normalizeForSearch } from '@/lib/utils'
 import { lookupFromSupplier } from '@/lib/supplierSource'
-import { applyCalculation, findRuleForBrand, type CalculationRule } from '@/lib/calculations'
+import { applyCalculationRulesToPrices, normalizeCalculationRules, type CalculationRule } from '@/lib/calculations'
 
 /** products tablosu sütunları - column_mappings eşleştirmesi için */
 const PRODUCT_COLUMNS = [
@@ -452,11 +452,7 @@ export function SuppliersPage() {
       let calculationRules: CalculationRule[] = []
       try {
         const parsed = settings?.calculations ? JSON.parse(settings.calculations) : []
-        calculationRules = Array.isArray(parsed) ? parsed : []
-        calculationRules = calculationRules.map((r: CalculationRule) => ({
-          ...r,
-          target: r.target === 'ecommerce_price' ? '1' : r.target,
-        }))
+        calculationRules = normalizeCalculationRules(parsed)
       } catch {
         /* ignore */
       }
@@ -470,10 +466,6 @@ export function SuppliersPage() {
       setUpdateProgressOpen(true)
       setUpdateProgress({ total: productsWithCode.length, processed: 0, updated: 0, current: '', supplierName: item.name })
       let updated = 0
-      const computeEcom = (price: number) => {
-        const rule = findRuleForBrand(calculationRules, '1', brandId)
-        return rule?.operations?.length ? applyCalculation(price, rule.operations) : price
-      }
       for (let i = 0; i < productsWithCode.length; i++) {
         const product = productsWithCode[i]
         const code = (product.supplier_code ?? '').trim()
@@ -482,33 +474,17 @@ export function SuppliersPage() {
         const result = await lookupFromSupplier(item, code, API_URL)
         if (!result || result.price <= 0) continue
         const { price, currency_id } = result
-        const priceRule = findRuleForBrand(calculationRules, 'price', brandId)
-        const effectivePrice =
-          priceRule?.source === 'price' && priceRule?.operations?.length
-            ? applyCalculation(price, priceRule.operations)
-            : price
+        const effectivePrice = price
         const curId = currency_id ?? product.currency_id
-        const prices: Record<number, { price: number; currency_id: number | null; status: number }> = {}
-        const sortedTypes = [...priceTypes].sort((a: { id: number }, b: { id: number }) => a.id - b.id)
-        for (const pt of sortedTypes) {
-          if (pt.id < 1) continue
-          const rule = findRuleForBrand(calculationRules, String(pt.id), brandId)
-          if (!rule || !rule.operations?.length) continue
-          const sourceVal = rule.source === 'price' ? effectivePrice : (prices[Number(rule.source)]?.price ?? effectivePrice)
-          const computed = applyCalculation(sourceVal, rule.operations)
-          const ruleCurId = rule.result_currency_id != null && rule.result_currency_id > 0 ? Number(rule.result_currency_id) : null
-          prices[pt.id] = {
-            price: computed,
-            currency_id: ruleCurId ?? (curId ? Number(curId) : null),
-            status: 1,
-          }
-        }
-        const ecomRule = findRuleForBrand(calculationRules, '1', brandId)
-        const ecomCurId = ecomRule?.result_currency_id != null && ecomRule.result_currency_id > 0
-          ? Number(ecomRule.result_currency_id)
-          : (curId ? Number(curId) : null)
-        const computed = prices[1]?.price ?? computeEcom(effectivePrice)
-        prices[1] = { price: computed, currency_id: ecomCurId, status: 1 }
+        const prices = applyCalculationRulesToPrices({
+          basePrice: effectivePrice,
+          baseCurrencyId: curId ? Number(curId) : null,
+          prices: {},
+          rules: calculationRules,
+          targets: priceTypes.map((pt: { id: number }) => pt.id).filter((id: number) => id > 0),
+          brandId,
+          categoryId: product.category_id ?? null,
+        })
         const pricesPayload = Object.entries(prices).map(([id, p]) => ({
           price_type_id: Number(id),
           price: p.price,
