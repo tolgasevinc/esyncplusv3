@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { TablePaginationFooter, type PageSizeValue } from '@/components/TablePaginationFooter'
 import {
   Dialog,
@@ -20,9 +21,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { API_URL, parseJsonResponse } from '@/lib/api'
 import { toastError, toastSuccess } from '@/lib/toast'
 import {
-  fetchTrendyolBrands,
-  fetchTrendyolCategories,
   fetchTrendyolMasterPriceOptions,
+  fetchTrendyolProductFilterOptions,
   deleteTrendyolProduct,
   linkTrendyolBrandToMaster,
   linkTrendyolCategoryToMaster,
@@ -38,6 +38,7 @@ import { cn } from '@/lib/utils'
 
 type ProductRow = {
   id: number
+  trendyolProductId?: string | null
   name: string
   sku?: string
   price: number
@@ -96,6 +97,10 @@ function readEffectiveTrendyolCategoryId(row: ProductRow | null): number | null 
   return Number.isFinite(linked) && linked > 0 ? linked : null
 }
 
+function readTrendyolProductId(row: ProductRow | null): string {
+  return String(row?.trendyolProductId ?? row?.id ?? '').trim()
+}
+
 type MasterProductOption = {
   id: number
   name: string
@@ -137,6 +142,7 @@ const listDefaults = {
   search: '',
   productNameSearch: '',
   saleStatus: 'active' as 'all' | 'active' | 'passive',
+  matchStatus: 'all' as 'all' | 'matched' | 'unmatched',
   brandId: '',
   brandSearch: '',
   categoryId: '',
@@ -230,6 +236,7 @@ export function TrendyolProductsPage() {
     search,
     productNameSearch,
     saleStatus,
+    matchStatus,
     brandId: brandFilterId,
     brandSearch,
     categoryId: categoryFilterId,
@@ -255,6 +262,13 @@ export function TrendyolProductsPage() {
   const [masterProductOptions, setMasterProductOptions] = useState<MasterProductOption[]>([])
   const [masterProductOptionsLoading, setMasterProductOptionsLoading] = useState(false)
   const [masterProductOptionsError, setMasterProductOptionsError] = useState<string | null>(null)
+  const [selectedTrendyolIds, setSelectedTrendyolIds] = useState<Set<string>>(() => new Set())
+  const [bulkMasterLinkModalOpen, setBulkMasterLinkModalOpen] = useState(false)
+  const [bulkMasterProductSearch, setBulkMasterProductSearch] = useState('')
+  const [bulkMasterProductOptions, setBulkMasterProductOptions] = useState<MasterProductOption[]>([])
+  const [bulkMasterProductOptionsLoading, setBulkMasterProductOptionsLoading] = useState(false)
+  const [bulkMasterProductOptionsError, setBulkMasterProductOptionsError] = useState<string | null>(null)
+  const [bulkLinking, setBulkLinking] = useState(false)
   const [categoryLinkModalOpen, setCategoryLinkModalOpen] = useState(false)
   const [categoryLinkRow, setCategoryLinkRow] = useState<ProductRow | null>(null)
   const [masterCategorySearch, setMasterCategorySearch] = useState('')
@@ -305,6 +319,7 @@ export function TrendyolProductsPage() {
     search.trim().length > 0 ||
     productNameSearch.trim().length > 0 ||
     saleStatus !== listDefaults.saleStatus ||
+    matchStatus !== listDefaults.matchStatus ||
     brandFilterId.trim().length > 0 ||
     categoryFilterId.trim().length > 0
 
@@ -320,6 +335,7 @@ export function TrendyolProductsPage() {
       if (productNameSearch.trim()) params.set('productName', productNameSearch.trim())
       if (saleStatus === 'active') params.set('onSale', 'true')
       if (saleStatus === 'passive') params.set('onSale', 'false')
+      if (matchStatus !== 'all') params.set('matchStatus', matchStatus)
       if (brandFilterId.trim()) params.set('brandId', brandFilterId.trim())
       if (categoryFilterId.trim()) params.set('categoryId', categoryFilterId.trim())
       const res = await fetch(`${API_URL}/api/trendyol/products?${params}`)
@@ -339,7 +355,7 @@ export function TrendyolProductsPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, limit, search, productNameSearch, saleStatus, brandFilterId, categoryFilterId])
+  }, [page, limit, search, productNameSearch, saleStatus, matchStatus, brandFilterId, categoryFilterId])
 
   useEffect(() => {
     void loadList()
@@ -378,47 +394,30 @@ export function TrendyolProductsPage() {
   useEffect(() => {
     let cancelled = false
     setCategoryOptionsLoading(true)
+    setBrandOptionsLoading(true)
     void (async () => {
       try {
-        const { flat } = await fetchTrendyolCategories()
-        if (!cancelled) setCategories(flat)
+        const { brands, categories } = await fetchTrendyolProductFilterOptions()
+        if (!cancelled) {
+          setCategories(categories)
+          setBrandOptions(brands)
+        }
       } catch {
-        if (!cancelled) setCategories([])
+        if (!cancelled) {
+          setCategories([])
+          setBrandOptions([])
+        }
       } finally {
-        if (!cancelled) setCategoryOptionsLoading(false)
+        if (!cancelled) {
+          setCategoryOptionsLoading(false)
+          setBrandOptionsLoading(false)
+        }
       }
     })()
     return () => {
       cancelled = true
     }
   }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    const q = brandSearch.trim()
-    if (q.length < 2) {
-      setBrandOptions([])
-      setBrandOptionsLoading(false)
-      return
-    }
-    setBrandOptionsLoading(true)
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const list = await fetchTrendyolBrands(q)
-          if (!cancelled) setBrandOptions(list)
-        } catch {
-          if (!cancelled) setBrandOptions([])
-        } finally {
-          if (!cancelled) setBrandOptionsLoading(false)
-        }
-      })()
-    }, 300)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [brandSearch])
 
   function validateModal(): string | null {
     if (!selectedProduct) return 'Ürün seçilmedi'
@@ -496,17 +495,52 @@ export function TrendyolProductsPage() {
   )
 
   const categoryOptions = useMemo(() => {
-    const q = categorySearch.trim().toLocaleLowerCase('tr')
-    const filtered = q
-      ? categories.filter((cat) => cat.name.toLocaleLowerCase('tr').includes(q) || String(cat.id).includes(q))
-      : categories
-    return filtered.slice(0, 200)
-  }, [categories, categorySearch])
+    return categories.slice(0, 200)
+  }, [categories])
+
+  const filteredBrandOptions = useMemo(() => {
+    return brandOptions.slice(0, 200)
+  }, [brandOptions])
 
   const selectedPriceOption = useMemo(
     () => priceOptions.find((option) => option.key === selectedPriceKey) ?? null,
     [priceOptions, selectedPriceKey]
   )
+
+  const selectedRows = useMemo(
+    () => rows.filter((row) => selectedTrendyolIds.has(readTrendyolProductId(row))),
+    [rows, selectedTrendyolIds]
+  )
+
+  const visibleSelectableIds = useMemo(
+    () => rows.map((row) => readTrendyolProductId(row)).filter(Boolean),
+    [rows]
+  )
+
+  const allVisibleSelected =
+    visibleSelectableIds.length > 0 && visibleSelectableIds.every((id) => selectedTrendyolIds.has(id))
+
+  const toggleRowSelection = useCallback((row: ProductRow, checked: boolean) => {
+    const id = readTrendyolProductId(row)
+    if (!id) return
+    setSelectedTrendyolIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }, [])
+
+  const toggleAllVisibleSelection = useCallback((checked: boolean) => {
+    setSelectedTrendyolIds((prev) => {
+      const next = new Set(prev)
+      for (const id of visibleSelectableIds) {
+        if (checked) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
+  }, [visibleSelectableIds])
 
   const formatTry = useCallback((value: number | null | undefined) => {
     const n = Number(value ?? 0)
@@ -700,15 +734,52 @@ export function TrendyolProductsPage() {
     }
   }, [masterLinkModalOpen, masterLinkRow, masterProductSearch])
 
+  useEffect(() => {
+    if (!bulkMasterLinkModalOpen) return
+    let cancelled = false
+    setBulkMasterProductOptionsLoading(true)
+    setBulkMasterProductOptionsError(null)
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const params = new URLSearchParams({
+            page: '1',
+            limit: '30',
+          })
+          if (bulkMasterProductSearch.trim()) params.set('search', bulkMasterProductSearch.trim())
+          const res = await fetch(`${API_URL}/api/products?${params}`)
+          const data = await parseJsonResponse<{
+            data?: MasterProductOption[]
+            error?: string
+          }>(res)
+          if (!res.ok) throw new Error(data.error || 'Master ürünler alınamadı')
+          if (!cancelled) setBulkMasterProductOptions(Array.isArray(data.data) ? data.data : [])
+        } catch (e) {
+          if (!cancelled) {
+            setBulkMasterProductOptions([])
+            setBulkMasterProductOptionsError(e instanceof Error ? e.message : 'Master ürünler alınamadı')
+          }
+        } finally {
+          if (!cancelled) setBulkMasterProductOptionsLoading(false)
+        }
+      })()
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [bulkMasterLinkModalOpen, bulkMasterProductSearch])
+
   const saveMasterLink = useCallback(
     async (masterProduct: MasterProductOption) => {
       if (!masterLinkRow) return
       setLinkingId(masterLinkRow.id)
+      const trendyolProductId = readTrendyolProductId(masterLinkRow)
       const trendyolBrandId = readEffectiveTrendyolBrandId(masterLinkRow)
       const trendyolCategoryId = readEffectiveTrendyolCategoryId(masterLinkRow)
       try {
-        await linkTrendyolProductToMaster(masterProduct.id, masterLinkRow.id, trendyolCategoryId, trendyolBrandId)
-        toastSuccess('Trendyol eşleşmesi kaydedildi', `Master #${masterProduct.id} → Trendyol #${masterLinkRow.id}`)
+        await linkTrendyolProductToMaster(masterProduct.id, trendyolProductId, trendyolCategoryId, trendyolBrandId)
+        toastSuccess('Trendyol eşleşmesi kaydedildi', `Master #${masterProduct.id} → Trendyol #${trendyolProductId}`)
         updateRowById(masterLinkRow.id, (row) => ({
           ...row,
           masterProduct: {
@@ -716,7 +787,7 @@ export function TrendyolProductsPage() {
             name: masterProduct.name,
             sku: masterProduct.sku,
             barcode: masterProduct.barcode,
-            trendyol_product_id: String(masterLinkRow.id),
+            trendyol_product_id: trendyolProductId,
             trendyol_category_id: trendyolCategoryId,
             isLinked: true,
           },
@@ -751,6 +822,77 @@ export function TrendyolProductsPage() {
       }
     },
     [masterLinkRow, updateRowById]
+  )
+
+  const openBulkMasterLinkModal = useCallback(() => {
+    if (selectedRows.length === 0) {
+      toastError('Ürün seçilmedi', 'Toplu eşleştirme için en az bir Trendyol ürünü seçin.')
+      return
+    }
+    const first = selectedRows[0]
+    setBulkMasterProductSearch(first?.barcode || first?.stockCode || first?.sku || '')
+    setBulkMasterProductOptions([])
+    setBulkMasterProductOptionsError(null)
+    setBulkMasterLinkModalOpen(true)
+  }, [selectedRows])
+
+  const saveBulkMasterLink = useCallback(
+    async (masterProduct: MasterProductOption) => {
+      if (selectedRows.length === 0) return
+      setBulkLinking(true)
+      let saved = 0
+      try {
+        for (const row of selectedRows) {
+          const trendyolProductId = readTrendyolProductId(row)
+          if (!trendyolProductId) continue
+          const trendyolBrandId = readEffectiveTrendyolBrandId(row)
+          const trendyolCategoryId = readEffectiveTrendyolCategoryId(row)
+          await linkTrendyolProductToMaster(masterProduct.id, trendyolProductId, trendyolCategoryId, trendyolBrandId)
+          saved += 1
+          updateRowById(row.id, (current) => ({
+            ...current,
+            masterProduct: {
+              id: masterProduct.id,
+              name: masterProduct.name,
+              sku: masterProduct.sku,
+              barcode: masterProduct.barcode,
+              trendyol_product_id: trendyolProductId,
+              trendyol_category_id: trendyolCategoryId,
+              isLinked: true,
+            },
+            masterBrand:
+              masterProduct.brand_id && trendyolBrandId
+                ? {
+                    id: masterProduct.brand_id,
+                    name: masterProduct.brand_name || 'Master marka',
+                    code: masterProduct.brand_code,
+                    trendyol_brand_id: trendyolBrandId,
+                    isLinked: true,
+                  }
+                : current.masterBrand,
+            masterCategory:
+              masterProduct.category_id && trendyolCategoryId
+                ? {
+                    id: masterProduct.category_id,
+                    name: masterProduct.category_name || 'Master kategori',
+                    code: masterProduct.category_code,
+                    color: masterProduct.category_color,
+                    trendyol_category_id: trendyolCategoryId,
+                    isLinked: true,
+                  }
+                : current.masterCategory,
+          }))
+        }
+        toastSuccess('Toplu eşleşme kaydedildi', `${saved} Trendyol ürünü Master #${masterProduct.id} ile eşleştirildi.`)
+        setBulkMasterLinkModalOpen(false)
+        setSelectedTrendyolIds(new Set())
+      } catch (e) {
+        toastError('Toplu eşleşme kaydedilemedi', e)
+      } finally {
+        setBulkLinking(false)
+      }
+    },
+    [selectedRows, updateRowById]
   )
 
   const saveBrandSelection = useCallback(
@@ -892,6 +1034,15 @@ export function TrendyolProductsPage() {
       onRefresh={() => void loadList()}
       headerActions={
         <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <Button
+            type="button"
+            variant="save"
+            size="sm"
+            disabled={selectedRows.length === 0 || bulkLinking}
+            onClick={openBulkMasterLinkModal}
+          >
+            Toplu eşleştir{selectedRows.length > 0 ? ` (${selectedRows.length})` : ''}
+          </Button>
           <div className="relative flex-1 min-w-[12rem] max-w-md">
             <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
             <Input
@@ -964,13 +1115,23 @@ export function TrendyolProductsPage() {
             <option value="active">Aktif / satışta</option>
             <option value="passive">Pasif / satışta değil</option>
           </select>
+          <select
+            aria-label="Eşleşme filtresi"
+            className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+            value={matchStatus}
+            onChange={(e) => {
+              const value = e.target.value
+              setListState({
+                matchStatus: value === 'matched' || value === 'unmatched' ? value : 'all',
+                page: 1,
+              })
+            }}
+          >
+            <option value="all">Eşleşme: Tümü</option>
+            <option value="matched">Eşleşmiş</option>
+            <option value="unmatched">Eşleşmemiş</option>
+          </select>
           <div className="flex min-w-[13rem] flex-col gap-1">
-            <Input
-              className="h-9"
-              placeholder="Marka ara…"
-              value={brandSearch}
-              onChange={(e) => setListState({ brandSearch: e.target.value, brandId: '', page: 1 })}
-            />
             <select
               aria-label="Marka filtresi"
               className="h-9 rounded-md border border-input bg-background px-2 text-sm"
@@ -981,8 +1142,8 @@ export function TrendyolProductsPage() {
                 setListState({ brandId: id, brandSearch: selected?.name ?? brandSearch, page: 1 })
               }}
             >
-              <option value="">{brandOptionsLoading ? 'Markalar yükleniyor…' : 'Marka seç'}</option>
-              {brandOptions.map((brand) => (
+              <option value="">{brandOptionsLoading ? 'Satıcı markaları yükleniyor…' : 'Satıcı markası seç'}</option>
+              {filteredBrandOptions.map((brand) => (
                 <option key={brand.id} value={String(brand.id)}>
                   {brand.name}
                 </option>
@@ -990,12 +1151,6 @@ export function TrendyolProductsPage() {
             </select>
           </div>
           <div className="flex min-w-[15rem] flex-col gap-1">
-            <Input
-              className="h-9"
-              placeholder="Kategori ara…"
-              value={categorySearch}
-              onChange={(e) => setListState({ categorySearch: e.target.value, categoryId: '', page: 1 })}
-            />
             <select
               aria-label="Kategori filtresi"
               className="h-9 rounded-md border border-input bg-background px-2 text-sm"
@@ -1007,7 +1162,7 @@ export function TrendyolProductsPage() {
                 setListState({ categoryId: id, categorySearch: selected?.name ?? categorySearch, page: 1 })
               }}
             >
-              <option value="">{categoryOptionsLoading ? 'Kategoriler yükleniyor…' : 'Kategori seç'}</option>
+              <option value="">{categoryOptionsLoading ? 'Satıcı kategorileri yükleniyor…' : 'Satıcı kategorisi seç'}</option>
               {categoryOptions.map((cat) => (
                 <option key={cat.id} value={String(cat.id)}>
                   {cat.name}
@@ -1016,25 +1171,33 @@ export function TrendyolProductsPage() {
             </select>
           </div>
           {hasFilter ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                setListState({
-                  search: '',
-                  productNameSearch: '',
-                  saleStatus: listDefaults.saleStatus,
-                  brandId: '',
-                  brandSearch: '',
-                  categoryId: '',
-                  categorySearch: '',
-                  page: 1,
-                })
-              }
-            >
-              Filtreleri temizle
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9"
+                  aria-label="Filtreleri temizle"
+                  onClick={() =>
+                    setListState({
+                      search: '',
+                      productNameSearch: '',
+                      saleStatus: listDefaults.saleStatus,
+                      matchStatus: listDefaults.matchStatus,
+                      brandId: '',
+                      brandSearch: '',
+                      categoryId: '',
+                      categorySearch: '',
+                      page: 1,
+                    })
+                  }
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Filtreleri temizle</TooltipContent>
+            </Tooltip>
           ) : null}
         </div>
       }
@@ -1081,9 +1244,16 @@ export function TrendyolProductsPage() {
           )}
           {!loading && !listError && (
             <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto border-t border-border rounded-b-md">
-              <table className="w-full min-w-[980px] text-sm">
+              <table className="w-full min-w-[1040px] text-sm">
                 <thead className="sticky top-0 z-[1] bg-muted/95 backdrop-blur supports-[backdrop-filter]:bg-muted/80">
                   <tr className="border-b bg-muted/50 text-left">
+                    <th className="p-2 font-medium w-10">
+                      <Checkbox
+                        checked={allVisibleSelected}
+                        onCheckedChange={(checked) => toggleAllVisibleSelection(checked === true)}
+                        aria-label="Görünen Trendyol ürünlerini seç"
+                      />
+                    </th>
                     <th className="p-2 font-medium w-24">İçerik ID</th>
                     <th className="p-2 font-medium min-w-[320px]">Ürün</th>
                     <th className="p-2 font-medium min-w-[220px]">Marka / Kategori</th>
@@ -1103,6 +1273,13 @@ export function TrendyolProductsPage() {
                         highlightedRowIds.has(row.id) && 'bg-emerald-500/15 hover:bg-emerald-500/20'
                       )}
                     >
+                      <td className="p-2 align-middle">
+                        <Checkbox
+                          checked={selectedTrendyolIds.has(readTrendyolProductId(row))}
+                          onCheckedChange={(checked) => toggleRowSelection(row, checked === true)}
+                          aria-label={`${row.title ?? row.name} seç`}
+                        />
+                      </td>
                       <td className="p-2 tabular-nums text-muted-foreground">{row.id}</td>
                       <td className="p-2">
                         <div className="max-w-[460px]">
@@ -1610,6 +1787,112 @@ export function TrendyolProductsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={bulkMasterLinkModalOpen} onOpenChange={setBulkMasterLinkModalOpen}>
+        <DialogContent className="max-w-4xl max-h-[min(92vh,780px)] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Toplu master ürün eşleştir</DialogTitle>
+            <DialogDescription>
+              Seçili {selectedRows.length} Trendyol ürününü tek master ürüne bağlayın. Kaydedilince ürün eşleşmeleriyle
+              birlikte seçilen master ürünün marka ve kategori kayıtlarına Trendyol ID'leri de işlenir.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-md border border-border bg-muted/30 p-3">
+              <div className="mb-2 text-xs font-medium text-muted-foreground">Seçili Trendyol ürünleri</div>
+              <div className="max-h-36 space-y-1 overflow-y-auto text-xs">
+                {selectedRows.map((row) => (
+                  <div key={readTrendyolProductId(row)} className="flex items-center justify-between gap-3">
+                    <span className="min-w-0 truncate">{row.title ?? row.name}</span>
+                    <span className="shrink-0 font-mono text-muted-foreground">TY #{readTrendyolProductId(row)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+              <Input
+                className="pl-9"
+                placeholder="Master ürün adı, SKU veya barkod ara…"
+                value={bulkMasterProductSearch}
+                onChange={(e) => setBulkMasterProductSearch(e.target.value)}
+              />
+            </div>
+            {bulkMasterProductOptionsLoading ? (
+              <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin" />
+                Master ürünler yükleniyor…
+              </div>
+            ) : bulkMasterProductOptionsError ? (
+              <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                {bulkMasterProductOptionsError}
+              </p>
+            ) : bulkMasterProductOptions.length === 0 ? (
+              <p className="rounded-md border border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
+                Master ürün bulunamadı.
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-md border border-border">
+                <table className="w-full min-w-[640px] text-sm">
+                  <thead className="bg-muted/60 text-left text-muted-foreground">
+                    <tr>
+                      <th className="p-2 font-medium">Master ürün</th>
+                      <th className="p-2 font-medium">Kodlar</th>
+                      <th className="p-2 font-medium">Kategori</th>
+                      <th className="p-2 font-medium">Durum</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bulkMasterProductOptions.map((product) => {
+                      const isSaving = bulkLinking
+                      return (
+                        <tr
+                          key={product.id}
+                          role="button"
+                          tabIndex={isSaving ? -1 : 0}
+                          className={cn(
+                            'border-t border-border/60 transition-colors',
+                            isSaving ? 'opacity-60' : 'cursor-pointer hover:bg-muted/60'
+                          )}
+                          onClick={() => {
+                            if (!isSaving) void saveBulkMasterLink(product)
+                          }}
+                          onKeyDown={(e) => {
+                            if ((e.key === 'Enter' || e.key === ' ') && !isSaving) {
+                              e.preventDefault()
+                              void saveBulkMasterLink(product)
+                            }
+                          }}
+                        >
+                          <td className="p-2">
+                            <div className="font-medium">{product.name}</div>
+                            <div className="text-xs text-muted-foreground">Master #{product.id}</div>
+                          </td>
+                          <td className="p-2 font-mono text-xs text-muted-foreground">
+                            <div>SKU: {product.sku || '—'}</div>
+                            <div>Barkod: {product.barcode || '—'}</div>
+                          </td>
+                          <td className="p-2 text-xs text-muted-foreground">
+                            {product.subcategory_name || product.category_name || '—'}
+                          </td>
+                          <td className="p-2 text-xs text-muted-foreground">
+                            {isSaving ? 'Kaydediliyor…' : 'Tıklayın'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setBulkMasterLinkModalOpen(false)} disabled={bulkLinking}>
+              Kapat
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={masterLinkModalOpen} onOpenChange={setMasterLinkModalOpen}>
         <DialogContent className="max-w-3xl max-h-[min(92vh,760px)] overflow-y-auto">
           <DialogHeader>
@@ -1681,9 +1964,11 @@ export function TrendyolProductsPage() {
                   </thead>
                   <tbody>
                     {masterProductOptions.map((product) => {
+                      const trendyolProductId = readTrendyolProductId(masterLinkRow)
                       const isLinked =
                         masterLinkRow != null &&
-                        String(product.trendyol_product_id ?? '') === String(masterLinkRow.id)
+                        (String(product.trendyol_product_id ?? '') === trendyolProductId ||
+                          (masterLinkRow.masterProduct?.isLinked && product.id === masterLinkRow.masterProduct.id))
                       const isSaving = linkingId === masterLinkRow?.id
                       return (
                         <tr

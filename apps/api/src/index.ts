@@ -1319,6 +1319,17 @@ app.get('/api/products', async (c) => {
     const priceTypeIdRaw = c.req.query('price_type_id');
     const priceTypeId = priceTypeIdRaw ? parseInt(String(priceTypeIdRaw), 10) : 0;
     const usePriceType = priceTypeId > 0;
+    const trendyolProductMap = await loadAppSettingsJsonMap(c.env.DB, 'marketplace_trendyol', TRENDYOL_PRODUCT_MAPPINGS_KEY);
+    const trendyolMatchCounts: Record<number, number> = {};
+    const mappedTrendyolIdsByMaster: Record<number, Set<string>> = {};
+    for (const [trendyolIdRaw, masterIdRaw] of Object.entries(trendyolProductMap)) {
+      const trendyolId = String(trendyolIdRaw ?? '').trim();
+      const masterId = Number(String(masterIdRaw ?? '').trim());
+      if (!trendyolId || !Number.isFinite(masterId) || masterId <= 0) continue;
+      trendyolMatchCounts[masterId] = (trendyolMatchCounts[masterId] ?? 0) + 1;
+      if (!mappedTrendyolIdsByMaster[masterId]) mappedTrendyolIdsByMaster[masterId] = new Set();
+      mappedTrendyolIdsByMaster[masterId].add(trendyolId);
+    }
     let where = 'WHERE p.is_deleted = 0';
     const params: (string | number)[] = [];
     if (search) {
@@ -1402,7 +1413,15 @@ app.get('/api/products', async (c) => {
     } else if (filter_integration === 'parasut') {
       where += " AND TRIM(COALESCE(p.parasut_product_id, '')) != ''";
     } else if (filter_integration === 'trendyol') {
-      where += " AND TRIM(COALESCE(p.trendyol_product_id, '')) != ''";
+      const mappedMasterIds = Object.keys(trendyolMatchCounts)
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0);
+      if (mappedMasterIds.length > 0) {
+        where += ` AND (TRIM(COALESCE(p.trendyol_product_id, '')) != '' OR p.id IN (${mappedMasterIds.map(() => '?').join(',')}))`;
+        params.push(...mappedMasterIds);
+      } else {
+        where += " AND TRIM(COALESCE(p.trendyol_product_id, '')) != ''";
+      }
     }
     const validSortColumns: Record<string, string> = {
       name: 'p.name',
@@ -1468,6 +1487,12 @@ app.get('/api/products', async (c) => {
           ...r,
           ecommerce_price: resolvedEcommerce?.price ?? null,
           ecommerce_currency_id: resolvedEcommerce?.currency_id ?? null,
+          trendyol_match_count:
+            (trendyolMatchCounts[productId] ?? 0) +
+            (String(r.trendyol_product_id ?? '').trim() &&
+            !mappedTrendyolIdsByMaster[productId]?.has(String(r.trendyol_product_id ?? '').trim())
+              ? 1
+              : 0),
         };
         if (!usePriceType) return baseRow;
         const resolved = resolveProductPriceType({
@@ -2224,6 +2249,29 @@ async function loadAppSettingsJsonMap(db: D1Database, category: string, key: str
     return typeof parsed === 'object' && parsed !== null ? parsed : {};
   } catch {
     return {};
+  }
+}
+
+async function persistAppSettingsJsonMap(
+  db: D1Database,
+  category: string,
+  key: string,
+  mappings: Record<string, string>
+): Promise<void> {
+  const existing = await db
+    .prepare(`SELECT id FROM app_settings WHERE category = ? AND "key" = ? AND is_deleted = 0 LIMIT 1`)
+    .bind(category, key)
+    .first();
+  if (existing) {
+    await db
+      .prepare(`UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE category = ? AND "key" = ? AND is_deleted = 0`)
+      .bind(JSON.stringify(mappings), category, key)
+      .run();
+  } else {
+    await db
+      .prepare(`INSERT INTO app_settings (category, "key", value) VALUES (?, ?, ?)`)
+      .bind(category, key, JSON.stringify(mappings))
+      .run();
   }
 }
 
@@ -11439,6 +11487,102 @@ app.get('/api/trendyol/brands', async (c) => {
   }
 });
 
+/** Trendyol ürün filtre seçenekleri — yalnızca satıcının ürünlerinde geçen marka/kategoriler */
+app.get('/api/trendyol/product-filter-options', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const settings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) settings[r.key] = r.value ?? '';
+    }
+    const supplierId = settings.supplier_id?.trim();
+    const apiKey = settings.api_key?.trim();
+    const apiSecret = settings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json({ error: 'Trendyol API ayarları eksik (Satıcı ID, API Key, Secret).' }, 400);
+    }
+
+    const userAgent = (settings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = settings.environment?.trim().toLowerCase();
+    const apiUrl = settings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const headers: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'Content-Type': 'application/json',
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+    };
+
+    const brands = new Map<number, string>();
+    const categories = new Map<number, string>();
+    const maxPages = Math.min(50, Math.max(1, parseInt(c.req.query('maxPages') || '25', 10)));
+    const size = 200;
+    for (let page = 0; page < maxPages; page += 1) {
+      const params = new URLSearchParams({ page: String(page), size: String(size) });
+      const res = await fetch(`${base}/integration/product/sellers/${supplierId}/products?${params.toString()}`, {
+        method: 'GET',
+        headers,
+      });
+      const text = await res.text();
+      let raw: unknown = null;
+      try {
+        raw = text ? JSON.parse(text) : null;
+      } catch {
+        raw = null;
+      }
+      if (!res.ok) return c.json({ error: `Trendyol ${res.status}`, detail: text.slice(0, 800) }, 400);
+      const rawObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      const contentRaw =
+        Array.isArray(rawObj.content)
+          ? rawObj.content
+          : Array.isArray(rawObj.products)
+            ? rawObj.products
+            : Array.isArray(rawObj.data)
+              ? rawObj.data
+              : Array.isArray(raw)
+                ? raw
+                : [];
+      for (const item of contentRaw as unknown[]) {
+        const row = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+        const brand = row.brand;
+        const brandObj = brand && typeof brand === 'object' && !Array.isArray(brand) ? (brand as Record<string, unknown>) : null;
+        const brandId = Number(row.brandId ?? row.brandID ?? brandObj?.id);
+        const brandName = String(row.brandName ?? brandObj?.name ?? (typeof brand === 'string' ? brand : '') ?? '').trim();
+        if (Number.isFinite(brandId) && brandId > 0) brands.set(brandId, brandName || `Marka #${brandId}`);
+
+        const categoryId = Number(row.categoryId ?? row.categoryID ?? row.pimCategoryId ?? row.pimCategoryID);
+        const categoryName = String(row.categoryName ?? row.pimCategoryName ?? row.category ?? '').trim();
+        if (Number.isFinite(categoryId) && categoryId > 0) categories.set(categoryId, categoryName || `Kategori #${categoryId}`);
+      }
+      if (contentRaw.length < size) break;
+    }
+
+    return c.json({
+      brands: [...brands.entries()]
+        .map(([id, name]) => ({ id, name }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'tr')),
+      categories: [...categories.entries()]
+        .map(([id, name]) => ({ id, name, parentId: null }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'tr')),
+    });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Trendyol ürün filtre seçenekleri alınamadı' }, 500);
+  }
+});
+
+const TRENDYOL_PRODUCT_MAPPINGS_KEY = 'trendyol_product_mappings';
+
 /** Trendyol ürün listesi — filterProducts V1 */
 app.get('/api/trendyol/products', async (c) => {
   try {
@@ -11450,6 +11594,7 @@ app.get('/api/trendyol/products', async (c) => {
     for (const r of results as { key: string; value: string | null }[]) {
       if (r.key) settings[r.key] = r.value ?? '';
     }
+    const trendyolProductMap = await loadAppSettingsJsonMap(c.env.DB, 'marketplace_trendyol', TRENDYOL_PRODUCT_MAPPINGS_KEY);
     const supplierId = settings.supplier_id?.trim();
     const apiKey = settings.api_key?.trim();
     const apiSecret = settings.api_secret?.trim();
@@ -11467,6 +11612,7 @@ app.get('/api/trendyol/products', async (c) => {
     const size = Math.min(200, Math.max(1, parseInt(c.req.query('limit') || c.req.query('size') || '25', 10)));
     const search = (c.req.query('search') || '').trim();
     const productName = (c.req.query('productName') || c.req.query('title') || '').trim();
+    const matchStatus = (c.req.query('matchStatus') || c.req.query('matched') || '').trim().toLowerCase();
     const params = new URLSearchParams({
       page: String(page - 1),
       size: String(size),
@@ -11537,7 +11683,9 @@ app.get('/api/trendyol/products', async (c) => {
               : [];
     let data = (contentRaw as unknown[]).map((item, index) => {
       const row = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
-      const idRaw = row.productContentId ?? row.id ?? row.productCode ?? row.barcode ?? index;
+      const productIdRaw = row.productContentId ?? row.id ?? row.productCode ?? row.barcode ?? row.stockCode ?? index;
+      const trendyolProductId = String(productIdRaw ?? '').trim();
+      const idRaw = productIdRaw;
       const idNum = typeof idRaw === 'number' && Number.isFinite(idRaw) ? idRaw : parseInt(String(idRaw ?? index), 10);
       const brand = row.brand;
       const brandName =
@@ -11553,6 +11701,7 @@ app.get('/api/trendyol/products', async (c) => {
       const categoryId = Number(categoryIdRaw);
       return {
         id: Number.isFinite(idNum) ? idNum : index,
+        trendyolProductId: trendyolProductId || String(Number.isFinite(idNum) ? idNum : index),
         name: String(row.title ?? row.name ?? row.productName ?? '—'),
         sku: String(row.stockCode ?? row.sku ?? ''),
         barcode: row.barcode ?? null,
@@ -11582,17 +11731,45 @@ app.get('/api/trendyol/products', async (c) => {
     }
     const barcodeKeys = [...new Set(data.map((row) => String(row.barcode ?? '').trim()).filter(Boolean))];
     const stockKeys = [...new Set(data.map((row) => String(row.stockCode ?? row.sku ?? '').trim()).filter(Boolean))];
-    const trendyolProductIds = [...new Set(data.map((row) => String(row.id ?? '').trim()).filter(Boolean))];
-    const masterMatches = new Map<string, { id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null; trendyol_category_id: number | null }>();
-    const addMasterRows = (rows: { id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null; trendyol_category_id: number | null }[]) => {
+    const trendyolProductIds = [
+      ...new Set(
+        data
+          .flatMap((row) => [row.trendyolProductId, String(row.id ?? '').trim()])
+          .map((value) => String(value ?? '').trim())
+          .filter(Boolean)
+      ),
+    ];
+    type TrendyolMasterMatch = {
+      id: number;
+      name: string;
+      sku: string | null;
+      barcode: string | null;
+      trendyol_product_id: string | null;
+      trendyol_category_id: number | null;
+    };
+    const masterMatches = new Map<string, TrendyolMasterMatch>();
+    const addMasterRows = (rows: TrendyolMasterMatch[]) => {
       for (const r of rows) {
         const ty = String(r.trendyol_product_id ?? '').trim();
         const bc = String(r.barcode ?? '').trim();
         const sku = String(r.sku ?? '').trim();
-        if (ty) masterMatches.set(`trendyol:${ty}`, r);
+        if (ty && !masterMatches.has(`trendyol:${ty}`)) masterMatches.set(`trendyol:${ty}`, r);
         if (bc && !masterMatches.has(`barcode:${bc}`)) masterMatches.set(`barcode:${bc}`, r);
         if (sku && !masterMatches.has(`sku:${sku}`)) masterMatches.set(`sku:${sku}`, r);
       }
+    };
+    const queryMasterRowsByIds = async (ids: number[]): Promise<Map<number, TrendyolMasterMatch>> => {
+      const out = new Map<number, TrendyolMasterMatch>();
+      const chunkSize = 40;
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize);
+        if (chunk.length === 0) continue;
+        const { results: masterRows } = await c.env.DB.prepare(
+          `SELECT id, name, sku, barcode, trendyol_product_id, trendyol_category_id FROM products WHERE is_deleted = 0 AND id IN (${chunk.map(() => '?').join(',')})`
+        ).bind(...chunk).all();
+        for (const row of masterRows as TrendyolMasterMatch[]) out.set(Number(row.id), row);
+      }
+      return out;
     };
     const queryMasterRowsByColumn = async (column: 'barcode' | 'sku' | 'trendyol_product_id', keys: string[]) => {
       const chunkSize = 40;
@@ -11602,9 +11779,19 @@ app.get('/api/trendyol/products', async (c) => {
         const { results: masterRows } = await c.env.DB.prepare(
           `SELECT id, name, sku, barcode, trendyol_product_id, trendyol_category_id FROM products WHERE is_deleted = 0 AND TRIM(COALESCE(${column}, '')) IN (${chunk.map(() => '?').join(',')})`
         ).bind(...chunk).all();
-        addMasterRows(masterRows as { id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null; trendyol_category_id: number | null }[]);
+        addMasterRows(masterRows as TrendyolMasterMatch[]);
       }
     };
+    const mappedProductEntries = trendyolProductIds
+      .map((trendyolId) => [trendyolId, String(trendyolProductMap[trendyolId] ?? '').trim()] as const)
+      .filter(([, masterId]) => /^\d+$/.test(masterId));
+    const mappedMasterRowsById = await queryMasterRowsByIds([
+      ...new Set(mappedProductEntries.map(([, masterId]) => Number(masterId)).filter((id) => Number.isFinite(id) && id > 0)),
+    ]);
+    for (const [trendyolId, masterId] of mappedProductEntries) {
+      const master = mappedMasterRowsById.get(Number(masterId));
+      if (master) masterMatches.set(`trendyol:${trendyolId}`, { ...master, trendyol_product_id: trendyolId });
+    }
     if (barcodeKeys.length > 0) {
       await queryMasterRowsByColumn('barcode', barcodeKeys);
     }
@@ -11639,12 +11826,14 @@ app.get('/api/trendyol/products', async (c) => {
         if (row.trendyol_category_id != null) masterCategoriesByTyId.set(Number(row.trendyol_category_id), row);
       }
     }
-    const dataWithMaster = data.map((row) => {
+    let dataWithMaster = data.map((row) => {
       const bc = String(row.barcode ?? '').trim();
       const sku = String(row.stockCode ?? row.sku ?? '').trim();
-      const trendyolId = String(row.id ?? '').trim();
+      const trendyolId = String(row.trendyolProductId ?? row.id ?? '').trim();
+      const numericTrendyolId = String(row.id ?? '').trim();
       const master =
         (trendyolId ? masterMatches.get(`trendyol:${trendyolId}`) : null) ??
+        (numericTrendyolId ? masterMatches.get(`trendyol:${numericTrendyolId}`) : null) ??
         (bc ? masterMatches.get(`barcode:${bc}`) : null) ??
         (sku ? masterMatches.get(`sku:${sku}`) : null) ??
         null;
@@ -11690,8 +11879,13 @@ app.get('/api/trendyol/products', async (c) => {
           : null,
       };
     });
+    if (matchStatus === 'matched') {
+      dataWithMaster = dataWithMaster.filter((row) => Boolean(row.masterProduct?.isLinked));
+    } else if (matchStatus === 'unmatched') {
+      dataWithMaster = dataWithMaster.filter((row) => !row.masterProduct?.isLinked);
+    }
     const totalRaw = rawObj.totalElements ?? rawObj.total ?? rawObj.totalCount ?? rawObj.count;
-    const totalNum = productName
+    const totalNum = productName || matchStatus === 'matched' || matchStatus === 'unmatched'
       ? dataWithMaster.length
       : typeof totalRaw === 'number' && Number.isFinite(totalRaw)
         ? totalRaw
@@ -11726,17 +11920,32 @@ app.post('/api/trendyol/products/link-master', async (c) => {
     if (!Number.isFinite(masterId) || masterId <= 0) return c.json({ error: 'master_product_id gerekli' }, 400);
     if (!trendyolId) return c.json({ error: 'trendyol_product_id gerekli' }, 400);
     const existing = await c.env.DB
-      .prepare(`SELECT id, brand_id, category_id FROM products WHERE id = ? AND is_deleted = 0 LIMIT 1`)
+      .prepare(`SELECT id, brand_id, category_id, trendyol_product_id FROM products WHERE id = ? AND is_deleted = 0 LIMIT 1`)
       .bind(masterId)
-      .first<{ id: number; brand_id: number | null; category_id: number | null }>();
+      .first<{ id: number; brand_id: number | null; category_id: number | null; trendyol_product_id: string | null }>();
     if (!existing) return c.json({ error: 'Master ürün bulunamadı' }, 404);
+    const productMap = await loadAppSettingsJsonMap(c.env.DB, 'marketplace_trendyol', TRENDYOL_PRODUCT_MAPPINGS_KEY);
+    productMap[trendyolId] = String(masterId);
+    await persistAppSettingsJsonMap(c.env.DB, 'marketplace_trendyol', TRENDYOL_PRODUCT_MAPPINGS_KEY, productMap);
     await c.env.DB
       .prepare(`UPDATE products SET trendyol_product_id = NULL, updated_at = datetime('now') WHERE trendyol_product_id = ? AND id != ? AND is_deleted = 0`)
       .bind(trendyolId, masterId)
       .run();
+    const existingTrendyolId = String(existing.trendyol_product_id ?? '').trim();
     await c.env.DB
-      .prepare(`UPDATE products SET trendyol_product_id = ?, trendyol_category_id = ?, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0`)
+      .prepare(
+        `UPDATE products
+         SET trendyol_product_id = CASE
+             WHEN TRIM(COALESCE(trendyol_product_id, '')) = '' OR TRIM(COALESCE(trendyol_product_id, '')) = ?
+             THEN ?
+             ELSE trendyol_product_id
+           END,
+           trendyol_category_id = ?,
+           updated_at = datetime('now')
+         WHERE id = ? AND is_deleted = 0`
+      )
       .bind(
+        existingTrendyolId,
         trendyolId,
         Number.isFinite(trendyolCategoryId) && Number(trendyolCategoryId) > 0 ? Number(trendyolCategoryId) : null,
         masterId,
@@ -11829,6 +12038,149 @@ app.post('/api/trendyol/categories/link-master', async (c) => {
     return c.json({ ok: true, master_category_id: masterId, trendyol_category_id: trendyolId });
   } catch (err: unknown) {
     return c.json({ error: err instanceof Error ? err.message : 'Kategori eşleştirme kaydedilemedi' }, 500);
+  }
+});
+
+/** Master ürüne bağlı Trendyol ürünleri — fiyat/stok güncelleme modalı için */
+app.get('/api/trendyol/master-products/:masterProductId/linked-products', async (c) => {
+  try {
+    if (!c.env.DB) return c.json({ error: 'DB bulunamadı' }, 500);
+    const masterId = Number(c.req.param('masterProductId'));
+    if (!Number.isFinite(masterId) || masterId <= 0) return c.json({ error: 'Geçerli master ürün ID gerekli' }, 400);
+
+    const master = await c.env.DB.prepare(
+      `SELECT id, name, sku, barcode, trendyol_product_id FROM products WHERE id = ? AND is_deleted = 0 LIMIT 1`
+    ).bind(masterId).first<{ id: number; name: string; sku: string | null; barcode: string | null; trendyol_product_id: string | null }>();
+    if (!master) return c.json({ error: 'Master ürün bulunamadı' }, 404);
+
+    const productMap = await loadAppSettingsJsonMap(c.env.DB, 'marketplace_trendyol', TRENDYOL_PRODUCT_MAPPINGS_KEY);
+    const linkedIds = new Set<string>();
+    for (const [trendyolIdRaw, mappedMasterIdRaw] of Object.entries(productMap)) {
+      const trendyolId = String(trendyolIdRaw ?? '').trim();
+      const mappedMasterId = Number(String(mappedMasterIdRaw ?? '').trim());
+      if (trendyolId && mappedMasterId === masterId) linkedIds.add(trendyolId);
+    }
+    const legacyId = String(master.trendyol_product_id ?? '').trim();
+    if (legacyId) linkedIds.add(legacyId);
+    const ids = [...linkedIds];
+    if (ids.length === 0) return c.json({ product: master, data: [] });
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
+    ).all();
+    const tySettings: Record<string, string> = {};
+    for (const r of results as { key: string; value: string | null }[]) {
+      if (r.key) tySettings[r.key] = r.value ?? '';
+    }
+    const supplierId = tySettings.supplier_id?.trim();
+    const apiKey = tySettings.api_key?.trim();
+    const apiSecret = tySettings.api_secret?.trim();
+    if (!supplierId || !apiKey || !apiSecret) {
+      return c.json({ error: 'Trendyol API ayarları eksik (Satıcı ID, API Key, Secret).' }, 400);
+    }
+    const userAgent = (tySettings.user_agent?.trim() || 'SelfIntegration').slice(0, 30);
+    const env = tySettings.environment?.trim().toLowerCase();
+    const apiUrl = tySettings.api_url?.trim();
+    const base = apiUrl
+      ? apiUrl.replace(/\/+$/, '')
+      : env === 'stage'
+        ? 'https://stageapigw.trendyol.com'
+        : 'https://apigw.trendyol.com';
+    const auth = btoa(`${apiKey}:${apiSecret}`);
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const storeFrontCode = (tySettings.storefront_code || tySettings.store_front_code || 'TR').trim().toUpperCase();
+    const trendyolHeaders: Record<string, string> = {
+      Authorization: 'Basic ' + auth,
+      'User-Agent': `${supplierId} - ${userAgent}`,
+      'Content-Type': 'application/json',
+      'x-clientip': clientIp,
+      'x-correlationid': crypto.randomUUID(),
+      'x-agentname': userAgent,
+      storeFrontCode,
+    };
+    const readDeliveryDuration = (row: Record<string, unknown>): number | null => {
+      const direct = Number(row.deliveryDuration ?? row.delivery_duration);
+      if (Number.isFinite(direct) && direct >= 0) return direct;
+      const deliveryOption = row.deliveryOption;
+      if (deliveryOption && typeof deliveryOption === 'object' && !Array.isArray(deliveryOption)) {
+        const nested = Number((deliveryOption as Record<string, unknown>).deliveryDuration);
+        if (Number.isFinite(nested) && nested >= 0) return nested;
+      }
+      return null;
+    };
+    const normalizeRow = (row: Record<string, unknown>, fallbackId: string) => {
+      const productIdRaw = row.productContentId ?? row.id ?? row.productCode ?? fallbackId;
+      const trendyolProductId = String(productIdRaw ?? fallbackId).trim();
+      return {
+        id: trendyolProductId,
+        trendyol_product_id: trendyolProductId,
+        name: String(row.title ?? row.name ?? row.productName ?? `Trendyol #${fallbackId}`),
+        title: row.title ?? null,
+        barcode: row.barcode ?? null,
+        sku: row.stockCode ?? row.sku ?? null,
+        stockCode: row.stockCode ?? null,
+        salePrice: row.salePrice ?? null,
+        listPrice: row.listPrice ?? null,
+        quantity: row.quantity ?? row.stockQuantity ?? null,
+        deliveryDuration: readDeliveryDuration(row),
+        currency_symbol: '₺',
+        raw: row,
+      };
+    };
+
+    const found = new Map<string, ReturnType<typeof normalizeRow>>();
+    for (const id of ids) {
+      const params = new URLSearchParams({ page: '0', size: '50', productContentId: id });
+      const res = await fetch(`${base}/integration/product/sellers/${supplierId}/products?${params.toString()}`, {
+        method: 'GET',
+        headers: trendyolHeaders,
+      });
+      const text = await res.text();
+      if (!res.ok) continue;
+      let raw: unknown = null;
+      try {
+        raw = text ? JSON.parse(text) : null;
+      } catch {
+        raw = null;
+      }
+      const rawObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      const contentRaw = Array.isArray(rawObj.content)
+        ? rawObj.content
+        : Array.isArray(rawObj.products)
+          ? rawObj.products
+          : Array.isArray(rawObj.data)
+            ? rawObj.data
+            : Array.isArray(raw)
+              ? raw
+              : [];
+      const match = (contentRaw as unknown[]).find((item) => {
+        const row = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+        const candidate = String(row.productContentId ?? row.id ?? row.productCode ?? '').trim();
+        return candidate === id;
+      }) ?? contentRaw[0];
+      if (match && typeof match === 'object' && !Array.isArray(match)) {
+        found.set(id, normalizeRow(match as Record<string, unknown>, id));
+      }
+    }
+
+    const data = ids.map((id) => found.get(id) ?? {
+      id,
+      trendyol_product_id: id,
+      name: `Trendyol #${id}`,
+      title: null,
+      barcode: null,
+      sku: null,
+      stockCode: null,
+      salePrice: null,
+      listPrice: null,
+      quantity: null,
+      deliveryDuration: null,
+      currency_symbol: '₺',
+      raw: null,
+    });
+    return c.json({ product: master, data });
+  } catch (err: unknown) {
+    return c.json({ error: err instanceof Error ? err.message : 'Bağlı Trendyol ürünleri alınamadı' }, 500);
   }
 });
 
@@ -11958,15 +12310,32 @@ app.post('/api/trendyol/products/update-price-stock', async (c) => {
       quantity?: number;
       sale_price?: number;
       list_price?: number;
+      items?: {
+        barcode?: string | null;
+        quantity?: number;
+        sale_price?: number;
+        list_price?: number;
+      }[];
     }>().catch(() => null);
-    const barcode = String(body?.barcode ?? '').trim();
-    const quantity = Math.max(0, Math.floor(Number(body?.quantity)));
-    const salePrice = Math.round(Number(body?.sale_price) * 100) / 100;
-    const listPriceRaw = body?.list_price == null ? salePrice : Math.round(Number(body.list_price) * 100) / 100;
-    if (!barcode) return c.json({ error: 'barcode gerekli' }, 400);
-    if (!Number.isFinite(quantity) || quantity < 0) return c.json({ error: 'Geçerli miktar gerekli' }, 400);
-    if (!Number.isFinite(salePrice) || salePrice <= 0) return c.json({ error: 'Geçerli satış fiyatı gerekli' }, 400);
-    if (!Number.isFinite(listPriceRaw) || listPriceRaw < salePrice) return c.json({ error: 'Liste fiyatı satış fiyatından küçük olamaz' }, 400);
+    const inputItems = Array.isArray(body?.items) && body.items.length > 0
+      ? body.items
+      : body
+        ? [body]
+        : [];
+    const payloadItems = inputItems.map((item) => {
+      const barcode = String(item?.barcode ?? '').trim();
+      const quantity = Math.max(0, Math.floor(Number(item?.quantity)));
+      const salePrice = Math.round(Number(item?.sale_price) * 100) / 100;
+      const listPrice = item?.list_price == null ? salePrice : Math.round(Number(item.list_price) * 100) / 100;
+      return { barcode, quantity, salePrice, listPrice };
+    });
+    if (payloadItems.length === 0) return c.json({ error: 'Güncellenecek ürün gerekli' }, 400);
+    for (const item of payloadItems) {
+      if (!item.barcode) return c.json({ error: 'barcode gerekli' }, 400);
+      if (!Number.isFinite(item.quantity) || item.quantity < 0) return c.json({ error: 'Geçerli miktar gerekli' }, 400);
+      if (!Number.isFinite(item.salePrice) || item.salePrice <= 0) return c.json({ error: 'Geçerli satış fiyatı gerekli' }, 400);
+      if (!Number.isFinite(item.listPrice) || item.listPrice < item.salePrice) return c.json({ error: 'Liste fiyatı satış fiyatından küçük olamaz' }, 400);
+    }
 
     const { results } = await c.env.DB.prepare(
       `SELECT key, value FROM app_settings WHERE category = 'marketplace_trendyol' AND is_deleted = 0 AND (status = 1 OR status IS NULL)`,
@@ -11991,6 +12360,7 @@ app.post('/api/trendyol/products/update-price-stock', async (c) => {
         : 'https://apigw.trendyol.com';
     const auth = btoa(`${apiKey}:${apiSecret}`);
     const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '0.0.0.0';
+    const storeFrontCode = (tySettings.storefront_code || tySettings.store_front_code || 'TR').trim().toUpperCase();
     const trendyolHeaders: Record<string, string> = {
       Authorization: 'Basic ' + auth,
       'User-Agent': `${supplierId} - ${userAgent}`,
@@ -11998,14 +12368,10 @@ app.post('/api/trendyol/products/update-price-stock', async (c) => {
       'x-clientip': clientIp,
       'x-correlationid': crypto.randomUUID(),
       'x-agentname': userAgent,
+      storeFrontCode,
     };
     const payload = {
-      items: [{
-        barcode,
-        quantity,
-        salePrice,
-        listPrice: listPriceRaw,
-      }],
+      items: payloadItems,
     };
     const res = await fetch(`${base}/integration/inventory/sellers/${supplierId}/products/price-and-inventory`, {
       method: 'POST',

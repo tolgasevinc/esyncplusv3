@@ -47,6 +47,23 @@ export async function fetchTrendyolBrands(query: string): Promise<TrendyolBrandR
   return Array.isArray(data.brands) ? data.brands : []
 }
 
+export async function fetchTrendyolProductFilterOptions(): Promise<{
+  brands: TrendyolBrandRow[]
+  categories: TrendyolCategoryFlatRow[]
+}> {
+  const res = await fetch(`${API_URL}/api/trendyol/product-filter-options`)
+  const data = await parseJsonResponse<{
+    brands?: TrendyolBrandRow[]
+    categories?: TrendyolCategoryFlatRow[]
+    error?: string
+  }>(res)
+  if (!res.ok) throw new Error(data.error || 'Trendyol ürün filtre seçenekleri alınamadı')
+  return {
+    brands: Array.isArray(data.brands) ? data.brands : [],
+    categories: Array.isArray(data.categories) ? data.categories : [],
+  }
+}
+
 export async function linkTrendyolProductToMaster(
   masterProductId: number,
   trendyolProductId: string | number,
@@ -138,6 +155,55 @@ export async function updateTrendyolPriceStock(body: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+  const data = await parseJsonResponse<{ error?: string; detail?: string }>(res)
+  if (!res.ok) throw new Error(data.detail ? `${data.error || 'Güncelleme başarısız'} ${data.detail}` : data.error || 'Güncelleme başarısız')
+}
+
+export type TrendyolLinkedProduct = {
+  id: string
+  trendyol_product_id: string
+  name: string
+  title?: string | null
+  barcode?: string | null
+  sku?: string | null
+  stockCode?: string | null
+  salePrice?: number | null
+  listPrice?: number | null
+  quantity?: number | null
+  deliveryDuration?: number | null
+  currency_symbol?: string | null
+}
+
+export async function fetchTrendyolLinkedProducts(masterProductId: number): Promise<{
+  product?: { id: number; name: string; sku?: string | null; barcode?: string | null }
+  data: TrendyolLinkedProduct[]
+}> {
+  const res = await fetch(`${API_URL}/api/trendyol/master-products/${masterProductId}/linked-products`)
+  const data = await parseJsonResponse<{
+    product?: { id: number; name: string; sku?: string | null; barcode?: string | null }
+    data?: TrendyolLinkedProduct[]
+    error?: string
+  }>(res)
+  if (!res.ok) throw new Error(data.error || 'Bağlı Trendyol ürünleri alınamadı')
+  return {
+    product: data.product,
+    data: Array.isArray(data.data) ? data.data : [],
+  }
+}
+
+export async function updateTrendyolPriceStockBulk(
+  items: {
+    barcode: string
+    quantity: number
+    sale_price: number
+    list_price?: number
+  }[]
+): Promise<void> {
+  const res = await fetch(`${API_URL}/api/trendyol/products/update-price-stock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
   })
   const data = await parseJsonResponse<{ error?: string; detail?: string }>(res)
   if (!res.ok) throw new Error(data.detail ? `${data.error || 'Güncelleme başarısız'} ${data.detail}` : data.error || 'Güncelleme başarısız')

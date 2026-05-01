@@ -85,6 +85,11 @@ import {
   type CalculationRule,
 } from '@/lib/calculations'
 import { ProductImportModal } from './ProductImportModal'
+import {
+  fetchTrendyolLinkedProducts,
+  updateTrendyolPriceStockBulk,
+  type TrendyolLinkedProduct,
+} from '@/lib/trendyol-api'
 
 /** Dinamik arka plan rengi - style attribute yerine ref ile CSS değişkeni atar (linter uyumlu) */
 const DynamicBgSpan = forwardRef<HTMLSpanElement, { color: string; className?: string } & ComponentPropsWithoutRef<'span'>>(
@@ -163,6 +168,12 @@ interface Product {
   trendyol_product_id?: string | null
   /** Kayıtlı Trendyol kategori ID */
   trendyol_category_id?: number | null
+  /** Yeni çoklu Trendyol mapping sayısı */
+  trendyol_match_count?: number | null
+}
+
+type TrendyolLinkedProductDraft = TrendyolLinkedProduct & {
+  selected: boolean
 }
 
 /** Kayıt sonrası GET /api/products/:id yanıtını liste satırına çevirir; eksik marka/tip adlarını seçeneklerden tamamlar. */
@@ -230,6 +241,20 @@ function IdeasoftMark({ className }: { className?: string }) {
         i
       </text>
     </svg>
+  )
+}
+
+/** Trendyol sütun ikonu — sidebar ikonu yoksa gösterilir */
+function TrendyolMark({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex h-8 w-8 items-center justify-center rounded-md bg-orange-500 text-[11px] font-bold text-white',
+        className
+      )}
+    >
+      TY
+    </span>
   )
 }
 
@@ -556,7 +581,7 @@ const productsListDefaults = {
   filterTypeId: '' as string,
   filterNoImage: false,
   /** Ürün listesi: eşleştirme sütunu sunucu filtresi */
-  filterIntegration: '' as '' | 'parasut' | 'ideasoft',
+  filterIntegration: '' as '' | 'parasut' | 'ideasoft' | 'trendyol',
   sortBy: 'created_at' as SortBy,
   sortOrder: 'desc' as SortOrder,
   page: 1,
@@ -733,6 +758,15 @@ export function ProductsPage() {
   const [matchedParasutSkus, setMatchedParasutSkus] = useState<Set<string>>(new Set())
   const [parasutIconSrc, setParasutIconSrc] = useState<string | undefined>()
   const [ideasoftIconSrc, setIdeasoftIconSrc] = useState<string | undefined>()
+  const [trendyolLinkedModalOpen, setTrendyolLinkedModalOpen] = useState(false)
+  const [trendyolLinkedProduct, setTrendyolLinkedProduct] = useState<Product | null>(null)
+  const [trendyolLinkedRows, setTrendyolLinkedRows] = useState<TrendyolLinkedProductDraft[]>([])
+  const [trendyolLinkedLoading, setTrendyolLinkedLoading] = useState(false)
+  const [trendyolLinkedSaving, setTrendyolLinkedSaving] = useState(false)
+  const [trendyolLinkedError, setTrendyolLinkedError] = useState<string | null>(null)
+  const [trendyolLinkedQuantity, setTrendyolLinkedQuantity] = useState('')
+  const [trendyolLinkedSalePrice, setTrendyolLinkedSalePrice] = useState('')
+  const [trendyolLinkedListPrice, setTrendyolLinkedListPrice] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkModal, setBulkModal] = useState<
     'category' | 'type' | 'itemGroup' | 'brand' | 'unit' | 'tax' | 'quantity' | 'seoAi' | null
@@ -1493,7 +1527,7 @@ export function ProductsPage() {
       if (filterGroupId) params.set('filter_group_id', filterGroupId)
       if (filterTypeId) params.set('filter_type_id', effectiveFilterTypeId)
       if (filterNoImage) params.set('filter_no_image', '1')
-      if (filterIntegration === 'parasut' || filterIntegration === 'ideasoft') {
+      if (filterIntegration === 'parasut' || filterIntegration === 'ideasoft' || filterIntegration === 'trendyol') {
         params.set('filter_integration', filterIntegration)
       }
       const res = await fetch(`${API_URL}/api/products?${params}`)
@@ -1523,6 +1557,89 @@ export function ProductsPage() {
     effectiveFilterTypeId,
     filterNoImage,
     filterIntegration,
+  ])
+
+  const openTrendyolLinkedModal = useCallback(async (product: Product) => {
+    setTrendyolLinkedProduct(product)
+    setTrendyolLinkedModalOpen(true)
+    setTrendyolLinkedLoading(true)
+    setTrendyolLinkedError(null)
+    setTrendyolLinkedRows([])
+    setTrendyolLinkedQuantity(String(product.quantity ?? 0))
+    setTrendyolLinkedSalePrice(String(product.ecommerce_price ?? product.price ?? ''))
+    setTrendyolLinkedListPrice(String(product.ecommerce_price ?? product.price ?? ''))
+    try {
+      const result = await fetchTrendyolLinkedProducts(product.id)
+      setTrendyolLinkedRows(
+        result.data.map((row) => ({
+          ...row,
+          selected: Boolean(row.barcode),
+        }))
+      )
+    } catch (err) {
+      setTrendyolLinkedError(err instanceof Error ? err.message : 'Bağlı Trendyol ürünleri alınamadı')
+    } finally {
+      setTrendyolLinkedLoading(false)
+    }
+  }, [])
+
+  const updateTrendyolLinkedRow = useCallback(
+    (trendyolProductId: string, updater: (row: TrendyolLinkedProductDraft) => TrendyolLinkedProductDraft) => {
+      setTrendyolLinkedRows((prev) =>
+        prev.map((row) => (row.trendyol_product_id === trendyolProductId ? updater(row) : row))
+      )
+    },
+    []
+  )
+
+  const saveTrendyolLinkedUpdates = useCallback(async () => {
+    const selectedRows = trendyolLinkedRows.filter((row) => row.selected)
+    if (selectedRows.length === 0) {
+      toastWarning('Ürün seçilmedi', 'Güncellenecek en az bir Trendyol ürünü seçin.')
+      return
+    }
+    const quantity = Math.max(0, Math.floor(parseDecimal(trendyolLinkedQuantity)))
+    const salePrice = parseDecimal(trendyolLinkedSalePrice)
+    const listPrice = parseDecimal(trendyolLinkedListPrice)
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      toastError('Stok hatalı', 'Geçerli stok miktarı girin.')
+      return
+    }
+    if (!Number.isFinite(salePrice) || salePrice <= 0) {
+      toastError('Fiyat hatalı', 'Geçerli satış fiyatı girin.')
+      return
+    }
+    if (!Number.isFinite(listPrice) || listPrice < salePrice) {
+      toastError('Liste fiyatı hatalı', 'Liste fiyatı satış fiyatından küçük olamaz.')
+      return
+    }
+    const items = selectedRows.map((row) => ({
+      barcode: String(row.barcode ?? '').trim(),
+      quantity,
+      sale_price: salePrice,
+      list_price: listPrice,
+    }))
+    if (items.some((item) => !item.barcode)) {
+      toastError('Barkod eksik', 'Seçili Trendyol ürünlerinde barkod bulunmalı.')
+      return
+    }
+    setTrendyolLinkedSaving(true)
+    try {
+      await updateTrendyolPriceStockBulk(items)
+      toastSuccess('Trendyol güncellendi', `${items.length} bağlı ürün için fiyat/stok gönderildi.`)
+      if (trendyolLinkedProduct) void openTrendyolLinkedModal(trendyolLinkedProduct)
+    } catch (err) {
+      toastError('Trendyol güncellenemedi', err)
+    } finally {
+      setTrendyolLinkedSaving(false)
+    }
+  }, [
+    openTrendyolLinkedModal,
+    trendyolLinkedListPrice,
+    trendyolLinkedProduct,
+    trendyolLinkedQuantity,
+    trendyolLinkedRows,
+    trendyolLinkedSalePrice,
   ])
 
   const lookupSupplierCodeRef = useRef<(() => Promise<void>) | null>(null)
@@ -3079,7 +3196,7 @@ export function ProductsPage() {
                               <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent>Eşleştirme (tedarikçi / Paraşüt / IdeaSoft)</TooltipContent>
+                          <TooltipContent>Eşleştirme (tedarikçi / Paraşüt / IdeaSoft / Trendyol)</TooltipContent>
                         </Tooltip>
                         <span className="text-xs font-medium leading-none">Eşleştirme</span>
                       </div>
@@ -3127,6 +3244,16 @@ export function ProductsPage() {
                               )}
                             >
                               IdeaSoft
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setListState({ filterIntegration: 'trendyol', page: 1 })}
+                              className={cn(
+                                'w-full text-left px-3 py-2 text-sm hover:bg-muted',
+                                filterIntegration === 'trendyol' && 'bg-accent'
+                              )}
+                            >
+                              Trendyol
                             </button>
                           </div>
                         </PopoverContent>
@@ -3315,7 +3442,11 @@ export function ProductsPage() {
                           const hasIdeasoft =
                             item.ideasoft_product_id != null &&
                             Number(item.ideasoft_product_id) > 0
-                          if (!isSupplierMatched && !showParasut && !hasIdeasoft) {
+                          const trendyolMatchCount =
+                            Number(item.trendyol_match_count ?? 0) ||
+                            (item.trendyol_product_id?.trim() ? 1 : 0)
+                          const hasTrendyol = trendyolMatchCount > 0
+                          if (!isSupplierMatched && !showParasut && !hasIdeasoft && !hasTrendyol) {
                             return <span className="text-muted-foreground">—</span>
                           }
                           return (
@@ -3382,6 +3513,23 @@ export function ProductsPage() {
                                     </div>
                                   </TooltipTrigger>
                                   <TooltipContent>IdeaSoft ürün #{item.ideasoft_product_id}</TooltipContent>
+                                </Tooltip>
+                              )}
+                              {hasTrendyol && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="flex items-center justify-center shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                                      onClick={() => void openTrendyolLinkedModal(item)}
+                                      aria-label={`Trendyol eşleşmeleri: ${trendyolMatchCount}`}
+                                    >
+                                      <TrendyolMark />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    Trendyol: {trendyolMatchCount} eşleşme
+                                  </TooltipContent>
                                 </Tooltip>
                               )}
                             </div>
@@ -4394,6 +4542,130 @@ export function ProductsPage() {
             </Button>
             <Button type="button" variant="save" onClick={saveEcommerceAiRules}>
               Kaydet
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={trendyolLinkedModalOpen} onOpenChange={setTrendyolLinkedModalOpen}>
+        <DialogContent className="max-w-5xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-3 shrink-0">
+            <DialogTitle>Trendyol bağlı ürünler</DialogTitle>
+            <DialogDescription>
+              {trendyolLinkedProduct
+                ? `${trendyolLinkedProduct.name} için bağlı Trendyol ürünlerinde fiyat ve stok güncelleyin. Teslim süresi yalnızca görüntülenir.`
+                : 'Bağlı Trendyol ürünlerini güncelleyin.'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-y-auto border-y border-border px-6 py-4">
+            {trendyolLinkedLoading ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Bağlı Trendyol ürünleri yükleniyor…</div>
+            ) : trendyolLinkedError ? (
+              <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                {trendyolLinkedError}
+              </p>
+            ) : trendyolLinkedRows.length === 0 ? (
+              <p className="rounded-md border border-border bg-muted/30 px-3 py-8 text-center text-sm text-muted-foreground">
+                Bu master ürüne bağlı Trendyol ürünü bulunamadı.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-3 rounded-md border border-border bg-muted/30 p-3 sm:grid-cols-3">
+                  <div className="space-y-1">
+                    <Label htmlFor="trendyol-linked-quantity">Tümüne stok</Label>
+                    <Input
+                      id="trendyol-linked-quantity"
+                      value={trendyolLinkedQuantity}
+                      disabled={trendyolLinkedSaving}
+                      onChange={(e) => setTrendyolLinkedQuantity(e.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="trendyol-linked-sale-price">Tümüne satış fiyatı</Label>
+                    <Input
+                      id="trendyol-linked-sale-price"
+                      value={trendyolLinkedSalePrice}
+                      disabled={trendyolLinkedSaving}
+                      onChange={(e) => setTrendyolLinkedSalePrice(e.target.value)}
+                      inputMode="decimal"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="trendyol-linked-list-price">Tümüne liste fiyatı</Label>
+                    <Input
+                      id="trendyol-linked-list-price"
+                      value={trendyolLinkedListPrice}
+                      disabled={trendyolLinkedSaving}
+                      onChange={(e) => setTrendyolLinkedListPrice(e.target.value)}
+                      inputMode="decimal"
+                    />
+                  </div>
+                </div>
+                <div className="overflow-x-auto rounded-md border border-border">
+                  <table className="w-full min-w-[760px] text-sm">
+                    <thead className="bg-muted/60 text-left text-muted-foreground">
+                      <tr>
+                        <th className="w-12 p-2 font-medium">Seç</th>
+                        <th className="p-2 font-medium">Trendyol ürün</th>
+                        <th className="p-2 font-medium">Barkod / SKU</th>
+                        <th className="w-28 p-2 font-medium text-right">Mevcut stok</th>
+                        <th className="w-36 p-2 font-medium text-right">Mevcut fiyat</th>
+                        <th className="w-32 p-2 font-medium text-right">Teslim süresi</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trendyolLinkedRows.map((row) => (
+                        <tr key={row.trendyol_product_id} className="border-t border-border/60">
+                          <td className="p-2 align-middle">
+                            <Checkbox
+                              checked={row.selected}
+                              disabled={!row.barcode || trendyolLinkedSaving}
+                              onCheckedChange={(checked) =>
+                                updateTrendyolLinkedRow(row.trendyol_product_id, (current) => ({
+                                  ...current,
+                                  selected: checked === true,
+                                }))
+                              }
+                              aria-label={`${row.name} güncellensin`}
+                            />
+                          </td>
+                          <td className="p-2 align-middle">
+                            <div className="font-medium">{row.name}</div>
+                            <div className="text-xs text-muted-foreground">TY #{row.trendyol_product_id}</div>
+                          </td>
+                          <td className="p-2 align-middle font-mono text-xs text-muted-foreground">
+                            <div>Barkod: {row.barcode || '—'}</div>
+                            <div>SKU: {row.stockCode || row.sku || '—'}</div>
+                          </td>
+                          <td className="p-2 align-middle text-right tabular-nums text-muted-foreground">
+                            {row.quantity ?? '—'}
+                          </td>
+                          <td className="p-2 align-middle text-right tabular-nums text-muted-foreground">
+                            {row.salePrice != null ? `${row.salePrice} ${row.currency_symbol || '₺'}` : '—'}
+                          </td>
+                          <td className="p-2 align-middle text-right text-muted-foreground">
+                            {row.deliveryDuration != null ? `${row.deliveryDuration} gün` : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2 px-6 py-4 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => setTrendyolLinkedModalOpen(false)}>
+              Kapat
+            </Button>
+            <Button
+              type="button"
+              variant="update"
+              onClick={() => void saveTrendyolLinkedUpdates()}
+              disabled={trendyolLinkedLoading || trendyolLinkedSaving || trendyolLinkedRows.every((row) => !row.selected)}
+            >
+              {trendyolLinkedSaving ? 'Güncelleniyor…' : 'Güncelle'}
             </Button>
           </DialogFooter>
         </DialogContent>
